@@ -41,7 +41,7 @@ const RULE_TYPES = [
 export default function CommissionsPage() {
   const [rules, setRules] = useState([]);
   const [agencies, setAgencies] = useState([]);
-  const [selectedAgency, setSelectedAgency] = useState('');
+  const [selectedAgency, setSelectedAgency] = useState('all');
   const [loading, setLoading] = useState(true);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [editingRule, setEditingRule] = useState(null);
@@ -57,7 +57,7 @@ export default function CommissionsPage() {
   const fetchData = useCallback(async () => {
     try {
       const [rulesRes, agenciesRes] = await Promise.all([
-        commissionRulesApi.getAll(selectedAgency || undefined),
+        commissionRulesApi.getAll(selectedAgency !== 'all' ? selectedAgency : undefined),
         agenciesApi.getAll()
       ]);
       setRules(rulesRes.data);
@@ -163,7 +163,7 @@ export default function CommissionsPage() {
               <SelectValue placeholder="Todas las agencias" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="">Todas las agencias</SelectItem>
+              <SelectItem value="all">Todas las agencias</SelectItem>
               {agencies.map((agency) => (
                 <SelectItem key={agency.id} value={agency.id}>
                   {agency.name}

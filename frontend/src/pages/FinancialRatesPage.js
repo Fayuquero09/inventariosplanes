@@ -203,14 +203,14 @@ export default function FinancialRatesPage() {
               <div className="space-y-2">
                 <Label htmlFor="brand_id">Marca (opcional)</Label>
                 <Select
-                  value={formData.brand_id}
-                  onValueChange={(value) => setFormData({ ...formData, brand_id: value })}
+                  value={formData.brand_id || 'none'}
+                  onValueChange={(value) => setFormData({ ...formData, brand_id: value === 'none' ? '' : value })}
                 >
                   <SelectTrigger data-testid="rate-brand-select">
                     <SelectValue placeholder="Aplica a todas" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">Aplica a todas</SelectItem>
+                    <SelectItem value="none">Aplica a todas</SelectItem>
                     {brands.filter((b) => b.group_id === formData.group_id).map((brand) => (
                       <SelectItem key={brand.id} value={brand.id}>
                         {brand.name}
@@ -222,14 +222,14 @@ export default function FinancialRatesPage() {
               <div className="space-y-2">
                 <Label htmlFor="agency_id">Agencia (opcional)</Label>
                 <Select
-                  value={formData.agency_id}
-                  onValueChange={(value) => setFormData({ ...formData, agency_id: value })}
+                  value={formData.agency_id || 'none'}
+                  onValueChange={(value) => setFormData({ ...formData, agency_id: value === 'none' ? '' : value })}
                 >
                   <SelectTrigger data-testid="rate-agency-select">
                     <SelectValue placeholder="Aplica a todas" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">Aplica a todas</SelectItem>
+                    <SelectItem value="none">Aplica a todas</SelectItem>
                     {agencies.filter((a) => !formData.brand_id || a.brand_id === formData.brand_id).map((agency) => (
                       <SelectItem key={agency.id} value={agency.id}>
                         {agency.name}

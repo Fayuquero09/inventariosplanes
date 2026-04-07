@@ -58,9 +58,9 @@ export default function InventoryPage() {
   const [agencies, setAgencies] = useState([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
-  const [filterAgency, setFilterAgency] = useState('');
-  const [filterStatus, setFilterStatus] = useState('');
-  const [filterType, setFilterType] = useState('');
+  const [filterAgency, setFilterAgency] = useState('all');
+  const [filterStatus, setFilterStatus] = useState('all');
+  const [filterType, setFilterType] = useState('all');
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
   const [newVehicle, setNewVehicle] = useState({
@@ -78,9 +78,9 @@ export default function InventoryPage() {
     try {
       const [vehiclesRes, agenciesRes] = await Promise.all([
         vehiclesApi.getAll({
-          agency_id: filterAgency || undefined,
-          status: filterStatus || undefined,
-          vehicle_type: filterType || undefined
+          agency_id: filterAgency !== 'all' ? filterAgency : undefined,
+          status: filterStatus !== 'all' ? filterStatus : undefined,
+          vehicle_type: filterType !== 'all' ? filterType : undefined
         }),
         agenciesApi.getAll()
       ]);
@@ -341,7 +341,7 @@ export default function InventoryPage() {
                 <SelectValue placeholder="Todas las agencias" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="">Todas las agencias</SelectItem>
+                <SelectItem value="all">Todas las agencias</SelectItem>
                 {agencies.map((agency) => (
                   <SelectItem key={agency.id} value={agency.id}>
                     {agency.name}
@@ -354,7 +354,7 @@ export default function InventoryPage() {
                 <SelectValue placeholder="Todos los estados" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="">Todos los estados</SelectItem>
+                <SelectItem value="all">Todos los estados</SelectItem>
                 <SelectItem value="in_stock">En Stock</SelectItem>
                 <SelectItem value="sold">Vendido</SelectItem>
                 <SelectItem value="transferred">Transferido</SelectItem>
@@ -365,7 +365,7 @@ export default function InventoryPage() {
                 <SelectValue placeholder="Todos los tipos" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="">Todos los tipos</SelectItem>
+                <SelectItem value="all">Todos los tipos</SelectItem>
                 <SelectItem value="new">Nuevos</SelectItem>
                 <SelectItem value="used">Seminuevos</SelectItem>
               </SelectContent>
