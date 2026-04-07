@@ -72,15 +72,19 @@ Sistema web para conectar inventario de vehículos nuevos y seminuevos de difere
 - [x] Sales Objectives CRUD API
 - [x] Commission Rules CRUD API (4 types)
 - [x] Sales CRUD API with commission calculation
-- [x] Dashboard KPIs endpoint
-- [x] Sales trends endpoint
+- [x] Dashboard KPIs endpoint with hierarchical filters
+- [x] Sales trends endpoint with hierarchical filters
 - [x] Seller performance endpoint
+- [x] Sellers endpoint (by agency/brand/group)
 - [x] Smart suggestions endpoint
 - [x] CSV/Excel import for vehicles and sales
 
 ### Frontend (React + Shadcn UI)
 - [x] Login page with JWT + Google OAuth
-- [x] Dashboard with KPIs, charts, aging distribution
+- [x] Dashboard with hierarchical filters (Group → Brand → Agency → Seller)
+- [x] Dashboard KPIs, charts, aging distribution
+- [x] Seller-specific view when viewing by seller
+- [x] Filter breadcrumb showing current selection
 - [x] Inventory page with filters and search
 - [x] Financial Rates management page
 - [x] Sales Objectives page with progress tracking
