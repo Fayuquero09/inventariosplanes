@@ -547,16 +547,27 @@ async def get_groups(request: Request):
     current_user = await get_current_user(request)
     
     query = {}
+    # Super admin y super users pueden ver todos los grupos
+    # Otros roles solo ven su grupo asignado
     if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.APP_USER]:
         if current_user.get("group_id"):
             query["_id"] = ObjectId(current_user["group_id"])
+        else:
+            # Si no tiene grupo asignado, no ve ninguno
+            return []
     
     groups = await db.groups.find(query).to_list(1000)
     return [serialize_doc(g) for g in groups]
 
 @api_router.get("/groups/{group_id}")
 async def get_group(group_id: str, request: Request):
-    await get_current_user(request)
+    current_user = await get_current_user(request)
+    
+    # Verificar acceso al grupo
+    if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.APP_USER]:
+        if current_user.get("group_id") != group_id:
+            raise HTTPException(status_code=403, detail="No tienes acceso a este grupo")
+    
     group = await db.groups.find_one({"_id": ObjectId(group_id)})
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
@@ -595,10 +606,22 @@ async def get_brands(request: Request, group_id: Optional[str] = None):
     current_user = await get_current_user(request)
     
     query = {}
-    if group_id:
-        query["group_id"] = group_id
-    elif current_user.get("group_id"):
-        query["group_id"] = current_user["group_id"]
+    
+    # Super admin y super users pueden ver todas las marcas o filtrar por grupo
+    if current_user["role"] in [UserRole.APP_ADMIN, UserRole.APP_USER]:
+        if group_id:
+            query["group_id"] = group_id
+    else:
+        # Otros roles solo ven marcas de su grupo
+        user_group_id = current_user.get("group_id")
+        if not user_group_id:
+            return []
+        
+        # Si se pasa un group_id, verificar que sea el suyo
+        if group_id and group_id != user_group_id:
+            raise HTTPException(status_code=403, detail="No tienes acceso a las marcas de este grupo")
+        
+        query["group_id"] = user_group_id
     
     brands = await db.brands.find(query).to_list(1000)
     return [serialize_doc(b) for b in brands]
@@ -643,12 +666,27 @@ async def get_agencies(request: Request, brand_id: Optional[str] = None, group_i
     current_user = await get_current_user(request)
     
     query = {}
-    if brand_id:
-        query["brand_id"] = brand_id
-    if group_id:
-        query["group_id"] = group_id
-    elif current_user.get("group_id"):
-        query["group_id"] = current_user["group_id"]
+    
+    # Super admin y super users pueden ver todas las agencias o filtrar
+    if current_user["role"] in [UserRole.APP_ADMIN, UserRole.APP_USER]:
+        if brand_id:
+            query["brand_id"] = brand_id
+        if group_id:
+            query["group_id"] = group_id
+    else:
+        # Otros roles solo ven agencias de su grupo
+        user_group_id = current_user.get("group_id")
+        if not user_group_id:
+            return []
+        
+        # Si se pasa un group_id, verificar que sea el suyo
+        if group_id and group_id != user_group_id:
+            raise HTTPException(status_code=403, detail="No tienes acceso a las agencias de este grupo")
+        
+        query["group_id"] = user_group_id
+        
+        if brand_id:
+            query["brand_id"] = brand_id
     
     agencies = await db.agencies.find(query).to_list(1000)
     
@@ -863,14 +901,32 @@ async def get_vehicles(
     current_user = await get_current_user(request)
     
     query = {}
-    if agency_id:
-        query["agency_id"] = agency_id
-    if brand_id:
-        query["brand_id"] = brand_id
-    if group_id:
-        query["group_id"] = group_id
-    elif current_user.get("group_id"):
-        query["group_id"] = current_user["group_id"]
+    
+    # Super admin y super users pueden ver todos los vehículos o filtrar
+    if current_user["role"] in [UserRole.APP_ADMIN, UserRole.APP_USER]:
+        if agency_id:
+            query["agency_id"] = agency_id
+        if brand_id:
+            query["brand_id"] = brand_id
+        if group_id:
+            query["group_id"] = group_id
+    else:
+        # Otros roles solo ven vehículos de su grupo
+        user_group_id = current_user.get("group_id")
+        if not user_group_id:
+            return []
+        
+        # Si se pasa un group_id, verificar que sea el suyo
+        if group_id and group_id != user_group_id:
+            raise HTTPException(status_code=403, detail="No tienes acceso a los vehículos de este grupo")
+        
+        query["group_id"] = user_group_id
+        
+        if agency_id:
+            query["agency_id"] = agency_id
+        if brand_id:
+            query["brand_id"] = brand_id
+    
     if status:
         query["status"] = status
     if vehicle_type:
@@ -1187,14 +1243,37 @@ async def get_dashboard_kpis(
     current_user = await get_current_user(request)
     
     query = {}
-    if agency_id:
-        query["agency_id"] = agency_id
-    elif brand_id:
-        query["brand_id"] = brand_id
-    elif group_id:
-        query["group_id"] = group_id
-    elif current_user.get("group_id"):
-        query["group_id"] = current_user["group_id"]
+    
+    # Super admin y super users pueden ver todos los datos o filtrar
+    if current_user["role"] in [UserRole.APP_ADMIN, UserRole.APP_USER]:
+        if agency_id:
+            query["agency_id"] = agency_id
+        elif brand_id:
+            query["brand_id"] = brand_id
+        elif group_id:
+            query["group_id"] = group_id
+        # Si no hay filtro, ve todo
+    else:
+        # Otros roles solo ven datos de su grupo
+        user_group_id = current_user.get("group_id")
+        if not user_group_id:
+            return {
+                "total_vehicles": 0, "total_value": 0, "total_financial_cost": 0,
+                "avg_aging_days": 0, "aging_buckets": {"0-30": 0, "31-60": 0, "61-90": 0, "90+": 0},
+                "units_sold_month": 0, "revenue_month": 0, "commissions_month": 0,
+                "new_vehicles": 0, "used_vehicles": 0
+            }
+        
+        # Si se pasa un group_id, verificar que sea el suyo
+        if group_id and group_id != user_group_id:
+            raise HTTPException(status_code=403, detail="No tienes acceso a los datos de este grupo")
+        
+        query["group_id"] = user_group_id
+        
+        if agency_id:
+            query["agency_id"] = agency_id
+        elif brand_id:
+            query["brand_id"] = brand_id
     
     # Get vehicles in stock
     in_stock_query = {**query, "status": "in_stock"}
@@ -1262,14 +1341,30 @@ async def get_sales_trends(
     current_user = await get_current_user(request)
     
     query = {}
-    if agency_id:
-        query["agency_id"] = agency_id
-    elif brand_id:
-        query["brand_id"] = brand_id
-    elif group_id:
-        query["group_id"] = group_id
-    elif current_user.get("group_id"):
-        query["group_id"] = current_user["group_id"]
+    
+    # Super admin y super users pueden ver todos los datos o filtrar
+    if current_user["role"] in [UserRole.APP_ADMIN, UserRole.APP_USER]:
+        if agency_id:
+            query["agency_id"] = agency_id
+        elif brand_id:
+            query["brand_id"] = brand_id
+        elif group_id:
+            query["group_id"] = group_id
+    else:
+        # Otros roles solo ven datos de su grupo
+        user_group_id = current_user.get("group_id")
+        if not user_group_id:
+            return []
+        
+        if group_id and group_id != user_group_id:
+            raise HTTPException(status_code=403, detail="No tienes acceso a los datos de este grupo")
+        
+        query["group_id"] = user_group_id
+        
+        if agency_id:
+            query["agency_id"] = agency_id
+        elif brand_id:
+            query["brand_id"] = brand_id
     
     if seller_id:
         query["seller_id"] = seller_id

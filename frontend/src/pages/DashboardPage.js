@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
+import { useAuth } from '../contexts/AuthContext';
 import { dashboardApi, vehiclesApi, groupsApi, brandsApi, agenciesApi, sellersApi } from '../lib/api';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
@@ -115,6 +116,7 @@ function FilterBreadcrumb({ group, brand, agency, seller }) {
 }
 
 export default function DashboardPage() {
+  const { user } = useAuth();
   const [kpis, setKpis] = useState(null);
   const [trends, setTrends] = useState([]);
   const [suggestions, setSuggestions] = useState([]);
@@ -133,6 +135,10 @@ export default function DashboardPage() {
   const [selectedAgency, setSelectedAgency] = useState('all');
   const [selectedSeller, setSelectedSeller] = useState('all');
 
+  // Check if user is super admin/user (can see all groups)
+  const isSuperUser = user?.role === 'app_admin' || user?.role === 'app_user';
+  const canSelectGroup = isSuperUser && groups.length > 1;
+
   // Load filter options
   useEffect(() => {
     const loadFilterOptions = async () => {
@@ -145,12 +151,17 @@ export default function DashboardPage() {
         setGroups(groupsRes.data);
         setBrands(brandsRes.data);
         setAgencies(agenciesRes.data);
+        
+        // Si el usuario no es super user y solo tiene un grupo, seleccionarlo automáticamente
+        if (!isSuperUser && groupsRes.data.length === 1) {
+          setSelectedGroup(groupsRes.data[0].id);
+        }
       } catch (error) {
         console.error('Error loading filter options:', error);
       }
     };
     loadFilterOptions();
-  }, []);
+  }, [isSuperUser]);
 
   // Load sellers when agency changes
   useEffect(() => {
@@ -272,25 +283,39 @@ export default function DashboardPage() {
       <Card className="border-border/40">
         <CardContent className="p-4">
           <div className="flex flex-wrap gap-3">
-            {/* Group Filter */}
-            <div className="flex flex-col gap-1">
-              <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
-                <Buildings size={12} /> Grupo
-              </label>
-              <Select value={selectedGroup} onValueChange={setSelectedGroup}>
-                <SelectTrigger className="w-[180px]" data-testid="filter-group">
-                  <SelectValue placeholder="Todos los grupos" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">Todos los grupos</SelectItem>
-                  {groups.map((group) => (
-                    <SelectItem key={group.id} value={group.id}>
-                      {group.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+            {/* Group Filter - Solo visible para super users con múltiples grupos */}
+            {canSelectGroup && (
+              <div className="flex flex-col gap-1">
+                <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
+                  <Buildings size={12} /> Grupo
+                </label>
+                <Select value={selectedGroup} onValueChange={setSelectedGroup}>
+                  <SelectTrigger className="w-[180px]" data-testid="filter-group">
+                    <SelectValue placeholder="Todos los grupos" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">Todos los grupos</SelectItem>
+                    {groups.map((group) => (
+                      <SelectItem key={group.id} value={group.id}>
+                        {group.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+
+            {/* Si no es super user, mostrar el nombre del grupo */}
+            {!canSelectGroup && groups.length === 1 && (
+              <div className="flex flex-col gap-1">
+                <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
+                  <Buildings size={12} /> Grupo
+                </label>
+                <div className="h-10 px-3 py-2 rounded-md border border-border bg-muted/30 flex items-center text-sm font-medium">
+                  {groups[0]?.name}
+                </div>
+              </div>
+            )}
 
             {/* Brand Filter */}
             <div className="flex flex-col gap-1">
@@ -300,7 +325,7 @@ export default function DashboardPage() {
               <Select 
                 value={selectedBrand} 
                 onValueChange={setSelectedBrand}
-                disabled={selectedGroup === 'all'}
+                disabled={canSelectGroup && selectedGroup === 'all'}
               >
                 <SelectTrigger className="w-[180px]" data-testid="filter-brand">
                   <SelectValue placeholder="Todas las marcas" />

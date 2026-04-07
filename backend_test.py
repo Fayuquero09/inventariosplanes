@@ -3,22 +3,16 @@ import sys
 import json
 from datetime import datetime
 
-class AutoConnectAPITester:
+class RoleBasedAccessTester:
     def __init__(self, base_url="https://auto-connect-62.preview.emergentagent.com"):
         self.base_url = base_url
-        self.token = None
-        self.cookies = None
+        self.admin_token = None
+        self.group_admin_token = None
+        self.admin_cookies = None
+        self.group_admin_cookies = None
         self.tests_run = 0
         self.tests_passed = 0
-        self.created_entities = {
-            'groups': [],
-            'brands': [],
-            'agencies': [],
-            'vehicles': [],
-            'financial_rates': [],
-            'sales_objectives': [],
-            'commission_rules': []
-        }
+        self.session = requests.Session()
 
     def run_test(self, name, method, endpoint, expected_status, data=None, use_auth=True):
         """Run a single API test"""
