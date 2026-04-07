@@ -1,0 +1,109 @@
+{
+  "theme": "light",
+  "archetype": "Archetype 4 (Swiss & High-Contrast)",
+  "rationale": "The platform is a multi-tenant automotive and financial SaaS. It requires authority, clarity, and rapid scanability. A dense, high-contrast, function-first layout is ideal for handling inventory KPIs, financial costs, and sales objectives across multiple agencies.",
+  "colors": {
+    "background": "#F9FAFB",
+    "foreground": "#0A0A0A",
+    "card": "#FFFFFF",
+    "card_foreground": "#0A0A0A",
+    "primary": "#002FA7",
+    "primary_foreground": "#FFFFFF",
+    "secondary": "#E5E7EB",
+    "secondary_foreground": "#111827",
+    "accent": "#F3F4F6",
+    "accent_foreground": "#111827",
+    "destructive": "#E63946",
+    "destructive_foreground": "#FFFFFF",
+    "success": "#2A9D8F",
+    "success_foreground": "#FFFFFF",
+    "warning": "#E9C46A",
+    "warning_foreground": "#111827",
+    "border": "#D1D5DB",
+    "input": "#D1D5DB",
+    "ring": "#002FA7",
+    "chart_colors": [
+      "#002FA7",
+      "#2A9D8F",
+      "#E9C46A",
+      "#E63946",
+      "#8ECAE6"
+    ]
+  },
+  "typography": {
+    "headings": {
+      "font_family": "Cabinet Grotesk, sans-serif",
+      "weights": ["400", "700", "900"],
+      "h1": "text-4xl tracking-tight leading-none sm:text-5xl lg:text-6xl",
+      "h2": "text-2xl tracking-tight leading-none sm:text-3xl lg:text-4xl",
+      "h3": "text-xl tracking-tight leading-none sm:text-2xl",
+      "h4": "text-lg tracking-tight leading-none sm:text-xl"
+    },
+    "body": {
+      "font_family": "IBM Plex Sans, sans-serif",
+      "weights": ["400", "500", "600"],
+      "text": "text-base leading-relaxed text-foreground",
+      "small": "text-sm text-muted-foreground",
+      "labels": "text-xs font-semibold tracking-[0.2em] uppercase text-muted-foreground"
+    }
+  },
+  "spacing_and_layout": {
+    "grid_system": "MODE B: THE 'CONTROL ROOM' GRID",
+    "container_padding": "p-6 sm:p-8",
+    "gap": "gap-4 sm:gap-6",
+    "card_padding": "p-4 sm:p-6",
+    "alignment": "Optical alignment over geometrical. Dense spacing for data tables and charts. Mobile-first responsive."
+  },
+  "surfaces_and_borders": {
+    "cards": "Flat solid background (`bg-card`), 1px subtle border (`border-border/40`), no drop shadows by default. Use sharp or slightly rounded corners (`rounded-md` max).",
+    "header": "Solid background (`bg-background`) with a hard 1px bottom border (`border-b border-border/40`). Avoid glassmorphism to keep data crisp.",
+    "hover_states": "Slight lift (`-translate-y-px`) with subtle shadow (`shadow-sm`) and darker border on interactive cards."
+  },
+  "components_instructions": {
+    "buttons": "Square or minimally rounded corners. High contrast. Primary uses Deep Blue (`#002FA7`), secondary uses solid border with transparent background. Explicit hover states (e.g., `hover:bg-primary/90`).",
+    "tables": "Shadcn UI tables, dense padding. Left-align text, right-align numbers. Use alternating row colors or strict bottom borders for readability.",
+    "inputs_and_forms": "Shadcn UI forms. Sharp borders, clear focus rings (`focus:ring-2 focus:ring-primary focus:ring-offset-1`).",
+    "charts": "Shadcn or Recharts. Ensure tooltips have solid backgrounds and clear text. Use specific chart colors provided.",
+    "badges": "Use for aging alerts and status. Hard borders with tinted backgrounds (e.g., red for high aging, green for sold)."
+  },
+  "motion_and_interactions": {
+    "transitions": "Fast, crisp transitions (0.15s ease-out) for all hover and focus states.",
+    "data_loading": "Use skeleton loaders matching table/card dimensions. No playful spinners.",
+    "charts_animation": "Subtle grow-in effect on mount, but prioritize performance."
+  },
+  "accessibility_and_testing": {
+    "contrast": "Ensure minimum 4.5:1 ratio for normal text. Use APCA guidelines.",
+    "focus": "All interactive elements must have visible focus rings.",
+    "test_ids": "MANDATORY: All key elements (buttons, inputs, charts, metric cards) must include descriptive `data-testid` attributes (e.g., `data-testid='login-submit-btn'`, `data-testid='kpi-aging-card'`)."
+  },
+  "icons_and_assets": {
+    "icon_library": "@phosphor-icons/react",
+    "icon_style": "Duotone or Regular weight. Size 16px to 24px depending on context.",
+    "images": {
+      "login_background": {
+        "url": "https://images.unsplash.com/photo-1762912297981-ee1a51f4f187?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NzB8MHwxfHNlYXJjaHwyfHxtb2Rlcm4lMjBjYXIlMjBkZWFsZXJzaGlwJTIwaW50ZXJpb3J8ZW58MHx8fHwxNzc1NjAzNTEzfDA&ixlib=rb-4.1.0&q=85",
+        "description": "Modern interior of a car dealership featuring a light blue SUV. Use as the hero/split-screen background for the Login and Onboarding screens with a dark overlay to maintain text readability.",
+        "usage": "Login Screen Background"
+      },
+      "agency_logo_1": {
+        "url": "https://images.unsplash.com/photo-1622465911368-72162f8da3e2?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA4Mzl8MHwxfHNlYXJjaHwzfHxjb21wYW55JTIwYnJhbmQlMjBsb2dvJTIwd2hpdGUlMjBiYWNrZ3JvdW5kfGVufDB8fHx8MTc3NTYwMzUxM3ww&ixlib=rb-4.1.0&q=85",
+        "description": "Qarea brand logo on a glass sign. Use as a placeholder for a specific car agency logo in the multi-tenant dashboard dropdowns or headers.",
+        "usage": "Placeholder Agency Logo"
+      },
+      "agency_logo_2": {
+        "url": "https://images.pexels.com/photos/9949426/pexels-photo-9949426.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "description": "Vibrant abstract logo design. Use as a secondary placeholder logo for another agency/brand within the dashboard's cross-agency view.",
+        "usage": "Secondary Placeholder Agency Logo"
+      }
+    }
+  },
+  "instructions_to_main_agent": [
+    "Install custom fonts: `Cabinet Grotesk` (Headings) and `IBM Plex Sans` (Body).",
+    "Install `@phosphor-icons/react` for icons.",
+    "Implement a dense, 'Control Room' grid layout for the dashboard to view inventory, aging, and costs simultaneously.",
+    "Do not use card drop-shadows heavily; rely on 1px borders (`border-border`) to separate content.",
+    "Apply `data-testid` to all interactive components.",
+    "Use Shadcn UI components but strip away excessive roundness; max border-radius should be `md` (4px to 6px) to match the Swiss Brutalist aesthetic.",
+    "In multi-tenant views, clearly distinguish the active agency/brand in the header using the placeholder logos provided."
+  ]
+}
