@@ -489,6 +489,42 @@ async def update_user(user_id: str, request: Request):
     user = await db.users.find_one({"_id": ObjectId(user_id)}, {"password_hash": 0})
     return serialize_doc(user)
 
+@api_router.get("/sellers")
+async def get_sellers(request: Request, agency_id: Optional[str] = None, brand_id: Optional[str] = None, group_id: Optional[str] = None):
+    """Get sellers (users with seller role) filtered by agency/brand/group"""
+    current_user = await get_current_user(request)
+    
+    query = {"role": UserRole.SELLER}
+    
+    if agency_id:
+        query["agency_id"] = agency_id
+    elif brand_id:
+        # Get all agencies of this brand
+        agencies = await db.agencies.find({"brand_id": brand_id}).to_list(1000)
+        agency_ids = [a["_id"] for a in agencies]
+        if agency_ids:
+            query["agency_id"] = {"$in": [str(a) for a in agency_ids]}
+    elif group_id:
+        # Get all agencies of this group
+        agencies = await db.agencies.find({"group_id": group_id}).to_list(1000)
+        agency_ids = [str(a["_id"]) for a in agencies]
+        if agency_ids:
+            query["agency_id"] = {"$in": agency_ids}
+    
+    sellers = await db.users.find(query, {"password_hash": 0}).to_list(1000)
+    
+    # Enrich with agency name
+    result = []
+    for seller in sellers:
+        s = serialize_doc(seller)
+        if seller.get("agency_id"):
+            agency = await db.agencies.find_one({"_id": ObjectId(seller["agency_id"])})
+            if agency:
+                s["agency_name"] = agency["name"]
+        result.append(s)
+    
+    return result
+
 # ============== GROUPS ROUTES ==============
 
 @api_router.post("/groups")
@@ -1141,11 +1177,21 @@ async def get_sales(
 # ============== DASHBOARD / ANALYTICS ROUTES ==============
 
 @api_router.get("/dashboard/kpis")
-async def get_dashboard_kpis(request: Request, group_id: Optional[str] = None):
+async def get_dashboard_kpis(
+    request: Request, 
+    group_id: Optional[str] = None,
+    brand_id: Optional[str] = None,
+    agency_id: Optional[str] = None,
+    seller_id: Optional[str] = None
+):
     current_user = await get_current_user(request)
     
     query = {}
-    if group_id:
+    if agency_id:
+        query["agency_id"] = agency_id
+    elif brand_id:
+        query["brand_id"] = brand_id
+    elif group_id:
         query["group_id"] = group_id
     elif current_user.get("group_id"):
         query["group_id"] = current_user["group_id"]
@@ -1183,10 +1229,13 @@ async def get_dashboard_kpis(request: Request, group_id: Optional[str] = None):
     now = datetime.now(timezone.utc)
     start_of_month = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
     sales_query = {**query, "sale_date": {"$gte": start_of_month}}
+    if seller_id:
+        sales_query["seller_id"] = seller_id
     monthly_sales = await db.sales.find(sales_query).to_list(10000)
     
     units_sold_month = len(monthly_sales)
     revenue_month = sum(s.get("sale_price", 0) for s in monthly_sales)
+    commissions_month = sum(s.get("commission", 0) for s in monthly_sales)
     
     return {
         "total_vehicles": total_vehicles,
@@ -1196,19 +1245,34 @@ async def get_dashboard_kpis(request: Request, group_id: Optional[str] = None):
         "aging_buckets": aging_buckets,
         "units_sold_month": units_sold_month,
         "revenue_month": round(revenue_month, 2),
+        "commissions_month": round(commissions_month, 2),
         "new_vehicles": len([v for v in vehicles_in_stock if v.get("vehicle_type") == "new"]),
         "used_vehicles": len([v for v in vehicles_in_stock if v.get("vehicle_type") == "used"])
     }
 
 @api_router.get("/dashboard/trends")
-async def get_sales_trends(request: Request, group_id: Optional[str] = None, months: int = 6):
+async def get_sales_trends(
+    request: Request, 
+    group_id: Optional[str] = None,
+    brand_id: Optional[str] = None,
+    agency_id: Optional[str] = None,
+    seller_id: Optional[str] = None,
+    months: int = 6
+):
     current_user = await get_current_user(request)
     
     query = {}
-    if group_id:
+    if agency_id:
+        query["agency_id"] = agency_id
+    elif brand_id:
+        query["brand_id"] = brand_id
+    elif group_id:
         query["group_id"] = group_id
     elif current_user.get("group_id"):
         query["group_id"] = current_user["group_id"]
+    
+    if seller_id:
+        query["seller_id"] = seller_id
     
     now = datetime.now(timezone.utc)
     trends = []
@@ -1230,7 +1294,8 @@ async def get_sales_trends(request: Request, group_id: Optional[str] = None, mon
         trends.append({
             "month": f"{year}-{month:02d}",
             "units": len(sales),
-            "revenue": round(sum(s.get("sale_price", 0) for s in sales), 2)
+            "revenue": round(sum(s.get("sale_price", 0) for s in sales), 2),
+            "commission": round(sum(s.get("commission", 0) for s in sales), 2)
         })
     
     return trends

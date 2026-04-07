@@ -116,10 +116,15 @@ export const usersApi = {
   update: (id, data) => api.put(`/users/${id}`, data)
 };
 
+// Sellers
+export const sellersApi = {
+  getAll: (params) => api.get('/sellers', { params })
+};
+
 // Dashboard
 export const dashboardApi = {
-  getKpis: (groupId) => api.get('/dashboard/kpis', { params: { group_id: groupId } }),
-  getTrends: (groupId, months = 6) => api.get('/dashboard/trends', { params: { group_id: groupId, months } }),
+  getKpis: (params) => api.get('/dashboard/kpis', { params }),
+  getTrends: (params) => api.get('/dashboard/trends', { params }),
   getSellerPerformance: (params) => api.get('/dashboard/seller-performance', { params }),
   getSuggestions: (groupId) => api.get('/dashboard/suggestions', { params: { group_id: groupId } })
 };
