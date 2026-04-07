@@ -1,0 +1,127 @@
+import axios from 'axios';
+
+const API_URL = process.env.REACT_APP_BACKEND_URL;
+
+const api = axios.create({
+  baseURL: `${API_URL}/api`,
+  withCredentials: true
+});
+
+// Add token to all requests
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('token');
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
+// Handle 401 errors
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      localStorage.removeItem('token');
+      window.location.href = '/login';
+    }
+    return Promise.reject(error);
+  }
+);
+
+// Auth
+export const authApi = {
+  login: (data) => api.post('/auth/login', data),
+  register: (data) => api.post('/auth/register', data),
+  logout: () => api.post('/auth/logout'),
+  me: () => api.get('/auth/me'),
+  googleAuth: (credential) => api.post('/auth/google', { credential })
+};
+
+// Groups
+export const groupsApi = {
+  getAll: () => api.get('/groups'),
+  getOne: (id) => api.get(`/groups/${id}`),
+  create: (data) => api.post('/groups', data),
+  update: (id, data) => api.put(`/groups/${id}`, data)
+};
+
+// Brands
+export const brandsApi = {
+  getAll: (groupId) => api.get('/brands', { params: { group_id: groupId } }),
+  create: (data) => api.post('/brands', data),
+  update: (id, data) => api.put(`/brands/${id}`, data)
+};
+
+// Agencies
+export const agenciesApi = {
+  getAll: (params) => api.get('/agencies', { params }),
+  create: (data) => api.post('/agencies', data),
+  update: (id, data) => api.put(`/agencies/${id}`, data)
+};
+
+// Financial Rates
+export const financialRatesApi = {
+  getAll: (groupId) => api.get('/financial-rates', { params: { group_id: groupId } }),
+  create: (data) => api.post('/financial-rates', data),
+  update: (id, data) => api.put(`/financial-rates/${id}`, data),
+  delete: (id) => api.delete(`/financial-rates/${id}`)
+};
+
+// Vehicles
+export const vehiclesApi = {
+  getAll: (params) => api.get('/vehicles', { params }),
+  getOne: (id) => api.get(`/vehicles/${id}`),
+  create: (data) => api.post('/vehicles', data),
+  update: (id, data) => api.put(`/vehicles/${id}`, data),
+  import: (file) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post('/import/vehicles', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    });
+  }
+};
+
+// Sales Objectives
+export const salesObjectivesApi = {
+  getAll: (params) => api.get('/sales-objectives', { params }),
+  create: (data) => api.post('/sales-objectives', data),
+  update: (id, data) => api.put(`/sales-objectives/${id}`, data)
+};
+
+// Commission Rules
+export const commissionRulesApi = {
+  getAll: (agencyId) => api.get('/commission-rules', { params: { agency_id: agencyId } }),
+  create: (data) => api.post('/commission-rules', data),
+  update: (id, data) => api.put(`/commission-rules/${id}`, data),
+  delete: (id) => api.delete(`/commission-rules/${id}`)
+};
+
+// Sales
+export const salesApi = {
+  getAll: (params) => api.get('/sales', { params }),
+  create: (data) => api.post('/sales', data),
+  import: (file) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post('/import/sales', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    });
+  }
+};
+
+// Users
+export const usersApi = {
+  getAll: () => api.get('/users'),
+  update: (id, data) => api.put(`/users/${id}`, data)
+};
+
+// Dashboard
+export const dashboardApi = {
+  getKpis: (groupId) => api.get('/dashboard/kpis', { params: { group_id: groupId } }),
+  getTrends: (groupId, months = 6) => api.get('/dashboard/trends', { params: { group_id: groupId, months } }),
+  getSellerPerformance: (params) => api.get('/dashboard/seller-performance', { params }),
+  getSuggestions: (groupId) => api.get('/dashboard/suggestions', { params: { group_id: groupId } })
+};
+
+export default api;

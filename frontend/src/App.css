@@ -1,34 +1,120 @@
-.App-logo {
-    height: 40vmin;
-    pointer-events: none;
+/* App specific styles */
+.app-layout {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-    .App-logo {
-        animation: App-logo-spin infinite 20s linear;
-    }
+.sidebar {
+  width: 260px;
+  min-width: 260px;
 }
 
-.App-header {
-    background-color: #0f0f10;
-    min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    font-size: calc(10px + 2vmin);
-    color: white;
+.main-content {
+  flex: 1;
+  overflow-x: hidden;
 }
 
-.App-link {
-    color: #61dafb;
+/* Login page */
+.login-bg {
+  background-image: url('https://images.unsplash.com/photo-1762912297981-ee1a51f4f187?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NzB8MHwxfHNlYXJjaHwyfHxtb2Rlcm4lMjBjYXIlMjBkZWFsZXJzaGlwJTIwaW50ZXJpb3J8ZW58MHx8fHwxNzc1NjAzNTEzfDA&ixlib=rb-4.1.0&q=85');
+  background-size: cover;
+  background-position: center;
 }
 
-@keyframes App-logo-spin {
-    from {
-        transform: rotate(0deg);
-    }
-    to {
-        transform: rotate(360deg);
-    }
+/* KPI Cards */
+.kpi-card {
+  @apply bg-card border border-border/40 rounded-md p-4 sm:p-6;
+}
+
+.kpi-value {
+  @apply text-2xl sm:text-3xl font-bold tracking-tight;
+  font-family: 'Cabinet Grotesk', sans-serif;
+}
+
+.kpi-label {
+  @apply text-xs font-semibold tracking-widest uppercase text-muted-foreground;
+}
+
+/* Data tables */
+.data-table {
+  @apply w-full;
+}
+
+.data-table th {
+  @apply text-left text-xs font-semibold tracking-widest uppercase text-muted-foreground bg-muted/50 px-4 py-3;
+}
+
+.data-table td {
+  @apply px-4 py-3 border-b border-border/40;
+}
+
+.data-table tr:hover td {
+  @apply bg-muted/30;
+}
+
+/* Number alignment */
+.text-right-num {
+  @apply text-right tabular-nums;
+}
+
+/* Status badges */
+.status-in_stock {
+  @apply bg-[#2A9D8F]/10 text-[#2A9D8F];
+}
+
+.status-sold {
+  @apply bg-[#002FA7]/10 text-[#002FA7];
+}
+
+.status-transferred {
+  @apply bg-[#E9C46A]/10 text-[#b89830];
+}
+
+/* Aging badges */
+.aging-low {
+  @apply bg-[#2A9D8F]/10 text-[#2A9D8F] border border-[#2A9D8F]/20;
+}
+
+.aging-medium {
+  @apply bg-[#E9C46A]/10 text-[#b89830] border border-[#E9C46A]/20;
+}
+
+.aging-high {
+  @apply bg-[#E63946]/10 text-[#E63946] border border-[#E63946]/20;
+}
+
+/* Chart container */
+.chart-container {
+  @apply w-full h-64 sm:h-80;
+}
+
+/* Form styles */
+.form-section {
+  @apply space-y-4;
+}
+
+.form-label {
+  @apply text-sm font-medium text-foreground;
+}
+
+/* Modal backdrop */
+.modal-backdrop {
+  @apply fixed inset-0 bg-black/50 z-40;
+}
+
+/* Responsive table wrapper */
+.table-wrapper {
+  @apply overflow-x-auto -mx-4 sm:mx-0;
+}
+
+.table-wrapper table {
+  @apply min-w-full;
+}
+
+/* Print styles */
+@media print {
+  .no-print {
+    display: none !important;
+  }
 }
