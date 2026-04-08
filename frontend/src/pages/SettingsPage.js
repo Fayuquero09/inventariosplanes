@@ -574,6 +574,10 @@ export default function SettingsPage() {
                 <div>
                   <CardTitle className="text-lg">Marcas</CardTitle>
                   <CardDescription>Marcas de vehículos por grupo</CardDescription>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <Badge variant="outline">{groups.length} grupos</Badge>
+                    <Badge variant="outline">{agencies.length} agencias</Badge>
+                  </div>
                 </div>
               </div>
               <Dialog open={brandDialog} onOpenChange={setBrandDialog}>
