@@ -6,6 +6,7 @@ import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Badge } from '../components/ui/badge';
+import { Checkbox } from '../components/ui/checkbox';
 import { Skeleton } from '../components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import {
@@ -73,6 +74,7 @@ export default function SettingsPage() {
   const [sellerDialog, setSellerDialog] = useState(false);
   const [importDialog, setImportDialog] = useState(false);
   const [editingGroup, setEditingGroup] = useState(null);
+  const [groupBrandsToAssign, setGroupBrandsToAssign] = useState([]);
   const [importingStructure, setImportingStructure] = useState(false);
   
   // Form states
@@ -119,24 +121,47 @@ export default function SettingsPage() {
   const handleSaveGroup = async (e) => {
     e.preventDefault();
     try {
+      let targetGroupId = editingGroup?.id || null;
+
       if (editingGroup?.id) {
         await groupsApi.update(editingGroup.id, groupForm);
-        toast.success('Grupo actualizado correctamente');
       } else {
-        await groupsApi.create(groupForm);
-        toast.success('Grupo creado correctamente');
+        const created = await groupsApi.create(groupForm);
+        targetGroupId = created?.data?.id || null;
       }
+
+      if (targetGroupId && groupBrandsToAssign.length > 0) {
+        const selectedBrands = brands.filter((brand) => groupBrandsToAssign.includes(brand.id));
+        await Promise.all(
+          selectedBrands.map((brand) =>
+            brandsApi.update(brand.id, {
+              name: brand.name,
+              group_id: targetGroupId,
+              logo_url: brand.logo_url || ''
+            })
+          )
+        );
+      }
+
+      const assignedMessage = groupBrandsToAssign.length > 0
+        ? ` y ${groupBrandsToAssign.length} marca(s) reasignada(s)`
+        : '';
+      toast.success(`${editingGroup ? 'Grupo actualizado' : 'Grupo creado'} correctamente${assignedMessage}`);
+
       setGroupDialog(false);
       setEditingGroup(null);
+      setGroupBrandsToAssign([]);
       setGroupForm({ name: '', description: '' });
       fetchData();
     } catch (error) {
-      toast.error('Error al guardar grupo');
+      const detail = error.response?.data?.detail;
+      toast.error(typeof detail === 'string' ? detail : 'Error al guardar grupo');
     }
   };
 
   const openEditGroup = (group) => {
     setEditingGroup(group);
+    setGroupBrandsToAssign([]);
     setGroupForm({
       name: group.name || '',
       description: group.description || ''
@@ -148,8 +173,18 @@ export default function SettingsPage() {
     setGroupDialog(open);
     if (!open) {
       setEditingGroup(null);
+      setGroupBrandsToAssign([]);
       setGroupForm({ name: '', description: '' });
     }
+  };
+
+  const toggleGroupBrandSelection = (brandId, checked) => {
+    setGroupBrandsToAssign((prev) => {
+      if (checked) {
+        return prev.includes(brandId) ? prev : [...prev, brandId];
+      }
+      return prev.filter((id) => id !== brandId);
+    });
   };
 
   const handleCreateBrand = async (e) => {
@@ -259,6 +294,8 @@ export default function SettingsPage() {
   const getBrandName = (id) => brands.find((b) => b.id === id)?.name || '-';
   const getAgencyName = (id) => agencies.find((a) => a.id === id)?.name || '-';
   const getRoleLabel = (role) => ROLES.find((r) => r.value === role)?.label || role;
+  const currentGroupBrands = editingGroup ? brands.filter((b) => b.group_id === editingGroup.id) : [];
+  const reassignableBrands = editingGroup ? brands.filter((b) => b.group_id !== editingGroup.id) : [];
   const canCreateBrand = groups.length > 0;
   const canCreateAgency = brands.length > 0;
   const canCreateSeller = agencies.length > 0;
@@ -361,6 +398,52 @@ export default function SettingsPage() {
                           data-testid="group-description-input"
                         />
                       </div>
+                      {editingGroup && isAdmin && (
+                        <div className="space-y-3 rounded-md border border-border/50 p-3">
+                          <div>
+                            <Label className="text-sm">Marcas actualmente en este grupo</Label>
+                            {currentGroupBrands.length === 0 ? (
+                              <p className="text-xs text-muted-foreground mt-1">Este grupo aún no tiene marcas asignadas.</p>
+                            ) : (
+                              <div className="flex flex-wrap gap-2 mt-2">
+                                {currentGroupBrands.map((brand) => (
+                                  <Badge key={brand.id} variant="secondary">
+                                    {brand.name}
+                                  </Badge>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="space-y-2">
+                            <Label className="text-sm">Agregar marcas existentes a este grupo</Label>
+                            {reassignableBrands.length === 0 ? (
+                              <p className="text-xs text-muted-foreground">No hay marcas de otros grupos para reasignar.</p>
+                            ) : (
+                              <div className="max-h-40 overflow-y-auto space-y-2 pr-1">
+                                {reassignableBrands.map((brand) => (
+                                  <label key={brand.id} className="flex items-center justify-between gap-3 rounded-md border border-border/50 p-2">
+                                    <div className="flex items-center gap-2">
+                                      <Checkbox
+                                        checked={groupBrandsToAssign.includes(brand.id)}
+                                        onCheckedChange={(checked) => toggleGroupBrandSelection(brand.id, checked === true)}
+                                        data-testid={`assign-brand-checkbox-${brand.id}`}
+                                      />
+                                      <span className="text-sm font-medium">{brand.name}</span>
+                                    </div>
+                                    <span className="text-xs text-muted-foreground">
+                                      Grupo actual: {getGroupName(brand.group_id)}
+                                    </span>
+                                  </label>
+                                ))}
+                              </div>
+                            )}
+                            <p className="text-xs text-muted-foreground">
+                              Las marcas seleccionadas se moverán a este grupo al guardar.
+                            </p>
+                          </div>
+                        </div>
+                      )}
                       <div className="flex justify-end gap-2">
                         <Button type="button" variant="outline" onClick={() => handleGroupDialogChange(false)}>Cancelar</Button>
                         <Button type="submit" className="bg-[#002FA7] hover:bg-[#002FA7]/90" data-testid="save-group-btn">

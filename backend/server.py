@@ -859,6 +859,18 @@ async def create_brand(brand_data: BrandCreate, request: Request):
     current_user = await get_current_user(request)
     if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN]:
         raise HTTPException(status_code=403, detail="Not authorized")
+
+    if not ObjectId.is_valid(brand_data.group_id):
+        raise HTTPException(status_code=400, detail="Invalid group_id")
+
+    group = await db.groups.find_one({"_id": ObjectId(brand_data.group_id)})
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    if current_user["role"] == UserRole.GROUP_ADMIN:
+        user_group_id = current_user.get("group_id")
+        if not user_group_id or brand_data.group_id != user_group_id:
+            raise HTTPException(status_code=403, detail="No tienes acceso para crear marcas fuera de tu grupo")
     
     brand_doc = {
         "name": brand_data.name,
@@ -900,8 +912,34 @@ async def update_brand(brand_id: str, brand_data: BrandCreate, request: Request)
     current_user = await get_current_user(request)
     if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN, UserRole.BRAND_ADMIN]:
         raise HTTPException(status_code=403, detail="Not authorized")
+
+    if not ObjectId.is_valid(brand_id):
+        raise HTTPException(status_code=400, detail="Invalid brand_id")
+    if not ObjectId.is_valid(brand_data.group_id):
+        raise HTTPException(status_code=400, detail="Invalid group_id")
+
+    brand = await db.brands.find_one({"_id": ObjectId(brand_id)})
+    if not brand:
+        raise HTTPException(status_code=404, detail="Brand not found")
+
+    target_group = await db.groups.find_one({"_id": ObjectId(brand_data.group_id)})
+    if not target_group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    if current_user["role"] == UserRole.GROUP_ADMIN:
+        user_group_id = current_user.get("group_id")
+        current_group_id = str(brand.get("group_id") or "")
+        if (
+            not user_group_id or
+            current_group_id != user_group_id or
+            brand_data.group_id != user_group_id
+        ):
+            raise HTTPException(status_code=403, detail="No tienes acceso para modificar esta marca")
     
-    await db.brands.update_one({"_id": ObjectId(brand_id)}, {"$set": {"name": brand_data.name, "logo_url": brand_data.logo_url}})
+    await db.brands.update_one(
+        {"_id": ObjectId(brand_id)},
+        {"$set": {"name": brand_data.name, "group_id": brand_data.group_id, "logo_url": brand_data.logo_url}}
+    )
     brand = await db.brands.find_one({"_id": ObjectId(brand_id)})
     return serialize_doc(brand)
 
