@@ -35,10 +35,8 @@ import {
   Plus,
   Buildings,
   Factory,
-  Storefront,
   Users,
   UserPlus,
-  User,
   UploadSimple,
   Pencil,
   Shield
@@ -62,6 +60,7 @@ const normalizeBrandKey = (value) => (value || '').trim().toLowerCase();
 export default function SettingsPage() {
   const { user, isAdmin } = useAuth();
   const canImportStructure = isAdmin || user?.role === 'group_admin';
+  const canManageGroupStructure = isAdmin || user?.role === 'group_admin';
   const [groups, setGroups] = useState([]);
   const [brands, setBrands] = useState([]);
   const [agencies, setAgencies] = useState([]);
@@ -73,17 +72,18 @@ export default function SettingsPage() {
   
   // Dialog states
   const [groupDialog, setGroupDialog] = useState(false);
-  const [brandDialog, setBrandDialog] = useState(false);
   const [agencyDialog, setAgencyDialog] = useState(false);
   const [sellerDialog, setSellerDialog] = useState(false);
   const [importDialog, setImportDialog] = useState(false);
   const [editingGroup, setEditingGroup] = useState(null);
   const [groupBrandsToAssign, setGroupBrandsToAssign] = useState([]);
   const [importingStructure, setImportingStructure] = useState(false);
+  const [deletingGroup, setDeletingGroup] = useState(false);
+  const [groupDeleteError, setGroupDeleteError] = useState('');
+  const [showCascadeDelete, setShowCascadeDelete] = useState(false);
   
   // Form states
   const [groupForm, setGroupForm] = useState({ name: '', description: '' });
-  const [brandForm, setBrandForm] = useState({ name: '', group_id: '', logo_url: '' });
   const [agencyForm, setAgencyForm] = useState({ name: '', brand_id: '', address: '', city: '' });
   const [sellerForm, setSellerForm] = useState({ name: '', email: '', password: '', agency_id: '' });
 
@@ -132,12 +132,6 @@ export default function SettingsPage() {
   useEffect(() => {
     fetchCatalogMakes();
   }, [fetchCatalogMakes]);
-
-  useEffect(() => {
-    if (groups.length === 1 && !brandForm.group_id) {
-      setBrandForm((prev) => ({ ...prev, group_id: groups[0].id }));
-    }
-  }, [groups, brandForm.group_id]);
 
   const handleSaveGroup = async (e) => {
     e.preventDefault();
@@ -194,6 +188,8 @@ export default function SettingsPage() {
   const openEditGroup = (group) => {
     setEditingGroup(group);
     setGroupBrandsToAssign([]);
+    setGroupDeleteError('');
+    setShowCascadeDelete(false);
     setGroupForm({
       name: group.name || '',
       description: group.description || ''
@@ -201,11 +197,69 @@ export default function SettingsPage() {
     setGroupDialog(true);
   };
 
+  const handleDeleteGroup = async () => {
+    if (!editingGroup?.id) return;
+    setGroupDeleteError('');
+    setShowCascadeDelete(false);
+
+    const confirmed = window.confirm(
+      `¿Estas seguro de borrar el grupo "${editingGroup.name}"?\n\n` +
+      'Solo se puede borrar si no tiene marcas, agencias, usuarios u otros datos relacionados.'
+    );
+    if (!confirmed) return;
+
+    try {
+      setDeletingGroup(true);
+      await groupsApi.delete(editingGroup.id);
+      toast.success('Grupo eliminado correctamente');
+      handleGroupDialogChange(false);
+      fetchData();
+    } catch (error) {
+      const status = error.response?.status;
+      const detail = error.response?.data?.detail;
+      const message = typeof detail === 'string' ? detail : 'Error al borrar grupo';
+      setGroupDeleteError(message);
+      if (status === 409) {
+        setShowCascadeDelete(true);
+      }
+      toast.error(message);
+    } finally {
+      setDeletingGroup(false);
+    }
+  };
+
+  const handleCascadeDeleteGroup = async () => {
+    if (!editingGroup?.id) return;
+
+    const confirmed = window.confirm(
+      `Esto borrará TODO el grupo "${editingGroup.name}" (marcas, agencias, vendedores y datos relacionados).\n\n` +
+      'Esta acción no se puede deshacer. ¿Continuar?'
+    );
+    if (!confirmed) return;
+
+    try {
+      setDeletingGroup(true);
+      await groupsApi.delete(editingGroup.id, { cascade: true });
+      toast.success('Grupo y estructura eliminados correctamente');
+      handleGroupDialogChange(false);
+      fetchData();
+    } catch (error) {
+      const detail = error.response?.data?.detail;
+      const message = typeof detail === 'string' ? detail : 'Error al borrar en cascada';
+      setGroupDeleteError(message);
+      toast.error(message);
+    } finally {
+      setDeletingGroup(false);
+    }
+  };
+
   const handleGroupDialogChange = (open) => {
     setGroupDialog(open);
     if (!open) {
       setEditingGroup(null);
       setGroupBrandsToAssign([]);
+      setGroupDeleteError('');
+      setShowCascadeDelete(false);
       setGroupForm({ name: '', description: '' });
     }
   };
@@ -217,19 +271,6 @@ export default function SettingsPage() {
       }
       return prev.filter((name) => name !== brandName);
     });
-  };
-
-  const handleCreateBrand = async (e) => {
-    e.preventDefault();
-    try {
-      await brandsApi.create(brandForm);
-      toast.success('Marca creada correctamente');
-      setBrandDialog(false);
-      setBrandForm({ name: '', group_id: '', logo_url: '' });
-      fetchData();
-    } catch (error) {
-      toast.error('Error al crear marca');
-    }
   };
 
   const handleCreateAgency = async (e) => {
@@ -333,9 +374,6 @@ export default function SettingsPage() {
   };
 
   const getGroupName = (id) => groups.find((g) => g.id === id)?.name || '-';
-  const getBrandName = (id) => brands.find((b) => b.id === id)?.name || '-';
-  const getAgencyName = (id) => agencies.find((a) => a.id === id)?.name || '-';
-  const getRoleLabel = (role) => ROLES.find((r) => r.value === role)?.label || role;
 
   const brandsByNormalizedName = new Map();
   brands.forEach((brand) => {
@@ -367,9 +405,26 @@ export default function SettingsPage() {
 
   const currentGroupBrands = editingGroup ? sourceBrandRows.filter((b) => b.group_id === editingGroup.id) : [];
   const reassignableBrands = editingGroup ? sourceBrandRows.filter((b) => b.group_id !== editingGroup.id) : [];
-  const canCreateBrand = groups.length > 0;
-  const canCreateAgency = brands.length > 0;
-  const canCreateSeller = agencies.length > 0;
+  const brandsByGroupId = brands.reduce((acc, brand) => {
+    const key = brand.group_id || '__none__';
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(brand);
+    return acc;
+  }, {});
+
+  const agenciesByBrandId = agencies.reduce((acc, agency) => {
+    const key = agency.brand_id || '__none__';
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(agency);
+    return acc;
+  }, {});
+
+  const sellersByAgencyId = sellers.reduce((acc, seller) => {
+    const key = seller.agency_id || '__none__';
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(seller);
+    return acc;
+  }, {});
 
   return (
     <div className="space-y-6" data-testid="settings-page">
@@ -437,16 +492,18 @@ export default function SettingsPage() {
                 </div>
                 <div>
                   <CardTitle className="text-lg">Grupos</CardTitle>
-                  <CardDescription>Distribuidores o grupos empresariales</CardDescription>
+                  <CardDescription>Administra aquí toda la jerarquía: marcas, agencias y vendedores</CardDescription>
                 </div>
               </div>
-              {isAdmin && (
+              {canManageGroupStructure && (
                 <Dialog open={groupDialog} onOpenChange={handleGroupDialogChange}>
-                  <DialogTrigger asChild>
-                    <Button variant="outline" size="sm" data-testid="add-group-btn">
-                      <Plus size={16} className="mr-1" /> Agregar
-                    </Button>
-                  </DialogTrigger>
+                  {isAdmin && (
+                    <DialogTrigger asChild>
+                      <Button variant="outline" size="sm" data-testid="add-group-btn">
+                        <Plus size={16} className="mr-1" /> Agregar
+                      </Button>
+                    </DialogTrigger>
+                  )}
                   <DialogContent>
                     <DialogHeader>
                       <DialogTitle>{editingGroup ? 'Editar Grupo' : 'Nuevo Grupo'}</DialogTitle>
@@ -469,7 +526,7 @@ export default function SettingsPage() {
                           data-testid="group-description-input"
                         />
                       </div>
-                      {editingGroup && isAdmin && (
+                      {editingGroup && canManageGroupStructure && (
                         <div className="space-y-3 rounded-md border border-border/50 p-3">
                           <div>
                             <Label className="text-sm">Marcas actualmente en este grupo</Label>
@@ -517,11 +574,49 @@ export default function SettingsPage() {
                           </div>
                         </div>
                       )}
-                      <div className="flex justify-end gap-2">
-                        <Button type="button" variant="outline" onClick={() => handleGroupDialogChange(false)}>Cancelar</Button>
-                        <Button type="submit" className="bg-[#002FA7] hover:bg-[#002FA7]/90" data-testid="save-group-btn">
-                          {editingGroup ? 'Guardar Cambios' : 'Crear'}
-                        </Button>
+                      {groupDeleteError && (
+                        <p className="text-sm text-red-600" data-testid="group-delete-error">
+                          {groupDeleteError}
+                        </p>
+                      )}
+                      <div className={`flex gap-2 ${editingGroup && isAdmin ? 'justify-between' : 'justify-end'}`}>
+                        {editingGroup && isAdmin && (
+                          <div className="flex gap-2">
+                            <Button
+                              type="button"
+                              variant="destructive"
+                              onClick={handleDeleteGroup}
+                              disabled={deletingGroup}
+                              data-testid="delete-group-btn"
+                            >
+                              {deletingGroup ? 'Borrando...' : 'Borrar'}
+                            </Button>
+                            {showCascadeDelete && (
+                              <Button
+                                type="button"
+                                className="bg-red-900 text-white hover:bg-red-900/90"
+                                onClick={handleCascadeDeleteGroup}
+                                disabled={deletingGroup}
+                                data-testid="cascade-delete-group-btn"
+                              >
+                                {deletingGroup ? 'Borrando...' : 'Borrar con todo'}
+                              </Button>
+                            )}
+                          </div>
+                        )}
+                        <div className="flex gap-2">
+                          <Button type="button" variant="outline" onClick={() => handleGroupDialogChange(false)} disabled={deletingGroup}>
+                            Cancelar
+                          </Button>
+                          <Button
+                            type="submit"
+                            className="bg-[#002FA7] hover:bg-[#002FA7]/90"
+                            data-testid="save-group-btn"
+                            disabled={deletingGroup}
+                          >
+                            {editingGroup ? 'Guardar Cambios' : 'Crear'}
+                          </Button>
+                        </div>
                       </div>
                     </form>
                   </DialogContent>
@@ -536,29 +631,125 @@ export default function SettingsPage() {
               ) : groups.length === 0 ? (
                 <p className="text-center py-8 text-muted-foreground">No hay grupos configurados</p>
               ) : (
-                <div className="space-y-2">
-                  {groups.map((group) => (
-                    <div key={group.id} className="flex items-center justify-between p-3 rounded-md bg-muted/30" data-testid={`group-${group.id}`}>
-                      <div>
-                        <div className="font-medium">{group.name}</div>
-                        {group.description && <div className="text-sm text-muted-foreground">{group.description}</div>}
+                <div className="space-y-3">
+                  {groups.map((group) => {
+                    const groupBrands = brandsByGroupId[group.id] || [];
+                    const groupAgencyCount = groupBrands.reduce(
+                      (total, brand) => total + ((agenciesByBrandId[brand.id] || []).length),
+                      0
+                    );
+                    const groupSellerCount = groupBrands.reduce(
+                      (total, brand) => total + (agenciesByBrandId[brand.id] || []).reduce(
+                        (agencyTotal, agency) => agencyTotal + ((sellersByAgencyId[agency.id] || []).length),
+                        0
+                      ),
+                      0
+                    );
+                    const canManageThisGroup = canManageGroupStructure && (isAdmin || !user?.group_id || user.group_id === group.id);
+
+                    return (
+                      <div key={group.id} className="rounded-md border border-border/60" data-testid={`group-${group.id}`}>
+                        <div className="flex items-start justify-between gap-4 p-3 bg-muted/20">
+                          <div>
+                            <div className="font-medium">{group.name}</div>
+                            {group.description && <div className="text-sm text-muted-foreground">{group.description}</div>}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Badge variant="outline">{groupBrands.length} marcas</Badge>
+                            <Badge variant="outline">{groupAgencyCount} agencias</Badge>
+                            <Badge variant="outline">{groupSellerCount} vendedores</Badge>
+                            {canManageThisGroup && (
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => openEditGroup(group)}
+                                data-testid={`edit-group-btn-${group.id}`}
+                              >
+                                <Pencil size={16} />
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="space-y-3 p-3">
+                          {groupBrands.length === 0 ? (
+                            <p className="text-sm text-muted-foreground">
+                              Sin marcas asignadas. Usa editar grupo para asignar marcas del catálogo.
+                            </p>
+                          ) : (
+                            groupBrands.map((brand) => {
+                              const brandAgencies = agenciesByBrandId[brand.id] || [];
+                              return (
+                                <div key={brand.id} className="rounded-md border border-border/50 p-3" data-testid={`brand-${brand.id}`}>
+                                  <div className="flex items-center justify-between gap-2">
+                                    <div className="font-medium">{brand.name}</div>
+                                    <div className="flex items-center gap-2">
+                                      <Badge variant="outline">{brandAgencies.length} agencias</Badge>
+                                      {canManageThisGroup && (
+                                        <Button
+                                          type="button"
+                                          size="sm"
+                                          variant="ghost"
+                                          onClick={() => openAgencyDialogForBrand(brand.id)}
+                                          data-testid={`add-agency-for-brand-${brand.id}`}
+                                        >
+                                          <Plus size={14} className="mr-1" /> Agencia
+                                        </Button>
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  <div className="mt-2 space-y-2">
+                                    {brandAgencies.length === 0 ? (
+                                      <p className="text-sm text-muted-foreground">Sin agencias registradas.</p>
+                                    ) : (
+                                      brandAgencies.map((agency) => {
+                                        const agencySellers = sellersByAgencyId[agency.id] || [];
+                                        return (
+                                          <div key={agency.id} className="rounded-md bg-muted/30 p-3" data-testid={`agency-${agency.id}`}>
+                                            <div className="flex items-start justify-between gap-3">
+                                              <div>
+                                                <div className="font-medium">{agency.name}</div>
+                                                <div className="text-sm text-muted-foreground">
+                                                  {agency.city || 'Sin ciudad'}
+                                                  {agency.address ? ` • ${agency.address}` : ''}
+                                                </div>
+                                              </div>
+                                              {canManageThisGroup && (
+                                                <Button
+                                                  type="button"
+                                                  size="sm"
+                                                  variant="ghost"
+                                                  onClick={() => openSellerDialogForAgency(agency.id)}
+                                                  data-testid={`add-seller-for-agency-${agency.id}`}
+                                                >
+                                                  <UserPlus size={14} className="mr-1" /> Vendedor
+                                                </Button>
+                                              )}
+                                            </div>
+                                            <div className="mt-2 flex flex-wrap items-center gap-2">
+                                              {agencySellers.length === 0 ? (
+                                                <span className="text-xs text-muted-foreground">Sin vendedores</span>
+                                              ) : (
+                                                agencySellers.map((seller) => (
+                                                  <Badge key={seller.id} variant="secondary">{seller.name}</Badge>
+                                                ))
+                                              )}
+                                            </div>
+                                          </div>
+                                        );
+                                      })
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })
+                          )}
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <Badge variant="outline">{brands.filter((b) => b.group_id === group.id).length} marcas</Badge>
-                        {isAdmin && (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => openEditGroup(group)}
-                            data-testid={`edit-group-btn-${group.id}`}
-                          >
-                            <Pencil size={16} />
-                          </Button>
-                        )}
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </CardContent>
@@ -573,53 +764,13 @@ export default function SettingsPage() {
                 </div>
                 <div>
                   <CardTitle className="text-lg">Marcas</CardTitle>
-                  <CardDescription>Marcas de vehículos por grupo</CardDescription>
+                  <CardDescription>Vista informativa. La edición se realiza en Grupos.</CardDescription>
                   <div className="mt-2 flex flex-wrap gap-2">
                     <Badge variant="outline">{groups.length} grupos</Badge>
                     <Badge variant="outline">{agencies.length} agencias</Badge>
                   </div>
                 </div>
               </div>
-              <Dialog open={brandDialog} onOpenChange={setBrandDialog}>
-                <DialogTrigger asChild>
-                  <Button variant="outline" size="sm" data-testid="add-brand-btn" disabled={!canCreateBrand}>
-                    <Plus size={16} className="mr-1" /> Agregar
-                  </Button>
-                </DialogTrigger>
-                <DialogContent>
-                  <DialogHeader>
-                    <DialogTitle>Nueva Marca</DialogTitle>
-                  </DialogHeader>
-                  <form onSubmit={handleCreateBrand} className="space-y-4">
-                    <div className="space-y-2">
-                      <Label>Grupo</Label>
-                      <Select value={brandForm.group_id} onValueChange={(v) => setBrandForm({ ...brandForm, group_id: v })} required>
-                        <SelectTrigger data-testid="brand-group-select">
-                          <SelectValue placeholder="Seleccionar grupo" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {groups.map((g) => (
-                            <SelectItem key={g.id} value={g.id}>{g.name}</SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="space-y-2">
-                      <Label>Nombre</Label>
-                      <Input
-                        value={brandForm.name}
-                        onChange={(e) => setBrandForm({ ...brandForm, name: e.target.value })}
-                        required
-                        data-testid="brand-name-input"
-                      />
-                    </div>
-                    <div className="flex justify-end gap-2">
-                      <Button type="button" variant="outline" onClick={() => setBrandDialog(false)}>Cancelar</Button>
-                      <Button type="submit" className="bg-[#002FA7] hover:bg-[#002FA7]/90" data-testid="save-brand-btn">Crear</Button>
-                    </div>
-                  </form>
-                </DialogContent>
-              </Dialog>
             </CardHeader>
             <CardContent>
               {loading ? (
@@ -631,23 +782,12 @@ export default function SettingsPage() {
               ) : (
                 <div className="space-y-2">
                   {brands.map((brand) => (
-                    <div key={brand.id} className="flex items-center justify-between p-3 rounded-md bg-muted/30" data-testid={`brand-${brand.id}`}>
+                    <div key={brand.id} className="flex items-center justify-between p-3 rounded-md bg-muted/30" data-testid={`brand-summary-${brand.id}`}>
                       <div>
                         <div className="font-medium">{brand.name}</div>
                         <div className="text-sm text-muted-foreground">{getGroupName(brand.group_id)}</div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <Badge variant="outline">{agencies.filter((a) => a.brand_id === brand.id).length} agencias</Badge>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => openAgencyDialogForBrand(brand.id)}
-                          data-testid={`add-agency-for-brand-${brand.id}`}
-                        >
-                          <Plus size={14} className="mr-1" /> Agencia
-                        </Button>
-                      </div>
+                      <Badge variant="outline">{(agenciesByBrandId[brand.id] || []).length} agencias</Badge>
                     </div>
                   ))}
                 </div>
@@ -655,24 +795,9 @@ export default function SettingsPage() {
             </CardContent>
           </Card>
 
-          {/* Agencies */}
-          <Card className="border-border/40">
-            <CardHeader className="flex flex-row items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-md bg-[#E9C46A]/10 flex items-center justify-center">
-                  <Storefront size={20} weight="duotone" className="text-[#b89830]" />
-                </div>
-                <div>
-                  <CardTitle className="text-lg">Agencias</CardTitle>
-                  <CardDescription>Puntos de venta por marca</CardDescription>
-                </div>
-              </div>
+          {canManageGroupStructure && (
+            <>
               <Dialog open={agencyDialog} onOpenChange={setAgencyDialog}>
-                <DialogTrigger asChild>
-                  <Button variant="outline" size="sm" data-testid="add-agency-btn" disabled={!canCreateAgency}>
-                    <Plus size={16} className="mr-1" /> Agregar
-                  </Button>
-                </DialogTrigger>
                 <DialogContent>
                   <DialogHeader>
                     <DialogTitle>Nueva Agencia</DialogTitle>
@@ -723,144 +848,64 @@ export default function SettingsPage() {
                   </form>
                 </DialogContent>
               </Dialog>
-            </CardHeader>
-            <CardContent>
-              {loading ? (
-                <div className="space-y-2">
-                  {[1, 2, 3].map((i) => <Skeleton key={i} className="h-12 w-full" />)}
-                </div>
-              ) : agencies.length === 0 ? (
-                <p className="text-center py-8 text-muted-foreground">No hay agencias configuradas</p>
-              ) : (
-                <div className="space-y-2">
-                  {agencies.map((agency) => (
-                    <div key={agency.id} className="flex items-center justify-between p-3 rounded-md bg-muted/30" data-testid={`agency-${agency.id}`}>
-                      <div>
-                        <div className="font-medium">{agency.name}</div>
-                        <div className="text-sm text-muted-foreground">
-                          {agency.brand_name || getBrandName(agency.brand_id)} • {agency.city || 'Sin ciudad'}
-                        </div>
-                        <div className="text-sm text-muted-foreground">
-                          {agency.address || 'Sin dirección'}
-                        </div>
-                      </div>
-                      {(isAdmin || user?.role === 'group_admin') && (
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => openSellerDialogForAgency(agency.id)}
-                          data-testid={`add-seller-for-agency-${agency.id}`}
-                        >
-                          <UserPlus size={14} className="mr-1" /> Vendedor
-                        </Button>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
 
-          {/* Sellers */}
-          <Card className="border-border/40">
-            <CardHeader className="flex flex-row items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-md bg-[#7C3AED]/10 flex items-center justify-center">
-                  <User size={20} weight="duotone" className="text-[#7C3AED]" />
-                </div>
-                <div>
-                  <CardTitle className="text-lg">Vendedores</CardTitle>
-                  <CardDescription>Usuarios operativos dentro de cada agencia</CardDescription>
-                </div>
-              </div>
-              {(isAdmin || user?.role === 'group_admin') && (
-                <Dialog open={sellerDialog} onOpenChange={setSellerDialog}>
-                  <DialogTrigger asChild>
-                    <Button variant="outline" size="sm" data-testid="add-seller-btn" disabled={!canCreateSeller}>
-                      <UserPlus size={16} className="mr-1" /> Agregar
-                    </Button>
-                  </DialogTrigger>
-                  <DialogContent>
-                    <DialogHeader>
-                      <DialogTitle>Nuevo Vendedor</DialogTitle>
-                    </DialogHeader>
-                    <form onSubmit={handleCreateSeller} className="space-y-4">
-                      <div className="space-y-2">
-                        <Label>Agencia</Label>
-                        <Select value={sellerForm.agency_id} onValueChange={(v) => setSellerForm({ ...sellerForm, agency_id: v })} required>
-                          <SelectTrigger data-testid="seller-agency-select">
-                            <SelectValue placeholder="Seleccionar agencia" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {agencies.map((a) => (
-                              <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <div className="space-y-2">
-                        <Label>Nombre</Label>
-                        <Input
-                          value={sellerForm.name}
-                          onChange={(e) => setSellerForm({ ...sellerForm, name: e.target.value })}
-                          required
-                          data-testid="seller-name-input"
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label>Email</Label>
-                        <Input
-                          type="email"
-                          value={sellerForm.email}
-                          onChange={(e) => setSellerForm({ ...sellerForm, email: e.target.value })}
-                          required
-                          data-testid="seller-email-input"
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label>Contraseña temporal</Label>
-                        <Input
-                          type="password"
-                          value={sellerForm.password}
-                          onChange={(e) => setSellerForm({ ...sellerForm, password: e.target.value })}
-                          required
-                          data-testid="seller-password-input"
-                        />
-                      </div>
-                      <div className="flex justify-end gap-2">
-                        <Button type="button" variant="outline" onClick={() => setSellerDialog(false)}>Cancelar</Button>
-                        <Button type="submit" className="bg-[#002FA7] hover:bg-[#002FA7]/90" data-testid="save-seller-btn">Crear</Button>
-                      </div>
-                    </form>
-                  </DialogContent>
-                </Dialog>
-              )}
-            </CardHeader>
-            <CardContent>
-              {loading ? (
-                <div className="space-y-2">
-                  {[1, 2, 3].map((i) => <Skeleton key={i} className="h-12 w-full" />)}
-                </div>
-              ) : sellers.length === 0 ? (
-                <p className="text-center py-8 text-muted-foreground">No hay vendedores configurados</p>
-              ) : (
-                <div className="space-y-2">
-                  {sellers.map((seller) => (
-                    <div key={seller.id} className="flex items-center justify-between p-3 rounded-md bg-muted/30" data-testid={`seller-${seller.id}`}>
-                      <div>
-                        <div className="font-medium">{seller.name}</div>
-                        <div className="text-sm text-muted-foreground">{seller.email}</div>
-                      </div>
-                      <div className="text-sm text-muted-foreground">
-                        {getAgencyName(seller.agency_id)}
-                      </div>
+              <Dialog open={sellerDialog} onOpenChange={setSellerDialog}>
+                <DialogContent>
+                  <DialogHeader>
+                    <DialogTitle>Nuevo Vendedor</DialogTitle>
+                  </DialogHeader>
+                  <form onSubmit={handleCreateSeller} className="space-y-4">
+                    <div className="space-y-2">
+                      <Label>Agencia</Label>
+                      <Select value={sellerForm.agency_id} onValueChange={(v) => setSellerForm({ ...sellerForm, agency_id: v })} required>
+                        <SelectTrigger data-testid="seller-agency-select">
+                          <SelectValue placeholder="Seleccionar agencia" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {agencies.map((a) => (
+                            <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
+                    <div className="space-y-2">
+                      <Label>Nombre</Label>
+                      <Input
+                        value={sellerForm.name}
+                        onChange={(e) => setSellerForm({ ...sellerForm, name: e.target.value })}
+                        required
+                        data-testid="seller-name-input"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Email</Label>
+                      <Input
+                        type="email"
+                        value={sellerForm.email}
+                        onChange={(e) => setSellerForm({ ...sellerForm, email: e.target.value })}
+                        required
+                        data-testid="seller-email-input"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Contraseña temporal</Label>
+                      <Input
+                        type="password"
+                        value={sellerForm.password}
+                        onChange={(e) => setSellerForm({ ...sellerForm, password: e.target.value })}
+                        required
+                        data-testid="seller-password-input"
+                      />
+                    </div>
+                    <div className="flex justify-end gap-2">
+                      <Button type="button" variant="outline" onClick={() => setSellerDialog(false)}>Cancelar</Button>
+                      <Button type="submit" className="bg-[#002FA7] hover:bg-[#002FA7]/90" data-testid="save-seller-btn">Crear</Button>
+                    </div>
+                  </form>
+                </DialogContent>
+              </Dialog>
+            </>
+          )}
         </TabsContent>
 
         {isAdmin && (

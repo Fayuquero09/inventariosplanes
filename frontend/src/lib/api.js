@@ -42,7 +42,8 @@ export const groupsApi = {
   getAll: () => api.get('/groups'),
   getOne: (id) => api.get(`/groups/${id}`),
   create: (data) => api.post('/groups', data),
-  update: (id, data) => api.put(`/groups/${id}`, data)
+  update: (id, data) => api.put(`/groups/${id}`, data),
+  delete: (id, params = {}) => api.delete(`/groups/${id}`, { params })
 };
 
 // Brands

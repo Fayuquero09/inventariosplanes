@@ -852,6 +852,115 @@ async def update_group(group_id: str, group_data: GroupCreate, request: Request)
     group = await db.groups.find_one({"_id": ObjectId(group_id)})
     return serialize_doc(group)
 
+@api_router.delete("/groups/{group_id}")
+async def delete_group(group_id: str, request: Request, cascade: bool = Query(False)):
+    current_user = await get_current_user(request)
+    if current_user["role"] != UserRole.APP_ADMIN:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    if not ObjectId.is_valid(group_id):
+        raise HTTPException(status_code=400, detail="Invalid group_id")
+
+    group = await db.groups.find_one({"_id": ObjectId(group_id)})
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    brand_docs = await db.brands.find({"group_id": group_id}, {"_id": 1}).to_list(10000)
+    brand_ids = [str(b["_id"]) for b in brand_docs]
+
+    agency_filters = [{"group_id": group_id}]
+    if brand_ids:
+        agency_filters.append({"brand_id": {"$in": brand_ids}})
+    agency_docs = await db.agencies.find({"$or": agency_filters}, {"_id": 1}).to_list(10000)
+    agency_ids = [str(a["_id"]) for a in agency_docs]
+
+    user_filters = [{"group_id": group_id}]
+    if brand_ids:
+        user_filters.append({"brand_id": {"$in": brand_ids}})
+    if agency_ids:
+        user_filters.append({"agency_id": {"$in": agency_ids}})
+    user_docs = await db.users.find({"$or": user_filters}, {"_id": 1}).to_list(10000)
+    user_ids = [str(u["_id"]) for u in user_docs]
+
+    vehicle_filters = [{"group_id": group_id}]
+    if brand_ids:
+        vehicle_filters.append({"brand_id": {"$in": brand_ids}})
+    if agency_ids:
+        vehicle_filters.append({"agency_id": {"$in": agency_ids}})
+    vehicle_docs = await db.vehicles.find({"$or": vehicle_filters}, {"_id": 1}).to_list(10000)
+    vehicle_ids = [str(v["_id"]) for v in vehicle_docs]
+
+    rates_filters = [{"group_id": group_id}]
+    if brand_ids:
+        rates_filters.append({"brand_id": {"$in": brand_ids}})
+    if agency_ids:
+        rates_filters.append({"agency_id": {"$in": agency_ids}})
+
+    objectives_filters = [{"group_id": group_id}]
+    if brand_ids:
+        objectives_filters.append({"brand_id": {"$in": brand_ids}})
+    if agency_ids:
+        objectives_filters.append({"agency_id": {"$in": agency_ids}})
+    if user_ids:
+        objectives_filters.append({"seller_id": {"$in": user_ids}})
+
+    sales_filters = []
+    if vehicle_ids:
+        sales_filters.append({"vehicle_id": {"$in": vehicle_ids}})
+    if user_ids:
+        sales_filters.append({"seller_id": {"$in": user_ids}})
+    if agency_ids:
+        sales_filters.append({"agency_id": {"$in": agency_ids}})
+
+    dependency_counts = {
+        "marcas": len(brand_ids),
+        "agencias": len(agency_ids),
+        "usuarios": len(user_ids),
+        "tasas financieras": await db.financial_rates.count_documents({"$or": rates_filters}),
+        "objetivos": await db.sales_objectives.count_documents({"$or": objectives_filters}),
+        "vehiculos": len(vehicle_ids),
+        "ventas": await db.sales.count_documents({"$or": sales_filters}) if sales_filters else 0,
+        "reglas de comision": await db.commission_rules.count_documents({"agency_id": {"$in": agency_ids}}) if agency_ids else 0,
+    }
+    dependencies = [f"{count} {name}" for name, count in dependency_counts.items() if count > 0]
+    if dependencies and not cascade:
+        raise HTTPException(
+            status_code=409,
+            detail=f"No se puede borrar el grupo porque tiene registros relacionados: {', '.join(dependencies)}. Usa borrado en cascada para eliminar todo."
+        )
+
+    deleted_counts = {
+        "sales": 0,
+        "commission_rules": 0,
+        "sales_objectives": 0,
+        "financial_rates": 0,
+        "vehicles": 0,
+        "users": 0,
+        "agencies": 0,
+        "brands": 0,
+        "groups": 0,
+    }
+
+    if cascade:
+        if sales_filters:
+            deleted_counts["sales"] = (await db.sales.delete_many({"$or": sales_filters})).deleted_count
+        if agency_ids:
+            deleted_counts["commission_rules"] = (await db.commission_rules.delete_many({"agency_id": {"$in": agency_ids}})).deleted_count
+        deleted_counts["sales_objectives"] = (await db.sales_objectives.delete_many({"$or": objectives_filters})).deleted_count
+        deleted_counts["financial_rates"] = (await db.financial_rates.delete_many({"$or": rates_filters})).deleted_count
+        deleted_counts["vehicles"] = (await db.vehicles.delete_many({"$or": vehicle_filters})).deleted_count
+        deleted_counts["users"] = (await db.users.delete_many({"$or": user_filters})).deleted_count
+        deleted_counts["agencies"] = (await db.agencies.delete_many({"$or": agency_filters})).deleted_count
+        deleted_counts["brands"] = (await db.brands.delete_many({"group_id": group_id})).deleted_count
+
+    deleted_counts["groups"] = (await db.groups.delete_one({"_id": ObjectId(group_id)})).deleted_count
+
+    return {
+        "message": "Group deleted",
+        "cascade": cascade,
+        "deleted": deleted_counts
+    }
+
 # ============== BRANDS ROUTES ==============
 
 @api_router.post("/brands")
