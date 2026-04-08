@@ -6,10 +6,13 @@ import json
 from datetime import datetime
 
 class RoleBasedAccessTester:
-    def __init__(self, base_url="https://auto-connect-62.preview.emergentagent.com"):
+    def __init__(self, base_url="http://localhost:8000"):
         self.base_url = base_url
         self.admin_token = None
         self.group_admin_token = None
+        self.test_group_id = None
+        self.test_group_admin_email = None
+        self.test_group_admin_password = "GroupAdmin123!"
         self.tests_run = 0
         self.tests_passed = 0
         self.session = requests.Session()
@@ -85,18 +88,65 @@ class RoleBasedAccessTester:
     def test_group_admin_login(self):
         """Test group admin login and get token"""
         print("\n=== Testing Group Admin Login ===")
+        if not self.test_group_admin_email:
+            print("❌ Group admin email not initialized")
+            return False
+
         success, response = self.run_test(
             "Group Admin Login",
             "POST",
             "auth/login",
             200,
-            data={"email": "group_admin2@test.com", "password": "GroupAdmin123!"}
+            data={"email": self.test_group_admin_email, "password": self.test_group_admin_password}
         )
         if success and 'token' in response:
             self.group_admin_token = response['token']
             print(f"✅ Group admin token obtained, role: {response.get('role')}, group_id: {response.get('group_id')}")
             return True
         return False
+
+    def setup_group_admin_user(self):
+        """Create a dedicated group + group admin for this test run"""
+        print("\n=== Setting Up Group Admin Test User ===")
+        now = datetime.now().strftime("%Y%m%d%H%M%S")
+
+        # Create a dedicated group using admin token
+        group_success, group_response = self.run_test(
+            "Create Test Group",
+            "POST",
+            "groups",
+            200,
+            data={"name": f"RBAC Test Group {now}", "description": "Role-based access test group"},
+            token=self.admin_token
+        )
+        if not group_success or "id" not in group_response:
+            print("❌ Could not create test group")
+            return False
+
+        self.test_group_id = group_response["id"]
+        self.test_group_admin_email = f"group_admin_{now}@test.com"
+
+        # Register group admin (endpoint currently allows registration with role/group)
+        user_success, _ = self.run_test(
+            "Register Test Group Admin",
+            "POST",
+            "auth/register",
+            200,
+            data={
+                "email": self.test_group_admin_email,
+                "password": self.test_group_admin_password,
+                "name": "RBAC Group Admin",
+                "role": "group_admin",
+                "group_id": self.test_group_id
+            },
+            token=None
+        )
+        if not user_success:
+            print("❌ Could not create test group admin user")
+            return False
+
+        print(f"✅ Test group admin created: {self.test_group_admin_email} ({self.test_group_id})")
+        return True
 
     def test_admin_groups_access(self):
         """Test that admin can see all groups"""
@@ -126,7 +176,7 @@ class RoleBasedAccessTester:
             print(f"Group admin sees {len(data)} groups")
             if len(data) == 1:
                 group = data[0]
-                expected_group_id = "69d593086bb6e36bb3ad80a8"
+                expected_group_id = self.test_group_id
                 if group.get('id') == expected_group_id:
                     print(f"✅ Correct group access: {group.get('name')}")
                     return True
@@ -156,7 +206,7 @@ class RoleBasedAccessTester:
         
         def validate_group_vehicles(data):
             # All vehicles should belong to the group admin's group
-            group_id = "69d593086bb6e36bb3ad80a8"
+            group_id = self.test_group_id
             print(f"Group admin sees {len(data)} vehicles")
             
             for vehicle in data:
@@ -226,7 +276,7 @@ class RoleBasedAccessTester:
         
         def validate_group_admin_brands(data):
             # Group admin should only see brands from their group
-            group_id = "69d593086bb6e36bb3ad80a8"
+            group_id = self.test_group_id
             print(f"Group admin sees {len(data)} brands")
             
             for brand in data:
@@ -268,6 +318,10 @@ def main():
     # Test authentication
     if not tester.test_admin_login():
         print("❌ Admin login failed, stopping tests")
+        return 1
+
+    if not tester.setup_group_admin_user():
+        print("❌ Group admin setup failed, stopping tests")
         return 1
     
     if not tester.test_group_admin_login():

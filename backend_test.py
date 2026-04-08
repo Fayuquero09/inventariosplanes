@@ -3,13 +3,19 @@ import sys
 import json
 from datetime import datetime
 
-class RoleBasedAccessTester:
-    def __init__(self, base_url="https://auto-connect-62.preview.emergentagent.com"):
+class AutoConnectAPITester:
+    def __init__(self, base_url="http://localhost:8000"):
         self.base_url = base_url
-        self.admin_token = None
-        self.group_admin_token = None
-        self.admin_cookies = None
-        self.group_admin_cookies = None
+        self.token = None
+        self.created_entities = {
+            "groups": [],
+            "brands": [],
+            "agencies": [],
+            "financial_rates": [],
+            "vehicles": [],
+            "sales_objectives": [],
+            "commission_rules": [],
+        }
         self.tests_run = 0
         self.tests_passed = 0
         self.session = requests.Session()
@@ -28,13 +34,13 @@ class RoleBasedAccessTester:
         
         try:
             if method == 'GET':
-                response = requests.get(url, headers=headers, cookies=self.cookies)
+                response = self.session.get(url, headers=headers)
             elif method == 'POST':
-                response = requests.post(url, json=data, headers=headers, cookies=self.cookies)
+                response = self.session.post(url, json=data, headers=headers)
             elif method == 'PUT':
-                response = requests.put(url, json=data, headers=headers, cookies=self.cookies)
+                response = self.session.put(url, json=data, headers=headers)
             elif method == 'DELETE':
-                response = requests.delete(url, headers=headers, cookies=self.cookies)
+                response = self.session.delete(url, headers=headers)
 
             success = response.status_code == expected_status
             if success:
@@ -140,7 +146,8 @@ class RoleBasedAccessTester:
         rate_data = {
             "name": f"Test Rate {datetime.now().strftime('%H%M%S')}",
             "group_id": group_id,
-            "annual_rate": 12.5,
+            "tiie_rate": 11.25,
+            "spread": 1.25,
             "grace_days": 30
         }
         success, response = self.run_test("Create Financial Rate", "POST", "financial-rates", 200, rate_data)
