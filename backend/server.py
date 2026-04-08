@@ -98,6 +98,10 @@ class UserLogin(BaseModel):
     email: EmailStr
     password: str
 
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
+    new_password: str
+
 class UserResponse(BaseModel):
     id: str
     email: str
@@ -395,6 +399,24 @@ async def logout(response: Response):
     response.delete_cookie("access_token", path="/")
     response.delete_cookie("refresh_token", path="/")
     return {"message": "Logged out successfully"}
+
+@api_router.post("/auth/reset-password")
+async def reset_password(payload: PasswordResetRequest):
+    email = payload.email.lower()
+
+    if len(payload.new_password or "") < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+
+    user = await db.users.find_one({"email": email})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    await db.users.update_one(
+        {"_id": user["_id"]},
+        {"$set": {"password_hash": hash_password(payload.new_password)}}
+    )
+
+    return {"message": "Password updated successfully"}
 
 @api_router.get("/auth/me")
 async def get_me(request: Request):

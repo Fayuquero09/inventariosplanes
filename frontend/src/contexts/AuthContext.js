@@ -76,6 +76,15 @@ export function AuthProvider({ children }) {
     return userData;
   };
 
+  const resetPassword = async (email, newPassword) => {
+    const response = await axios.post(
+      `${API_URL}/api/auth/reset-password`,
+      { email, new_password: newPassword },
+      { withCredentials: true }
+    );
+    return response.data;
+  };
+
   const logout = async () => {
     try {
       await axios.post(`${API_URL}/api/auth/logout`, {}, { withCredentials: true });
@@ -94,6 +103,7 @@ export function AuthProvider({ children }) {
     login,
     register,
     googleLogin,
+    resetPassword,
     logout,
     isAuthenticated: !!user,
     isAdmin: user?.role === 'app_admin',
