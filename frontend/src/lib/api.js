@@ -61,7 +61,7 @@ export const agenciesApi = {
 
 // Financial Rates
 export const financialRatesApi = {
-  getAll: (groupId) => api.get('/financial-rates', { params: { group_id: groupId } }),
+  getAll: (params) => api.get('/financial-rates', { params }),
   create: (data) => api.post('/financial-rates', data),
   update: (id, data) => api.put(`/financial-rates/${id}`, data),
   delete: (id) => api.delete(`/financial-rates/${id}`)
@@ -91,7 +91,7 @@ export const salesObjectivesApi = {
 
 // Commission Rules
 export const commissionRulesApi = {
-  getAll: (agencyId) => api.get('/commission-rules', { params: { agency_id: agencyId } }),
+  getAll: (params) => api.get('/commission-rules', { params }),
   create: (data) => api.post('/commission-rules', data),
   update: (id, data) => api.put(`/commission-rules/${id}`, data),
   delete: (id) => api.delete(`/commission-rules/${id}`)

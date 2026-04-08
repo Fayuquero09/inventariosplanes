@@ -148,7 +148,8 @@ class FinancialRateCreate(BaseModel):
     group_id: str
     brand_id: Optional[str] = None
     agency_id: Optional[str] = None
-    annual_rate: float  # Tasa anual %
+    tiie_rate: float = 11.25  # Tasa TIIE base actual
+    spread: float  # Spread adicional %
     grace_days: int = 0  # Días de gracia
     name: str
 
@@ -157,7 +158,9 @@ class FinancialRateResponse(BaseModel):
     group_id: str
     brand_id: Optional[str] = None
     agency_id: Optional[str] = None
-    annual_rate: float
+    tiie_rate: float
+    spread: float
+    total_rate: float  # tiie_rate + spread
     grace_days: int
     name: str
     created_at: str
@@ -195,6 +198,7 @@ class VehicleResponse(BaseModel):
     created_at: str
 
 class SalesObjectiveCreate(BaseModel):
+    seller_id: Optional[str] = None  # Si es nulo, aplica a toda la agencia
     agency_id: str
     month: int
     year: int
@@ -204,8 +208,13 @@ class SalesObjectiveCreate(BaseModel):
 
 class SalesObjectiveResponse(BaseModel):
     id: str
+    seller_id: Optional[str] = None
+    seller_name: Optional[str] = None
     agency_id: str
     agency_name: Optional[str] = None
+    brand_id: Optional[str] = None
+    brand_name: Optional[str] = None
+    group_id: Optional[str] = None
     month: int
     year: int
     units_target: int
@@ -729,27 +738,77 @@ async def create_financial_rate(rate_data: FinancialRateCreate, request: Request
         "group_id": rate_data.group_id,
         "brand_id": rate_data.brand_id,
         "agency_id": rate_data.agency_id,
-        "annual_rate": rate_data.annual_rate,
+        "tiie_rate": rate_data.tiie_rate,
+        "spread": rate_data.spread,
         "grace_days": rate_data.grace_days,
         "name": rate_data.name,
         "created_at": datetime.now(timezone.utc)
     }
     result = await db.financial_rates.insert_one(rate_doc)
     rate_doc["id"] = str(result.inserted_id)
+    rate_doc["total_rate"] = rate_data.tiie_rate + rate_data.spread
     return serialize_doc(rate_doc)
 
 @api_router.get("/financial-rates")
-async def get_financial_rates(request: Request, group_id: Optional[str] = None):
+async def get_financial_rates(
+    request: Request, 
+    group_id: Optional[str] = None,
+    brand_id: Optional[str] = None,
+    agency_id: Optional[str] = None
+):
     current_user = await get_current_user(request)
     
     query = {}
-    if group_id:
-        query["group_id"] = group_id
-    elif current_user.get("group_id"):
-        query["group_id"] = current_user["group_id"]
+    
+    # Control de acceso por roles
+    if current_user["role"] in [UserRole.APP_ADMIN, UserRole.APP_USER]:
+        if agency_id:
+            query["agency_id"] = agency_id
+        elif brand_id:
+            query["brand_id"] = brand_id
+        elif group_id:
+            query["group_id"] = group_id
+    else:
+        user_group_id = current_user.get("group_id")
+        if not user_group_id:
+            return []
+        if group_id and group_id != user_group_id:
+            raise HTTPException(status_code=403, detail="No tienes acceso a este grupo")
+        query["group_id"] = user_group_id
+        if agency_id:
+            query["agency_id"] = agency_id
+        elif brand_id:
+            query["brand_id"] = brand_id
     
     rates = await db.financial_rates.find(query).to_list(1000)
-    return [serialize_doc(r) for r in rates]
+    
+    # Enrich with total_rate and names
+    result = []
+    for r in rates:
+        rate = serialize_doc(r)
+        tiie = r.get("tiie_rate", r.get("annual_rate", 11.25))  # Backwards compatible
+        spread = r.get("spread", 0)
+        rate["tiie_rate"] = tiie
+        rate["spread"] = spread
+        rate["total_rate"] = tiie + spread
+        
+        # Get brand/agency names
+        if r.get("brand_id"):
+            brand = await db.brands.find_one({"_id": ObjectId(r["brand_id"])})
+            if brand:
+                rate["brand_name"] = brand["name"]
+        if r.get("agency_id"):
+            agency = await db.agencies.find_one({"_id": ObjectId(r["agency_id"])})
+            if agency:
+                rate["agency_name"] = agency["name"]
+        if r.get("group_id"):
+            group = await db.groups.find_one({"_id": ObjectId(r["group_id"])})
+            if group:
+                rate["group_name"] = group["name"]
+        
+        result.append(rate)
+    
+    return result
 
 @api_router.put("/financial-rates/{rate_id}")
 async def update_financial_rate(rate_id: str, rate_data: FinancialRateCreate, request: Request):
@@ -758,12 +817,15 @@ async def update_financial_rate(rate_id: str, rate_data: FinancialRateCreate, re
         raise HTTPException(status_code=403, detail="Not authorized")
     
     await db.financial_rates.update_one({"_id": ObjectId(rate_id)}, {"$set": {
-        "annual_rate": rate_data.annual_rate,
+        "tiie_rate": rate_data.tiie_rate,
+        "spread": rate_data.spread,
         "grace_days": rate_data.grace_days,
         "name": rate_data.name
     }})
     rate = await db.financial_rates.find_one({"_id": ObjectId(rate_id)})
-    return serialize_doc(rate)
+    result = serialize_doc(rate)
+    result["total_rate"] = rate.get("tiie_rate", 11.25) + rate.get("spread", 0)
+    return result
 
 @api_router.delete("/financial-rates/{rate_id}")
 async def delete_financial_rate(rate_id: str, request: Request):
@@ -777,7 +839,7 @@ async def delete_financial_rate(rate_id: str, request: Request):
 # ============== VEHICLES ROUTES ==============
 
 async def calculate_vehicle_financial_cost(vehicle: dict) -> float:
-    """Calculate the financial cost based on aging and rate"""
+    """Calculate the financial cost based on aging and rate (TIIE + spread)"""
     entry_date = vehicle.get("entry_date")
     if isinstance(entry_date, str):
         entry_date = datetime.fromisoformat(entry_date.replace("Z", "+00:00"))
@@ -795,7 +857,7 @@ async def calculate_vehicle_financial_cost(vehicle: dict) -> float:
     
     aging_days = (end_date - entry_date).days
     
-    # Find applicable rate
+    # Find applicable rate (agency > brand > group priority)
     rate = await db.financial_rates.find_one({
         "$or": [
             {"agency_id": vehicle.get("agency_id")},
@@ -805,10 +867,16 @@ async def calculate_vehicle_financial_cost(vehicle: dict) -> float:
     }, sort=[("agency_id", -1), ("brand_id", -1)])
     
     if not rate:
-        rate = {"annual_rate": 12.0, "grace_days": 0}
+        # Default: TIIE 11.25% + 2% spread = 13.25%
+        rate = {"tiie_rate": 11.25, "spread": 2.0, "grace_days": 0}
+    
+    # Calculate total rate (TIIE + spread)
+    tiie = rate.get("tiie_rate", rate.get("annual_rate", 11.25))
+    spread = rate.get("spread", 0)
+    total_rate = tiie + spread
     
     effective_days = max(0, aging_days - rate.get("grace_days", 0))
-    daily_rate = rate["annual_rate"] / 365 / 100
+    daily_rate = total_rate / 365 / 100
     financial_cost = vehicle["purchase_price"] * daily_rate * effective_days
     
     return round(financial_cost, 2)
@@ -964,8 +1032,16 @@ async def create_sales_objective(objective_data: SalesObjectiveCreate, request: 
     if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN, UserRole.BRAND_ADMIN, UserRole.AGENCY_ADMIN]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
+    # Get agency to link brand and group
+    agency = await db.agencies.find_one({"_id": ObjectId(objective_data.agency_id)})
+    if not agency:
+        raise HTTPException(status_code=404, detail="Agency not found")
+    
     objective_doc = {
+        "seller_id": objective_data.seller_id,
         "agency_id": objective_data.agency_id,
+        "brand_id": agency.get("brand_id"),
+        "group_id": agency.get("group_id"),
         "month": objective_data.month,
         "year": objective_data.year,
         "units_target": objective_data.units_target,
@@ -980,15 +1056,41 @@ async def create_sales_objective(objective_data: SalesObjectiveCreate, request: 
 @api_router.get("/sales-objectives")
 async def get_sales_objectives(
     request: Request,
+    group_id: Optional[str] = None,
+    brand_id: Optional[str] = None,
     agency_id: Optional[str] = None,
+    seller_id: Optional[str] = None,
     month: Optional[int] = None,
     year: Optional[int] = None
 ):
     current_user = await get_current_user(request)
     
     query = {}
-    if agency_id:
-        query["agency_id"] = agency_id
+    
+    # Control de acceso por roles
+    if current_user["role"] in [UserRole.APP_ADMIN, UserRole.APP_USER]:
+        if seller_id:
+            query["seller_id"] = seller_id
+        if agency_id:
+            query["agency_id"] = agency_id
+        elif brand_id:
+            query["brand_id"] = brand_id
+        elif group_id:
+            query["group_id"] = group_id
+    else:
+        user_group_id = current_user.get("group_id")
+        if not user_group_id:
+            return []
+        if group_id and group_id != user_group_id:
+            raise HTTPException(status_code=403, detail="No tienes acceso a este grupo")
+        query["group_id"] = user_group_id
+        if seller_id:
+            query["seller_id"] = seller_id
+        if agency_id:
+            query["agency_id"] = agency_id
+        elif brand_id:
+            query["brand_id"] = brand_id
+    
     if month:
         query["month"] = month
     if year:
@@ -1001,11 +1103,29 @@ async def get_sales_objectives(
     for obj in objectives:
         serialized = serialize_doc(obj)
         
+        # Get seller name
+        if obj.get("seller_id"):
+            seller = await db.users.find_one({"_id": ObjectId(obj["seller_id"])})
+            if seller:
+                serialized["seller_name"] = seller["name"]
+        
         # Get agency name
         if obj.get("agency_id"):
             agency = await db.agencies.find_one({"_id": ObjectId(obj["agency_id"])})
             if agency:
                 serialized["agency_name"] = agency["name"]
+        
+        # Get brand name
+        if obj.get("brand_id"):
+            brand = await db.brands.find_one({"_id": ObjectId(obj["brand_id"])})
+            if brand:
+                serialized["brand_name"] = brand["name"]
+        
+        # Get group name
+        if obj.get("group_id"):
+            group = await db.groups.find_one({"_id": ObjectId(obj["group_id"])})
+            if group:
+                serialized["group_name"] = group["name"]
         
         # Calculate progress
         start_date = datetime(obj["year"], obj["month"], 1, tzinfo=timezone.utc)
@@ -1014,14 +1134,16 @@ async def get_sales_objectives(
         else:
             end_date = datetime(obj["year"], obj["month"] + 1, 1, tzinfo=timezone.utc)
         
-        sales_query = {
-            "agency_id": obj["agency_id"],
-            "sale_date": {"$gte": start_date, "$lt": end_date}
-        }
+        sales_query = {"sale_date": {"$gte": start_date, "$lt": end_date}}
+        if obj.get("seller_id"):
+            sales_query["seller_id"] = obj["seller_id"]
+        elif obj.get("agency_id"):
+            sales_query["agency_id"] = obj["agency_id"]
         
         sales = await db.sales.find(sales_query).to_list(1000)
         serialized["units_sold"] = len(sales)
         serialized["revenue_achieved"] = sum(s.get("sale_price", 0) for s in sales)
+        serialized["commissions_achieved"] = sum(s.get("commission", 0) for s in sales)
         serialized["progress_units"] = round((serialized["units_sold"] / obj["units_target"] * 100) if obj["units_target"] > 0 else 0, 1)
         serialized["progress_revenue"] = round((serialized["revenue_achieved"] / obj["revenue_target"] * 100) if obj["revenue_target"] > 0 else 0, 1)
         
@@ -1051,8 +1173,15 @@ async def create_commission_rule(rule_data: CommissionRuleCreate, request: Reque
     if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN, UserRole.BRAND_ADMIN, UserRole.AGENCY_ADMIN]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
+    # Get agency to link brand and group
+    agency = await db.agencies.find_one({"_id": ObjectId(rule_data.agency_id)})
+    if not agency:
+        raise HTTPException(status_code=404, detail="Agency not found")
+    
     rule_doc = {
         "agency_id": rule_data.agency_id,
+        "brand_id": agency.get("brand_id"),
+        "group_id": agency.get("group_id"),
         "name": rule_data.name,
         "rule_type": rule_data.rule_type,
         "value": rule_data.value,
@@ -1065,15 +1194,57 @@ async def create_commission_rule(rule_data: CommissionRuleCreate, request: Reque
     return serialize_doc(rule_doc)
 
 @api_router.get("/commission-rules")
-async def get_commission_rules(request: Request, agency_id: Optional[str] = None):
+async def get_commission_rules(
+    request: Request, 
+    group_id: Optional[str] = None,
+    brand_id: Optional[str] = None,
+    agency_id: Optional[str] = None
+):
     current_user = await get_current_user(request)
     
     query = {}
-    if agency_id:
-        query["agency_id"] = agency_id
+    
+    # Control de acceso por roles
+    if current_user["role"] in [UserRole.APP_ADMIN, UserRole.APP_USER]:
+        if agency_id:
+            query["agency_id"] = agency_id
+        elif brand_id:
+            query["brand_id"] = brand_id
+        elif group_id:
+            query["group_id"] = group_id
+    else:
+        user_group_id = current_user.get("group_id")
+        if not user_group_id:
+            return []
+        if group_id and group_id != user_group_id:
+            raise HTTPException(status_code=403, detail="No tienes acceso a este grupo")
+        query["group_id"] = user_group_id
+        if agency_id:
+            query["agency_id"] = agency_id
+        elif brand_id:
+            query["brand_id"] = brand_id
     
     rules = await db.commission_rules.find(query).to_list(1000)
-    return [serialize_doc(r) for r in rules]
+    
+    # Enrich with names
+    result = []
+    for r in rules:
+        rule = serialize_doc(r)
+        if r.get("agency_id"):
+            agency = await db.agencies.find_one({"_id": ObjectId(r["agency_id"])})
+            if agency:
+                rule["agency_name"] = agency["name"]
+        if r.get("brand_id"):
+            brand = await db.brands.find_one({"_id": ObjectId(r["brand_id"])})
+            if brand:
+                rule["brand_name"] = brand["name"]
+        if r.get("group_id"):
+            group = await db.groups.find_one({"_id": ObjectId(r["group_id"])})
+            if group:
+                rule["group_name"] = group["name"]
+        result.append(rule)
+    
+    return result
 
 @api_router.put("/commission-rules/{rule_id}")
 async def update_commission_rule(rule_id: str, rule_data: CommissionRuleCreate, request: Request):

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
-import { vehiclesApi, agenciesApi } from '../lib/api';
-import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
+import { vehiclesApi } from '../lib/api';
+import { useHierarchicalFilters, HierarchicalFilters } from '../components/HierarchicalFilters';
+import { Card, CardContent } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
@@ -34,7 +35,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger
 } from '../components/ui/dropdown-menu';
-import { Plus, Upload, MagnifyingGlass, Funnel, DotsThree, Car } from '@phosphor-icons/react';
+import { Plus, Upload, MagnifyingGlass, DotsThree, Car } from '@phosphor-icons/react';
 import { toast } from 'sonner';
 
 function AgingBadge({ days }) {
@@ -54,11 +55,10 @@ function StatusBadge({ status }) {
 }
 
 export default function InventoryPage() {
+  const filters = useHierarchicalFilters();
   const [vehicles, setVehicles] = useState([]);
-  const [agencies, setAgencies] = useState([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
-  const [filterAgency, setFilterAgency] = useState('all');
   const [filterStatus, setFilterStatus] = useState('all');
   const [filterType, setFilterType] = useState('all');
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
@@ -75,23 +75,21 @@ export default function InventoryPage() {
   });
 
   const fetchData = useCallback(async () => {
+    setLoading(true);
     try {
-      const [vehiclesRes, agenciesRes] = await Promise.all([
-        vehiclesApi.getAll({
-          agency_id: filterAgency !== 'all' ? filterAgency : undefined,
-          status: filterStatus !== 'all' ? filterStatus : undefined,
-          vehicle_type: filterType !== 'all' ? filterType : undefined
-        }),
-        agenciesApi.getAll()
-      ]);
-      setVehicles(vehiclesRes.data);
-      setAgencies(agenciesRes.data);
+      const params = {
+        ...filters.getFilterParams(),
+        status: filterStatus !== 'all' ? filterStatus : undefined,
+        vehicle_type: filterType !== 'all' ? filterType : undefined
+      };
+      const res = await vehiclesApi.getAll(params);
+      setVehicles(res.data);
     } catch (error) {
       toast.error('Error al cargar datos');
     } finally {
       setLoading(false);
     }
-  }, [filterAgency, filterStatus, filterType]);
+  }, [filters.selectedGroup, filters.selectedBrand, filters.selectedAgency, filterStatus, filterType]);
 
   useEffect(() => {
     fetchData();
@@ -161,6 +159,13 @@ export default function InventoryPage() {
     return true;
   });
 
+  // Calculate totals
+  const totals = {
+    count: filteredVehicles.length,
+    value: filteredVehicles.reduce((sum, v) => sum + (v.purchase_price || 0), 0),
+    financialCost: filteredVehicles.reduce((sum, v) => sum + (v.financial_cost || 0), 0)
+  };
+
   return (
     <div className="space-y-6" data-testid="inventory-page">
       {/* Header */}
@@ -170,7 +175,7 @@ export default function InventoryPage() {
             Inventario de Vehículos
           </h1>
           <p className="text-muted-foreground">
-            {filteredVehicles.length} vehículos encontrados
+            {filteredVehicles.length} vehículos • {formatCurrency(totals.value)} valor • {formatCurrency(totals.financialCost)} costo financiero
           </p>
         </div>
         <div className="flex gap-2">
@@ -299,7 +304,7 @@ export default function InventoryPage() {
                         <SelectValue placeholder="Seleccionar" />
                       </SelectTrigger>
                       <SelectContent>
-                        {agencies.map((agency) => (
+                        {filters.filteredAgencies.map((agency) => (
                           <SelectItem key={agency.id} value={agency.id}>
                             {agency.name}
                           </SelectItem>
@@ -322,7 +327,10 @@ export default function InventoryPage() {
         </div>
       </div>
 
-      {/* Filters */}
+      {/* Hierarchical Filters */}
+      <HierarchicalFilters filters={filters} />
+
+      {/* Additional Filters */}
       <Card className="border-border/40">
         <CardContent className="p-4">
           <div className="flex flex-col sm:flex-row gap-4">
@@ -336,19 +344,6 @@ export default function InventoryPage() {
                 data-testid="search-vehicles-input"
               />
             </div>
-            <Select value={filterAgency} onValueChange={setFilterAgency}>
-              <SelectTrigger className="w-full sm:w-[180px]" data-testid="filter-agency-select">
-                <SelectValue placeholder="Todas las agencias" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Todas las agencias</SelectItem>
-                {agencies.map((agency) => (
-                  <SelectItem key={agency.id} value={agency.id}>
-                    {agency.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
             <Select value={filterStatus} onValueChange={setFilterStatus}>
               <SelectTrigger className="w-full sm:w-[150px]" data-testid="filter-status-select">
                 <SelectValue placeholder="Todos los estados" />
