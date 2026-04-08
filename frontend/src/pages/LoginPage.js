@@ -9,6 +9,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../co
 import { Car, Eye, EyeSlash } from '@phosphor-icons/react';
 
 // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
+const API_URL = process.env.REACT_APP_BACKEND_URL;
 
 function LoginContent() {
   const [loginEmail, setLoginEmail] = useState('');
@@ -34,7 +35,11 @@ function LoginContent() {
       navigate('/');
     } catch (err) {
       const detail = err.response?.data?.detail;
-      setError(typeof detail === 'string' ? detail : 'Credenciales inválidas');
+      if (!err.response) {
+        setError(`No se pudo conectar al backend (${API_URL || 'REACT_APP_BACKEND_URL no definida'})`);
+      } else {
+        setError(typeof detail === 'string' ? detail : 'Credenciales inválidas');
+      }
     } finally {
       setLoading(false);
     }

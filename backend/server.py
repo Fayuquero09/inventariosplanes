@@ -402,8 +402,13 @@ async def login(user_data: UserLogin, response: Response):
     user = await db.users.find_one({"email": email})
     if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    
-    if not verify_password(user_data.password, user["password_hash"]):
+
+    password_raw = user_data.password or ""
+    password_trimmed = password_raw.strip()
+    if not (
+        verify_password(password_raw, user["password_hash"]) or
+        (password_trimmed != password_raw and verify_password(password_trimmed, user["password_hash"]))
+    ):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
     user_id = str(user["_id"])
