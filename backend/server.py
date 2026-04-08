@@ -2537,11 +2537,28 @@ async def health():
 # Include the router in the main app
 app.include_router(api_router)
 
+# CORS helpers
+def _normalize_origin(origin: Optional[str]) -> Optional[str]:
+    if not origin:
+        return None
+    value = origin.strip().rstrip("/")
+    return value or None
+
+def _build_allowed_origins() -> List[str]:
+    origins = {
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    }
+    frontend_origin = _normalize_origin(os.environ.get("FRONTEND_URL"))
+    if frontend_origin:
+        origins.add(frontend_origin)
+    return sorted(origins)
+
 # CORS Configuration
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=[os.environ.get('FRONTEND_URL', 'http://localhost:3000'), "*"],
+    allow_origins=_build_allowed_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
 )
