@@ -562,21 +562,45 @@ async def get_sellers(request: Request, agency_id: Optional[str] = None, brand_i
     current_user = await get_current_user(request)
     
     query = {"role": UserRole.SELLER}
-    
-    if agency_id:
-        query["agency_id"] = agency_id
-    elif brand_id:
-        # Get all agencies of this brand
-        agencies = await db.agencies.find({"brand_id": brand_id}).to_list(1000)
-        agency_ids = [a["_id"] for a in agencies]
-        if agency_ids:
-            query["agency_id"] = {"$in": [str(a) for a in agency_ids]}
-    elif group_id:
-        # Get all agencies of this group
-        agencies = await db.agencies.find({"group_id": group_id}).to_list(1000)
-        agency_ids = [str(a["_id"]) for a in agencies]
-        if agency_ids:
-            query["agency_id"] = {"$in": agency_ids}
+
+    if current_user["role"] in [UserRole.APP_ADMIN, UserRole.APP_USER]:
+        if agency_id:
+            query["agency_id"] = agency_id
+        elif brand_id:
+            agencies = await db.agencies.find({"brand_id": brand_id}).to_list(1000)
+            agency_ids = [str(a["_id"]) for a in agencies]
+            query["agency_id"] = {"$in": agency_ids} if agency_ids else "__none__"
+        elif group_id:
+            agencies = await db.agencies.find({"group_id": group_id}).to_list(1000)
+            agency_ids = [str(a["_id"]) for a in agencies]
+            query["agency_id"] = {"$in": agency_ids} if agency_ids else "__none__"
+    else:
+        user_group_id = current_user.get("group_id")
+        if not user_group_id:
+            return []
+        if group_id and group_id != user_group_id:
+            raise HTTPException(status_code=403, detail="No tienes acceso a este grupo")
+
+        if agency_id:
+            agency = await db.agencies.find_one({"_id": ObjectId(agency_id)})
+            if not agency:
+                return []
+            if agency.get("group_id") != user_group_id:
+                raise HTTPException(status_code=403, detail="No tienes acceso a esta agencia")
+            query["agency_id"] = agency_id
+        elif brand_id:
+            brand = await db.brands.find_one({"_id": ObjectId(brand_id)})
+            if not brand:
+                return []
+            if brand.get("group_id") != user_group_id:
+                raise HTTPException(status_code=403, detail="No tienes acceso a esta marca")
+            agencies = await db.agencies.find({"brand_id": brand_id, "group_id": user_group_id}).to_list(1000)
+            agency_ids = [str(a["_id"]) for a in agencies]
+            query["agency_id"] = {"$in": agency_ids} if agency_ids else "__none__"
+        else:
+            agencies = await db.agencies.find({"group_id": user_group_id}).to_list(1000)
+            agency_ids = [str(a["_id"]) for a in agencies]
+            query["agency_id"] = {"$in": agency_ids} if agency_ids else "__none__"
     
     sellers = await db.users.find(query, {"password_hash": 0}).to_list(1000)
     

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { groupsApi, brandsApi, agenciesApi, usersApi, organizationImportApi } from '../lib/api';
+import { groupsApi, brandsApi, agenciesApi, usersApi, organizationImportApi, authApi, sellersApi } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card';
 import { Button } from '../components/ui/button';
@@ -36,6 +36,8 @@ import {
   Factory,
   Storefront,
   Users,
+  UserPlus,
+  User,
   UploadSimple,
   Pencil,
   Shield
@@ -60,6 +62,7 @@ export default function SettingsPage() {
   const [groups, setGroups] = useState([]);
   const [brands, setBrands] = useState([]);
   const [agencies, setAgencies] = useState([]);
+  const [sellers, setSellers] = useState([]);
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   
@@ -67,6 +70,7 @@ export default function SettingsPage() {
   const [groupDialog, setGroupDialog] = useState(false);
   const [brandDialog, setBrandDialog] = useState(false);
   const [agencyDialog, setAgencyDialog] = useState(false);
+  const [sellerDialog, setSellerDialog] = useState(false);
   const [importDialog, setImportDialog] = useState(false);
   const [editingGroup, setEditingGroup] = useState(null);
   const [importingStructure, setImportingStructure] = useState(false);
@@ -75,6 +79,7 @@ export default function SettingsPage() {
   const [groupForm, setGroupForm] = useState({ name: '', description: '' });
   const [brandForm, setBrandForm] = useState({ name: '', group_id: '', logo_url: '' });
   const [agencyForm, setAgencyForm] = useState({ name: '', brand_id: '', address: '', city: '' });
+  const [sellerForm, setSellerForm] = useState({ name: '', email: '', password: '', agency_id: '' });
 
   const fetchData = useCallback(async () => {
     try {
@@ -86,6 +91,9 @@ export default function SettingsPage() {
       setGroups(groupsRes.data);
       setBrands(brandsRes.data);
       setAgencies(agenciesRes.data);
+
+      const sellersRes = await sellersApi.getAll();
+      setSellers(sellersRes.data || []);
 
       if (isAdmin) {
         const usersRes = await usersApi.getAll();
@@ -101,6 +109,12 @@ export default function SettingsPage() {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  useEffect(() => {
+    if (groups.length === 1 && !brandForm.group_id) {
+      setBrandForm((prev) => ({ ...prev, group_id: groups[0].id }));
+    }
+  }, [groups, brandForm.group_id]);
 
   const handleSaveGroup = async (e) => {
     e.preventDefault();
@@ -164,6 +178,35 @@ export default function SettingsPage() {
     }
   };
 
+  const handleCreateSeller = async (e) => {
+    e.preventDefault();
+    try {
+      const agency = agencies.find((a) => a.id === sellerForm.agency_id);
+      if (!agency) {
+        toast.error('Selecciona una agencia valida');
+        return;
+      }
+
+      await authApi.register({
+        name: sellerForm.name,
+        email: (sellerForm.email || '').trim(),
+        password: sellerForm.password,
+        role: 'seller',
+        group_id: agency.group_id,
+        brand_id: agency.brand_id,
+        agency_id: agency.id
+      });
+
+      toast.success('Vendedor creado correctamente');
+      setSellerDialog(false);
+      setSellerForm({ name: '', email: '', password: '', agency_id: '' });
+      fetchData();
+    } catch (error) {
+      const detail = error.response?.data?.detail;
+      toast.error(typeof detail === 'string' ? detail : 'Error al crear vendedor');
+    }
+  };
+
   const handleUpdateUserRole = async (userId, newRole) => {
     try {
       await usersApi.update(userId, { role: newRole });
@@ -214,7 +257,11 @@ export default function SettingsPage() {
 
   const getGroupName = (id) => groups.find((g) => g.id === id)?.name || '-';
   const getBrandName = (id) => brands.find((b) => b.id === id)?.name || '-';
+  const getAgencyName = (id) => agencies.find((a) => a.id === id)?.name || '-';
   const getRoleLabel = (role) => ROLES.find((r) => r.value === role)?.label || role;
+  const canCreateBrand = groups.length > 0;
+  const canCreateAgency = brands.length > 0;
+  const canCreateSeller = agencies.length > 0;
 
   return (
     <div className="space-y-6" data-testid="settings-page">
@@ -375,7 +422,7 @@ export default function SettingsPage() {
               </div>
               <Dialog open={brandDialog} onOpenChange={setBrandDialog}>
                 <DialogTrigger asChild>
-                  <Button variant="outline" size="sm" data-testid="add-brand-btn">
+                  <Button variant="outline" size="sm" data-testid="add-brand-btn" disabled={!canCreateBrand}>
                     <Plus size={16} className="mr-1" /> Agregar
                   </Button>
                 </DialogTrigger>
@@ -451,7 +498,7 @@ export default function SettingsPage() {
               </div>
               <Dialog open={agencyDialog} onOpenChange={setAgencyDialog}>
                 <DialogTrigger asChild>
-                  <Button variant="outline" size="sm" data-testid="add-agency-btn">
+                  <Button variant="outline" size="sm" data-testid="add-agency-btn" disabled={!canCreateAgency}>
                     <Plus size={16} className="mr-1" /> Agregar
                   </Button>
                 </DialogTrigger>
@@ -522,6 +569,106 @@ export default function SettingsPage() {
                         <div className="text-sm text-muted-foreground">
                           {agency.brand_name || getBrandName(agency.brand_id)} • {agency.city || 'Sin ciudad'}
                         </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Sellers */}
+          <Card className="border-border/40">
+            <CardHeader className="flex flex-row items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-md bg-[#7C3AED]/10 flex items-center justify-center">
+                  <User size={20} weight="duotone" className="text-[#7C3AED]" />
+                </div>
+                <div>
+                  <CardTitle className="text-lg">Vendedores</CardTitle>
+                  <CardDescription>Usuarios operativos dentro de cada agencia</CardDescription>
+                </div>
+              </div>
+              {(isAdmin || user?.role === 'group_admin') && (
+                <Dialog open={sellerDialog} onOpenChange={setSellerDialog}>
+                  <DialogTrigger asChild>
+                    <Button variant="outline" size="sm" data-testid="add-seller-btn" disabled={!canCreateSeller}>
+                      <UserPlus size={16} className="mr-1" /> Agregar
+                    </Button>
+                  </DialogTrigger>
+                  <DialogContent>
+                    <DialogHeader>
+                      <DialogTitle>Nuevo Vendedor</DialogTitle>
+                    </DialogHeader>
+                    <form onSubmit={handleCreateSeller} className="space-y-4">
+                      <div className="space-y-2">
+                        <Label>Agencia</Label>
+                        <Select value={sellerForm.agency_id} onValueChange={(v) => setSellerForm({ ...sellerForm, agency_id: v })} required>
+                          <SelectTrigger data-testid="seller-agency-select">
+                            <SelectValue placeholder="Seleccionar agencia" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {agencies.map((a) => (
+                              <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-2">
+                        <Label>Nombre</Label>
+                        <Input
+                          value={sellerForm.name}
+                          onChange={(e) => setSellerForm({ ...sellerForm, name: e.target.value })}
+                          required
+                          data-testid="seller-name-input"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label>Email</Label>
+                        <Input
+                          type="email"
+                          value={sellerForm.email}
+                          onChange={(e) => setSellerForm({ ...sellerForm, email: e.target.value })}
+                          required
+                          data-testid="seller-email-input"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label>Contraseña temporal</Label>
+                        <Input
+                          type="password"
+                          value={sellerForm.password}
+                          onChange={(e) => setSellerForm({ ...sellerForm, password: e.target.value })}
+                          required
+                          data-testid="seller-password-input"
+                        />
+                      </div>
+                      <div className="flex justify-end gap-2">
+                        <Button type="button" variant="outline" onClick={() => setSellerDialog(false)}>Cancelar</Button>
+                        <Button type="submit" className="bg-[#002FA7] hover:bg-[#002FA7]/90" data-testid="save-seller-btn">Crear</Button>
+                      </div>
+                    </form>
+                  </DialogContent>
+                </Dialog>
+              )}
+            </CardHeader>
+            <CardContent>
+              {loading ? (
+                <div className="space-y-2">
+                  {[1, 2, 3].map((i) => <Skeleton key={i} className="h-12 w-full" />)}
+                </div>
+              ) : sellers.length === 0 ? (
+                <p className="text-center py-8 text-muted-foreground">No hay vendedores configurados</p>
+              ) : (
+                <div className="space-y-2">
+                  {sellers.map((seller) => (
+                    <div key={seller.id} className="flex items-center justify-between p-3 rounded-md bg-muted/30" data-testid={`seller-${seller.id}`}>
+                      <div>
+                        <div className="font-medium">{seller.name}</div>
+                        <div className="text-sm text-muted-foreground">{seller.email}</div>
+                      </div>
+                      <div className="text-sm text-muted-foreground">
+                        {getAgencyName(seller.agency_id)}
                       </div>
                     </div>
                   ))}
