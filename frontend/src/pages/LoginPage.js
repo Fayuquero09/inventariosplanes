@@ -1,12 +1,11 @@
 import { useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { GoogleLogin, GoogleOAuthProvider } from '@react-oauth/google';
 import { useAuth } from '../contexts/AuthContext';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { Car, Eye, EyeSlash } from '@phosphor-icons/react';
 
 // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
@@ -14,11 +13,7 @@ import { Car, Eye, EyeSlash } from '@phosphor-icons/react';
 function LoginContent() {
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
-  const [registerName, setRegisterName] = useState('');
-  const [registerEmail, setRegisterEmail] = useState('');
-  const [registerPassword, setRegisterPassword] = useState('');
   const [showLoginPassword, setShowLoginPassword] = useState(false);
-  const [showRegisterPassword, setShowRegisterPassword] = useState(false);
   const [showResetPassword, setShowResetPassword] = useState(false);
   const [showResetSection, setShowResetSection] = useState(false);
   const [resetEmail, setResetEmail] = useState('');
@@ -27,7 +22,7 @@ function LoginContent() {
   const [resetMessage, setResetMessage] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const { login, register, googleLogin, resetPassword: resetPasswordAction } = useAuth();
+  const { login, googleLogin, resetPassword: resetPasswordAction } = useAuth();
   const navigate = useNavigate();
 
   const handleLogin = async (e) => {
@@ -40,21 +35,6 @@ function LoginContent() {
     } catch (err) {
       const detail = err.response?.data?.detail;
       setError(typeof detail === 'string' ? detail : 'Credenciales inválidas');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleRegister = async (e) => {
-    e.preventDefault();
-    setError('');
-    setLoading(true);
-    try {
-      await register(registerName, registerEmail, registerPassword);
-      navigate('/');
-    } catch (err) {
-      const detail = err.response?.data?.detail;
-      setError(typeof detail === 'string' ? detail : 'Error al registrar');
     } finally {
       setLoading(false);
     }
@@ -140,208 +120,135 @@ function LoginContent() {
           <Card className="border-border/40">
             <CardHeader className="space-y-1">
               <CardTitle className="text-2xl" style={{ fontFamily: 'Cabinet Grotesk' }}>Bienvenido</CardTitle>
-              <CardDescription>Ingresa a tu cuenta o regístrate</CardDescription>
+              <CardDescription>Ingresa a tu cuenta</CardDescription>
             </CardHeader>
             <CardContent>
-              <Tabs defaultValue="login" className="w-full">
-                <TabsList className="grid w-full grid-cols-2 mb-4">
-                  <TabsTrigger value="login" data-testid="login-tab">Iniciar Sesión</TabsTrigger>
-                  <TabsTrigger value="register" data-testid="register-tab">Registrarse</TabsTrigger>
-                </TabsList>
-
-                <TabsContent value="login">
-                  <form onSubmit={handleLogin} className="space-y-4">
-                    <div className="space-y-2">
-                      <Label htmlFor="login-email">Email</Label>
-                      <Input
-                        id="login-email"
-                        type="email"
-                        placeholder="tu@email.com"
-                        value={loginEmail}
-                        onChange={(e) => setLoginEmail(e.target.value)}
-                        required
-                        data-testid="login-email-input"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="login-password">Contraseña</Label>
-                      <div className="relative">
-                        <Input
-                          id="login-password"
-                          type={showLoginPassword ? 'text' : 'password'}
-                          value={loginPassword}
-                          onChange={(e) => setLoginPassword(e.target.value)}
-                          required
-                          className="pr-10"
-                          data-testid="login-password-input"
-                        />
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="absolute inset-y-0 right-0 h-full px-3"
-                          onClick={() => setShowLoginPassword((prev) => !prev)}
-                          data-testid="toggle-login-password-btn"
-                        >
-                          {showLoginPassword ? <EyeSlash size={18} /> : <Eye size={18} />}
-                        </Button>
-                      </div>
-                    </div>
-                    {error && (
-                      <p className="text-sm text-destructive" data-testid="login-error">{error}</p>
-                    )}
-                    {resetMessage && (
-                      <p className="text-sm text-[#2A9D8F]" data-testid="reset-success-message">{resetMessage}</p>
-                    )}
-                    <Button
-                      type="submit"
-                      className="w-full bg-[#002FA7] hover:bg-[#002FA7]/90"
-                      disabled={loading}
-                      data-testid="login-submit-btn"
-                    >
-                      {loading ? 'Ingresando...' : 'Iniciar Sesión'}
-                    </Button>
-
+              <form onSubmit={handleLogin} className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="login-email">Email</Label>
+                  <Input
+                    id="login-email"
+                    type="email"
+                    placeholder="tu@email.com"
+                    value={loginEmail}
+                    onChange={(e) => setLoginEmail(e.target.value)}
+                    required
+                    data-testid="login-email-input"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="login-password">Contraseña</Label>
+                  <div className="relative">
+                    <Input
+                      id="login-password"
+                      type={showLoginPassword ? 'text' : 'password'}
+                      value={loginPassword}
+                      onChange={(e) => setLoginPassword(e.target.value)}
+                      required
+                      className="pr-10"
+                      data-testid="login-password-input"
+                    />
                     <Button
                       type="button"
-                      variant="link"
-                      className="px-0 text-sm"
-                      onClick={() => {
-                        setError('');
-                        setResetMessage('');
-                        setShowResetSection((prev) => !prev);
-                      }}
-                      data-testid="show-reset-password-btn"
+                      variant="ghost"
+                      size="sm"
+                      className="absolute inset-y-0 right-0 h-full px-3"
+                      onClick={() => setShowLoginPassword((prev) => !prev)}
+                      data-testid="toggle-login-password-btn"
                     >
-                      {showResetSection ? 'Cancelar reseteo de contraseña' : '¿Olvidaste tu contraseña?'}
+                      {showLoginPassword ? <EyeSlash size={18} /> : <Eye size={18} />}
                     </Button>
+                  </div>
+                </div>
+                {error && (
+                  <p className="text-sm text-destructive" data-testid="login-error">{error}</p>
+                )}
+                {resetMessage && (
+                  <p className="text-sm text-[#2A9D8F]" data-testid="reset-success-message">{resetMessage}</p>
+                )}
+                <Button
+                  type="submit"
+                  className="w-full bg-[#002FA7] hover:bg-[#002FA7]/90"
+                  disabled={loading}
+                  data-testid="login-submit-btn"
+                >
+                  {loading ? 'Ingresando...' : 'Iniciar Sesión'}
+                </Button>
 
-                    {showResetSection && (
-                      <div className="rounded-md border border-border/50 p-3 space-y-3">
-                        <div className="space-y-2">
-                          <Label htmlFor="reset-email">Email de la cuenta</Label>
-                          <Input
-                            id="reset-email"
-                            type="email"
-                            value={resetEmail}
-                            onChange={(e) => setResetEmail(e.target.value)}
-                            required
-                            data-testid="reset-email-input"
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="reset-password">Nueva contraseña</Label>
-                          <div className="relative">
-                            <Input
-                              id="reset-password"
-                              type={showResetPassword ? 'text' : 'password'}
-                              value={resetPassword}
-                              onChange={(e) => setResetPassword(e.target.value)}
-                              required
-                              className="pr-10"
-                              data-testid="reset-password-input"
-                            />
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              className="absolute inset-y-0 right-0 h-full px-3"
-                              onClick={() => setShowResetPassword((prev) => !prev)}
-                              data-testid="toggle-reset-password-btn"
-                            >
-                              {showResetPassword ? <EyeSlash size={18} /> : <Eye size={18} />}
-                            </Button>
-                          </div>
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="reset-confirm-password">Confirmar nueva contraseña</Label>
-                          <Input
-                            id="reset-confirm-password"
-                            type={showResetPassword ? 'text' : 'password'}
-                            value={resetConfirmPassword}
-                            onChange={(e) => setResetConfirmPassword(e.target.value)}
-                            required
-                            data-testid="reset-confirm-password-input"
-                          />
-                        </div>
-                        <Button
-                          type="button"
-                          className="w-full"
-                          disabled={loading}
-                          onClick={handleResetPassword}
-                          data-testid="reset-password-submit-btn"
-                        >
-                          {loading ? 'Actualizando...' : 'Resetear contraseña'}
-                        </Button>
-                      </div>
-                    )}
-                  </form>
-                </TabsContent>
+                <Button
+                  type="button"
+                  variant="link"
+                  className="px-0 text-sm"
+                  onClick={() => {
+                    setError('');
+                    setResetMessage('');
+                    setShowResetSection((prev) => !prev);
+                  }}
+                  data-testid="show-reset-password-btn"
+                >
+                  {showResetSection ? 'Cancelar reseteo de contraseña' : '¿Olvidaste tu contraseña?'}
+                </Button>
 
-                <TabsContent value="register">
-                  <form onSubmit={handleRegister} className="space-y-4">
+                {showResetSection && (
+                  <div className="rounded-md border border-border/50 p-3 space-y-3">
                     <div className="space-y-2">
-                      <Label htmlFor="register-name">Nombre</Label>
+                      <Label htmlFor="reset-email">Email de la cuenta</Label>
                       <Input
-                        id="register-name"
-                        type="text"
-                        placeholder="Tu nombre"
-                        value={registerName}
-                        onChange={(e) => setRegisterName(e.target.value)}
-                        required
-                        data-testid="register-name-input"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="register-email">Email</Label>
-                      <Input
-                        id="register-email"
+                        id="reset-email"
                         type="email"
-                        placeholder="tu@email.com"
-                        value={registerEmail}
-                        onChange={(e) => setRegisterEmail(e.target.value)}
+                        value={resetEmail}
+                        onChange={(e) => setResetEmail(e.target.value)}
                         required
-                        data-testid="register-email-input"
+                        data-testid="reset-email-input"
                       />
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="register-password">Contraseña</Label>
+                      <Label htmlFor="reset-password">Nueva contraseña</Label>
                       <div className="relative">
                         <Input
-                          id="register-password"
-                          type={showRegisterPassword ? 'text' : 'password'}
-                          value={registerPassword}
-                          onChange={(e) => setRegisterPassword(e.target.value)}
+                          id="reset-password"
+                          type={showResetPassword ? 'text' : 'password'}
+                          value={resetPassword}
+                          onChange={(e) => setResetPassword(e.target.value)}
                           required
                           className="pr-10"
-                          data-testid="register-password-input"
+                          data-testid="reset-password-input"
                         />
                         <Button
                           type="button"
                           variant="ghost"
                           size="sm"
                           className="absolute inset-y-0 right-0 h-full px-3"
-                          onClick={() => setShowRegisterPassword((prev) => !prev)}
-                          data-testid="toggle-register-password-btn"
+                          onClick={() => setShowResetPassword((prev) => !prev)}
+                          data-testid="toggle-reset-password-btn"
                         >
-                          {showRegisterPassword ? <EyeSlash size={18} /> : <Eye size={18} />}
+                          {showResetPassword ? <EyeSlash size={18} /> : <Eye size={18} />}
                         </Button>
                       </div>
                     </div>
-                    {error && (
-                      <p className="text-sm text-destructive" data-testid="register-error">{error}</p>
-                    )}
+                    <div className="space-y-2">
+                      <Label htmlFor="reset-confirm-password">Confirmar nueva contraseña</Label>
+                      <Input
+                        id="reset-confirm-password"
+                        type={showResetPassword ? 'text' : 'password'}
+                        value={resetConfirmPassword}
+                        onChange={(e) => setResetConfirmPassword(e.target.value)}
+                        required
+                        data-testid="reset-confirm-password-input"
+                      />
+                    </div>
                     <Button
-                      type="submit"
-                      className="w-full bg-[#002FA7] hover:bg-[#002FA7]/90"
+                      type="button"
+                      className="w-full"
                       disabled={loading}
-                      data-testid="register-submit-btn"
+                      onClick={handleResetPassword}
+                      data-testid="reset-password-submit-btn"
                     >
-                      {loading ? 'Registrando...' : 'Crear Cuenta'}
+                      {loading ? 'Actualizando...' : 'Resetear contraseña'}
                     </Button>
-                  </form>
-                </TabsContent>
-              </Tabs>
+                  </div>
+                )}
+              </form>
 
               {googleClientId && (
                 <>
