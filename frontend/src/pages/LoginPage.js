@@ -30,7 +30,7 @@ function LoginContent() {
     setError('');
     setLoading(true);
     try {
-      await login(loginEmail, loginPassword);
+      await login((loginEmail || '').trim(), loginPassword);
       navigate('/');
     } catch (err) {
       const detail = err.response?.data?.detail;
@@ -70,7 +70,7 @@ function LoginContent() {
 
     setLoading(true);
     try {
-      await resetPasswordAction(resetEmail, resetPassword);
+      await resetPasswordAction((resetEmail || '').trim(), resetPassword);
       setResetMessage('Contraseña actualizada. Ya puedes iniciar sesión.');
       setResetPassword('');
       setResetConfirmPassword('');

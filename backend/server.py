@@ -345,7 +345,7 @@ async def register(user_data: UserCreate, request: Request):
             raise HTTPException(status_code=403, detail="Cannot create users outside your group")
         user_data.group_id = current_user["group_id"]
 
-    email = user_data.email.lower()
+    email = str(user_data.email).strip().lower()
     existing = await db.users.find_one({"email": email})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -398,7 +398,7 @@ async def register(user_data: UserCreate, request: Request):
 
 @api_router.post("/auth/login")
 async def login(user_data: UserLogin, response: Response):
-    email = user_data.email.lower()
+    email = str(user_data.email).strip().lower()
     user = await db.users.find_one({"email": email})
     if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -433,7 +433,7 @@ async def logout(response: Response):
 
 @api_router.post("/auth/reset-password")
 async def reset_password(payload: PasswordResetRequest):
-    email = payload.email.lower()
+    email = str(payload.email).strip().lower()
 
     if len(payload.new_password or "") < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
@@ -476,7 +476,7 @@ async def google_auth(request: Request, response: Response):
         decoded = base64.urlsafe_b64decode(payload)
         google_user = json.loads(decoded)
         
-        email = google_user.get("email", "").lower()
+        email = str(google_user.get("email", "")).strip().lower()
         name = google_user.get("name", "")
         
         # Check if user exists
