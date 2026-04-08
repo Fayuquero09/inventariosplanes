@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { groupsApi, brandsApi, agenciesApi, usersApi, organizationImportApi, authApi, sellersApi } from '../lib/api';
+import { groupsApi, brandsApi, agenciesApi, usersApi, organizationImportApi, authApi, sellersApi, vehicleCatalogApi } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card';
 import { Button } from '../components/ui/button';
@@ -57,6 +57,8 @@ const ROLES = [
   { value: 'seller', label: 'Vendedor' }
 ];
 
+const normalizeBrandKey = (value) => (value || '').trim().toLowerCase();
+
 export default function SettingsPage() {
   const { user, isAdmin } = useAuth();
   const canImportStructure = isAdmin || user?.role === 'group_admin';
@@ -65,7 +67,9 @@ export default function SettingsPage() {
   const [agencies, setAgencies] = useState([]);
   const [sellers, setSellers] = useState([]);
   const [users, setUsers] = useState([]);
+  const [catalogMakes, setCatalogMakes] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadingCatalog, setLoadingCatalog] = useState(false);
   
   // Dialog states
   const [groupDialog, setGroupDialog] = useState(false);
@@ -82,6 +86,19 @@ export default function SettingsPage() {
   const [brandForm, setBrandForm] = useState({ name: '', group_id: '', logo_url: '' });
   const [agencyForm, setAgencyForm] = useState({ name: '', brand_id: '', address: '', city: '' });
   const [sellerForm, setSellerForm] = useState({ name: '', email: '', password: '', agency_id: '' });
+
+  const fetchCatalogMakes = useCallback(async () => {
+    setLoadingCatalog(true);
+    try {
+      const res = await vehicleCatalogApi.getMakes();
+      setCatalogMakes(res.data?.items || []);
+    } catch (error) {
+      setCatalogMakes([]);
+      toast.error('No se pudo cargar el catalogo de marcas de Strapi');
+    } finally {
+      setLoadingCatalog(false);
+    }
+  }, []);
 
   const fetchData = useCallback(async () => {
     try {
@@ -113,6 +130,10 @@ export default function SettingsPage() {
   }, [fetchData]);
 
   useEffect(() => {
+    fetchCatalogMakes();
+  }, [fetchCatalogMakes]);
+
+  useEffect(() => {
     if (groups.length === 1 && !brandForm.group_id) {
       setBrandForm((prev) => ({ ...prev, group_id: groups[0].id }));
     }
@@ -131,15 +152,26 @@ export default function SettingsPage() {
       }
 
       if (targetGroupId && groupBrandsToAssign.length > 0) {
-        const selectedBrands = brands.filter((brand) => groupBrandsToAssign.includes(brand.id));
+        const selectedMakes = groupBrandsToAssign
+          .map((name) => (name || '').trim())
+          .filter(Boolean);
+
         await Promise.all(
-          selectedBrands.map((brand) =>
-            brandsApi.update(brand.id, {
-              name: brand.name,
+          selectedMakes.map(async (makeName) => {
+            const existing = brands.find((brand) => normalizeBrandKey(brand.name) === normalizeBrandKey(makeName));
+            if (existing) {
+              return brandsApi.update(existing.id, {
+                name: existing.name,
+                group_id: targetGroupId,
+                logo_url: existing.logo_url || ''
+              });
+            }
+            return brandsApi.create({
+              name: makeName,
               group_id: targetGroupId,
-              logo_url: brand.logo_url || ''
-            })
-          )
+              logo_url: ''
+            });
+          })
         );
       }
 
@@ -178,12 +210,12 @@ export default function SettingsPage() {
     }
   };
 
-  const toggleGroupBrandSelection = (brandId, checked) => {
+  const toggleGroupBrandSelection = (brandName, checked) => {
     setGroupBrandsToAssign((prev) => {
       if (checked) {
-        return prev.includes(brandId) ? prev : [...prev, brandId];
+        return prev.includes(brandName) ? prev : [...prev, brandName];
       }
-      return prev.filter((id) => id !== brandId);
+      return prev.filter((name) => name !== brandName);
     });
   };
 
@@ -294,8 +326,37 @@ export default function SettingsPage() {
   const getBrandName = (id) => brands.find((b) => b.id === id)?.name || '-';
   const getAgencyName = (id) => agencies.find((a) => a.id === id)?.name || '-';
   const getRoleLabel = (role) => ROLES.find((r) => r.value === role)?.label || role;
-  const currentGroupBrands = editingGroup ? brands.filter((b) => b.group_id === editingGroup.id) : [];
-  const reassignableBrands = editingGroup ? brands.filter((b) => b.group_id !== editingGroup.id) : [];
+
+  const brandsByNormalizedName = new Map();
+  brands.forEach((brand) => {
+    const key = normalizeBrandKey(brand.name);
+    if (key && !brandsByNormalizedName.has(key)) {
+      brandsByNormalizedName.set(key, brand);
+    }
+  });
+
+  const catalogBrandRows = (catalogMakes || []).map((make) => {
+    const name = (make?.name || '').trim();
+    const existing = brandsByNormalizedName.get(normalizeBrandKey(name));
+    return {
+      key: normalizeBrandKey(name),
+      name,
+      group_id: existing?.group_id || null,
+      id: existing?.id || null
+    };
+  }).filter((row) => row.name);
+
+  const sourceBrandRows = catalogBrandRows.length > 0
+    ? catalogBrandRows
+    : brands.map((brand) => ({
+      key: normalizeBrandKey(brand.name),
+      name: brand.name,
+      group_id: brand.group_id,
+      id: brand.id
+    }));
+
+  const currentGroupBrands = editingGroup ? sourceBrandRows.filter((b) => b.group_id === editingGroup.id) : [];
+  const reassignableBrands = editingGroup ? sourceBrandRows.filter((b) => b.group_id !== editingGroup.id) : [];
   const canCreateBrand = groups.length > 0;
   const canCreateAgency = brands.length > 0;
   const canCreateSeller = agencies.length > 0;
@@ -407,7 +468,7 @@ export default function SettingsPage() {
                             ) : (
                               <div className="flex flex-wrap gap-2 mt-2">
                                 {currentGroupBrands.map((brand) => (
-                                  <Badge key={brand.id} variant="secondary">
+                                  <Badge key={brand.key} variant="secondary">
                                     {brand.name}
                                   </Badge>
                                 ))}
@@ -416,23 +477,25 @@ export default function SettingsPage() {
                           </div>
 
                           <div className="space-y-2">
-                            <Label className="text-sm">Agregar marcas existentes a este grupo</Label>
-                            {reassignableBrands.length === 0 ? (
-                              <p className="text-xs text-muted-foreground">No hay marcas de otros grupos para reasignar.</p>
+                            <Label className="text-sm">Agregar marcas del catálogo Strapi a este grupo</Label>
+                            {loadingCatalog ? (
+                              <p className="text-xs text-muted-foreground">Cargando catálogo de marcas...</p>
+                            ) : reassignableBrands.length === 0 ? (
+                              <p className="text-xs text-muted-foreground">No hay marcas del catálogo disponibles para reasignar.</p>
                             ) : (
                               <div className="max-h-40 overflow-y-auto space-y-2 pr-1">
                                 {reassignableBrands.map((brand) => (
-                                  <label key={brand.id} className="flex items-center justify-between gap-3 rounded-md border border-border/50 p-2">
+                                  <label key={brand.key} className="flex items-center justify-between gap-3 rounded-md border border-border/50 p-2">
                                     <div className="flex items-center gap-2">
                                       <Checkbox
-                                        checked={groupBrandsToAssign.includes(brand.id)}
-                                        onCheckedChange={(checked) => toggleGroupBrandSelection(brand.id, checked === true)}
-                                        data-testid={`assign-brand-checkbox-${brand.id}`}
+                                        checked={groupBrandsToAssign.includes(brand.name)}
+                                        onCheckedChange={(checked) => toggleGroupBrandSelection(brand.name, checked === true)}
+                                        data-testid={`assign-brand-checkbox-${brand.key}`}
                                       />
                                       <span className="text-sm font-medium">{brand.name}</span>
                                     </div>
                                     <span className="text-xs text-muted-foreground">
-                                      Grupo actual: {getGroupName(brand.group_id)}
+                                      Grupo actual: {brand.group_id ? getGroupName(brand.group_id) : 'Sin asignar'}
                                     </span>
                                   </label>
                                 ))}
