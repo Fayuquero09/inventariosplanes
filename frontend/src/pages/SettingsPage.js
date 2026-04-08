@@ -740,6 +740,9 @@ export default function SettingsPage() {
                         <div className="text-sm text-muted-foreground">
                           {agency.brand_name || getBrandName(agency.brand_id)} • {agency.city || 'Sin ciudad'}
                         </div>
+                        <div className="text-sm text-muted-foreground">
+                          {agency.address || 'Sin dirección'}
+                        </div>
                       </div>
                       {(isAdmin || user?.role === 'group_admin') && (
                         <Button
