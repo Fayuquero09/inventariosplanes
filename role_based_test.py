@@ -139,7 +139,7 @@ class RoleBasedAccessTester:
                 "role": "group_admin",
                 "group_id": self.test_group_id
             },
-            token=None
+            token=self.admin_token
         )
         if not user_success:
             print("❌ Could not create test group admin user")

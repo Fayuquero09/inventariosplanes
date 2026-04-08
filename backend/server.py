@@ -328,12 +328,50 @@ def serialize_doc(doc: dict) -> dict:
 # ============== AUTH ROUTES ==============
 
 @api_router.post("/auth/register")
-async def register(user_data: UserCreate, response: Response):
+async def register(user_data: UserCreate, request: Request):
+    current_user = await get_current_user(request)
+    if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    if current_user["role"] == UserRole.GROUP_ADMIN:
+        if user_data.role in [UserRole.APP_ADMIN, UserRole.APP_USER]:
+            raise HTTPException(status_code=403, detail="Group admin cannot create app-level users")
+
+        if not current_user.get("group_id"):
+            raise HTTPException(status_code=403, detail="Group admin has no assigned group")
+
+        # Group admins can only create users inside their own group.
+        if user_data.group_id and user_data.group_id != current_user["group_id"]:
+            raise HTTPException(status_code=403, detail="Cannot create users outside your group")
+        user_data.group_id = current_user["group_id"]
+
     email = user_data.email.lower()
     existing = await db.users.find_one({"email": email})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
     
+    if user_data.brand_id:
+        brand = await db.brands.find_one({"_id": ObjectId(user_data.brand_id)})
+        if not brand:
+            raise HTTPException(status_code=404, detail="Brand not found")
+        if user_data.group_id and brand.get("group_id") != user_data.group_id:
+            raise HTTPException(status_code=400, detail="Brand does not belong to selected group")
+        if not user_data.group_id:
+            user_data.group_id = brand.get("group_id")
+
+    if user_data.agency_id:
+        agency = await db.agencies.find_one({"_id": ObjectId(user_data.agency_id)})
+        if not agency:
+            raise HTTPException(status_code=404, detail="Agency not found")
+        if user_data.group_id and agency.get("group_id") != user_data.group_id:
+            raise HTTPException(status_code=400, detail="Agency does not belong to selected group")
+        if user_data.brand_id and agency.get("brand_id") != user_data.brand_id:
+            raise HTTPException(status_code=400, detail="Agency does not belong to selected brand")
+        if not user_data.group_id:
+            user_data.group_id = agency.get("group_id")
+        if not user_data.brand_id:
+            user_data.brand_id = agency.get("brand_id")
+
     user_doc = {
         "email": email,
         "password_hash": hash_password(user_data.password),
@@ -346,13 +384,7 @@ async def register(user_data: UserCreate, response: Response):
     }
     result = await db.users.insert_one(user_doc)
     user_id = str(result.inserted_id)
-    
-    access_token = create_access_token(user_id, email, user_data.role)
-    refresh_token = create_refresh_token(user_id)
-    
-    response.set_cookie(key="access_token", value=access_token, httponly=True, secure=False, samesite="lax", max_age=86400, path="/")
-    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
-    
+
     return {
         "id": user_id,
         "email": email,
@@ -361,8 +393,7 @@ async def register(user_data: UserCreate, response: Response):
         "group_id": user_data.group_id,
         "brand_id": user_data.brand_id,
         "agency_id": user_data.agency_id,
-        "created_at": user_doc["created_at"].isoformat(),
-        "token": access_token
+        "created_at": user_doc["created_at"].isoformat()
     }
 
 @api_router.post("/auth/login")
