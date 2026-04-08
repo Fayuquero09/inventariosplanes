@@ -121,6 +121,17 @@ export const sellersApi = {
   getAll: (params) => api.get('/sellers', { params })
 };
 
+// Organization Imports (groups, brands, agencies, sellers)
+export const organizationImportApi = {
+  import: (file) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post('/import/organization', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    });
+  }
+};
+
 // Dashboard
 export const dashboardApi = {
   getKpis: (params) => api.get('/dashboard/kpis', { params }),

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { groupsApi, brandsApi, agenciesApi, usersApi } from '../lib/api';
+import { groupsApi, brandsApi, agenciesApi, usersApi, organizationImportApi } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card';
 import { Button } from '../components/ui/button';
@@ -36,6 +36,7 @@ import {
   Factory,
   Storefront,
   Users,
+  UploadSimple,
   Pencil,
   Shield
 } from '@phosphor-icons/react';
@@ -55,6 +56,7 @@ const ROLES = [
 
 export default function SettingsPage() {
   const { user, isAdmin } = useAuth();
+  const canImportStructure = isAdmin || user?.role === 'group_admin';
   const [groups, setGroups] = useState([]);
   const [brands, setBrands] = useState([]);
   const [agencies, setAgencies] = useState([]);
@@ -65,6 +67,9 @@ export default function SettingsPage() {
   const [groupDialog, setGroupDialog] = useState(false);
   const [brandDialog, setBrandDialog] = useState(false);
   const [agencyDialog, setAgencyDialog] = useState(false);
+  const [importDialog, setImportDialog] = useState(false);
+  const [editingGroup, setEditingGroup] = useState(null);
+  const [importingStructure, setImportingStructure] = useState(false);
   
   // Form states
   const [groupForm, setGroupForm] = useState({ name: '', description: '' });
@@ -97,16 +102,39 @@ export default function SettingsPage() {
     fetchData();
   }, [fetchData]);
 
-  const handleCreateGroup = async (e) => {
+  const handleSaveGroup = async (e) => {
     e.preventDefault();
     try {
-      await groupsApi.create(groupForm);
-      toast.success('Grupo creado correctamente');
+      if (editingGroup?.id) {
+        await groupsApi.update(editingGroup.id, groupForm);
+        toast.success('Grupo actualizado correctamente');
+      } else {
+        await groupsApi.create(groupForm);
+        toast.success('Grupo creado correctamente');
+      }
       setGroupDialog(false);
+      setEditingGroup(null);
       setGroupForm({ name: '', description: '' });
       fetchData();
     } catch (error) {
-      toast.error('Error al crear grupo');
+      toast.error('Error al guardar grupo');
+    }
+  };
+
+  const openEditGroup = (group) => {
+    setEditingGroup(group);
+    setGroupForm({
+      name: group.name || '',
+      description: group.description || ''
+    });
+    setGroupDialog(true);
+  };
+
+  const handleGroupDialogChange = (open) => {
+    setGroupDialog(open);
+    if (!open) {
+      setEditingGroup(null);
+      setGroupForm({ name: '', description: '' });
     }
   };
 
@@ -146,6 +174,44 @@ export default function SettingsPage() {
     }
   };
 
+  const handleImportStructure = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setImportingStructure(true);
+    try {
+      const res = await organizationImportApi.import(file);
+      const summary = res.data?.summary || {};
+      const groupsSummary = summary.groups || {};
+      const brandsSummary = summary.brands || {};
+      const agenciesSummary = summary.agencies || {};
+      const sellersSummary = summary.sellers || {};
+
+      toast.success(
+        `Importacion completa - Grupos C:${groupsSummary.created || 0}/A:${groupsSummary.updated || 0} - ` +
+        `Marcas C:${brandsSummary.created || 0}/A:${brandsSummary.updated || 0} - ` +
+        `Agencias C:${agenciesSummary.created || 0}/A:${agenciesSummary.updated || 0} - ` +
+        `Vendedores C:${sellersSummary.created || 0}/A:${sellersSummary.updated || 0}`
+      );
+
+      const errors = res.data?.errors || [];
+      if (errors.length > 0) {
+        toast.warning(`Importación terminó con ${errors.length} observaciones`);
+        // Keep a concise preview in console for troubleshooting.
+        console.warn('Organization import warnings:', errors.slice(0, 20));
+      }
+
+      setImportDialog(false);
+      fetchData();
+    } catch (error) {
+      const detail = error.response?.data?.detail;
+      toast.error(typeof detail === 'string' ? detail : 'Error al importar estructura');
+    } finally {
+      setImportingStructure(false);
+      e.target.value = '';
+    }
+  };
+
   const getGroupName = (id) => groups.find((g) => g.id === id)?.name || '-';
   const getBrandName = (id) => brands.find((b) => b.id === id)?.name || '-';
   const getRoleLabel = (role) => ROLES.find((r) => r.value === role)?.label || role;
@@ -153,13 +219,51 @@ export default function SettingsPage() {
   return (
     <div className="space-y-6" data-testid="settings-page">
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold" style={{ fontFamily: 'Cabinet Grotesk' }}>
-          Configuración
-        </h1>
-        <p className="text-muted-foreground">
-          Gestiona grupos, marcas, agencias y usuarios
-        </p>
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h1 className="text-2xl font-bold" style={{ fontFamily: 'Cabinet Grotesk' }}>
+            Configuración
+          </h1>
+          <p className="text-muted-foreground">
+            Gestiona grupos, marcas, agencias y usuarios
+          </p>
+        </div>
+        {canImportStructure && (
+          <Dialog open={importDialog} onOpenChange={setImportDialog}>
+            <DialogTrigger asChild>
+              <Button variant="outline" data-testid="import-organization-btn">
+                <UploadSimple size={16} className="mr-2" />
+                Importar Excel
+              </Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Importar Estructura Organizacional</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-4">
+                <p className="text-sm text-muted-foreground">
+                  Sube un archivo Excel (.xlsx/.xls) con hojas opcionales: <strong>groups</strong>, <strong>brands</strong>, <strong>agencies</strong>, <strong>sellers</strong>.
+                </p>
+                <div className="text-sm text-muted-foreground space-y-1">
+                  <p><strong>groups:</strong> name, description</p>
+                  <p><strong>brands:</strong> name, group_id o group_name, logo_url</p>
+                  <p><strong>agencies:</strong> name, brand_id o brand_name, city, address</p>
+                  <p><strong>sellers:</strong> email, name, password, agency_id o agency_name, role</p>
+                </div>
+                <Input
+                  type="file"
+                  accept=".xlsx,.xls"
+                  onChange={handleImportStructure}
+                  disabled={importingStructure}
+                  data-testid="import-organization-file-input"
+                />
+                {importingStructure && (
+                  <p className="text-sm text-muted-foreground">Importando, por favor espera...</p>
+                )}
+              </div>
+            </DialogContent>
+          </Dialog>
+        )}
       </div>
 
       <Tabs defaultValue="structure" className="w-full">
@@ -182,7 +286,7 @@ export default function SettingsPage() {
                 </div>
               </div>
               {isAdmin && (
-                <Dialog open={groupDialog} onOpenChange={setGroupDialog}>
+                <Dialog open={groupDialog} onOpenChange={handleGroupDialogChange}>
                   <DialogTrigger asChild>
                     <Button variant="outline" size="sm" data-testid="add-group-btn">
                       <Plus size={16} className="mr-1" /> Agregar
@@ -190,9 +294,9 @@ export default function SettingsPage() {
                   </DialogTrigger>
                   <DialogContent>
                     <DialogHeader>
-                      <DialogTitle>Nuevo Grupo</DialogTitle>
+                      <DialogTitle>{editingGroup ? 'Editar Grupo' : 'Nuevo Grupo'}</DialogTitle>
                     </DialogHeader>
-                    <form onSubmit={handleCreateGroup} className="space-y-4">
+                    <form onSubmit={handleSaveGroup} className="space-y-4">
                       <div className="space-y-2">
                         <Label>Nombre</Label>
                         <Input
@@ -211,8 +315,10 @@ export default function SettingsPage() {
                         />
                       </div>
                       <div className="flex justify-end gap-2">
-                        <Button type="button" variant="outline" onClick={() => setGroupDialog(false)}>Cancelar</Button>
-                        <Button type="submit" className="bg-[#002FA7] hover:bg-[#002FA7]/90" data-testid="save-group-btn">Crear</Button>
+                        <Button type="button" variant="outline" onClick={() => handleGroupDialogChange(false)}>Cancelar</Button>
+                        <Button type="submit" className="bg-[#002FA7] hover:bg-[#002FA7]/90" data-testid="save-group-btn">
+                          {editingGroup ? 'Guardar Cambios' : 'Crear'}
+                        </Button>
                       </div>
                     </form>
                   </DialogContent>
@@ -234,7 +340,20 @@ export default function SettingsPage() {
                         <div className="font-medium">{group.name}</div>
                         {group.description && <div className="text-sm text-muted-foreground">{group.description}</div>}
                       </div>
-                      <Badge variant="outline">{brands.filter((b) => b.group_id === group.id).length} marcas</Badge>
+                      <div className="flex items-center gap-2">
+                        <Badge variant="outline">{brands.filter((b) => b.group_id === group.id).length} marcas</Badge>
+                        {isAdmin && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => openEditGroup(group)}
+                            data-testid={`edit-group-btn-${group.id}`}
+                          >
+                            <Pencil size={16} />
+                          </Button>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
