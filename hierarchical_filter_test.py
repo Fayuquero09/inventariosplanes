@@ -126,7 +126,7 @@ class HierarchicalFilterTester:
         vehicle_data = {
             "vin": f"FILTER{datetime.now().strftime('%Y%m%d%H%M%S')}",
             "model": "Filter Test Model",
-            "year": 2024,
+            "year": 2026,
             "trim": "Test Trim",
             "color": "Test Color",
             "vehicle_type": "new",

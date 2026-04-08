@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, EmailStr
 import pandas as pd
 from io import BytesIO
 import json
+from pathlib import Path
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -32,8 +33,28 @@ JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 REFRESH_TOKEN_EXPIRE_DAYS = 7
 
+# External vehicle catalog (Strapi/JATO)
+CATALOG_DEFAULT_SOURCE_PATH = "/Users/Fernando.Molina/cortex-automotriz/strapi/data/jato/latest-jato.es-mx.all-2026-2024.json"
+CATALOG_DEFAULT_MODEL_YEAR = 2026
+catalog_cache: Dict[str, Any] = {
+    "source_path": None,
+    "model_year": None,
+    "mtime": None,
+    "payload": None,
+}
+
 def get_jwt_secret() -> str:
     return os.environ.get("JWT_SECRET", "default-secret-change-me")
+
+def get_catalog_source_path() -> str:
+    return os.environ.get("STRAPI_JATO_CATALOG_PATH", CATALOG_DEFAULT_SOURCE_PATH)
+
+def get_catalog_model_year() -> int:
+    raw_value = os.environ.get("CATALOG_MODEL_YEAR", str(CATALOG_DEFAULT_MODEL_YEAR))
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        return CATALOG_DEFAULT_MODEL_YEAR
 
 # Password functions
 def hash_password(password: str) -> str:
@@ -324,6 +345,163 @@ def serialize_doc(doc: dict) -> dict:
         else:
             result[k] = v
     return result
+
+def _normalize_catalog_text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text if text else None
+
+def _parse_catalog_year(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if len(digits) >= 4:
+        try:
+            return int(digits[:4])
+        except ValueError:
+            return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+def _build_catalog_tree_from_source() -> Dict[str, Any]:
+    source_path = get_catalog_source_path()
+    model_year = get_catalog_model_year()
+    source_file = Path(source_path)
+    if not source_file.exists():
+        raise HTTPException(
+            status_code=500,
+            detail=f"Catalog source file not found: {source_path}"
+        )
+
+    source_mtime = source_file.stat().st_mtime
+    if (
+        catalog_cache.get("payload") is not None and
+        catalog_cache.get("source_path") == source_path and
+        catalog_cache.get("model_year") == model_year and
+        catalog_cache.get("mtime") == source_mtime
+    ):
+        return catalog_cache["payload"]
+
+    try:
+        with source_file.open("r", encoding="utf-8") as f:
+            source_data = json.load(f)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading catalog source file: {str(e)}")
+
+    if isinstance(source_data, dict):
+        vehicles = source_data.get("vehicles", [])
+    elif isinstance(source_data, list):
+        vehicles = source_data
+    else:
+        vehicles = []
+
+    if not isinstance(vehicles, list):
+        raise HTTPException(status_code=500, detail="Invalid catalog format: vehicles list is required")
+
+    make_map: Dict[str, Dict[str, Any]] = {}
+    matched_rows = 0
+
+    for item in vehicles:
+        if not isinstance(item, dict):
+            continue
+
+        version_data = item.get("version")
+        version_data = version_data if isinstance(version_data, dict) else {}
+        row_year = _parse_catalog_year(version_data.get("year"))
+        if row_year != model_year:
+            continue
+
+        make_data = item.get("make")
+        model_data = item.get("model")
+        make_name = _normalize_catalog_text(make_data.get("name") if isinstance(make_data, dict) else make_data)
+        model_name = _normalize_catalog_text(model_data.get("name") if isinstance(model_data, dict) else model_data)
+        version_name = _normalize_catalog_text(version_data.get("name"))
+
+        if not make_name or not model_name or not version_name:
+            continue
+
+        matched_rows += 1
+        make_key = make_name.casefold()
+        model_key = model_name.casefold()
+        version_key = version_name.casefold()
+
+        make_entry = make_map.setdefault(make_key, {"name": make_name, "models": {}})
+        model_entry = make_entry["models"].setdefault(model_key, {"name": model_name, "versions": {}})
+        model_entry["versions"][version_key] = {"name": version_name}
+
+    makes: List[Dict[str, Any]] = []
+    total_models = 0
+    total_versions = 0
+
+    for make_entry in sorted(make_map.values(), key=lambda x: x["name"].casefold()):
+        models: List[Dict[str, Any]] = []
+        for model_entry in sorted(make_entry["models"].values(), key=lambda x: x["name"].casefold()):
+            versions = [
+                {"name": version_entry["name"]}
+                for version_entry in sorted(model_entry["versions"].values(), key=lambda x: x["name"].casefold())
+            ]
+            total_models += 1
+            total_versions += len(versions)
+            models.append({
+                "name": model_entry["name"],
+                "versions": versions
+            })
+        makes.append({
+            "name": make_entry["name"],
+            "models": models
+        })
+
+    payload = {
+        "model_year": model_year,
+        "source_path": source_path,
+        "source_last_modified": datetime.fromtimestamp(source_mtime, tz=timezone.utc).isoformat(),
+        "rows_matched": matched_rows,
+        "counts": {
+            "makes": len(makes),
+            "models": total_models,
+            "versions": total_versions
+        },
+        "makes": makes
+    }
+
+    catalog_cache["source_path"] = source_path
+    catalog_cache["model_year"] = model_year
+    catalog_cache["mtime"] = source_mtime
+    catalog_cache["payload"] = payload
+    return payload
+
+def _find_catalog_make(catalog: Dict[str, Any], make_name: str) -> Optional[Dict[str, Any]]:
+    key = _normalize_catalog_text(make_name)
+    if not key:
+        return None
+    lookup = key.casefold()
+    for make_entry in catalog.get("makes", []):
+        if str(make_entry.get("name", "")).casefold() == lookup:
+            return make_entry
+    return None
+
+def _find_catalog_model(make_entry: Dict[str, Any], model_name: str) -> Optional[Dict[str, Any]]:
+    key = _normalize_catalog_text(model_name)
+    if not key:
+        return None
+    lookup = key.casefold()
+    for model_entry in make_entry.get("models", []):
+        if str(model_entry.get("name", "")).casefold() == lookup:
+            return model_entry
+    return None
+
+def _ensure_allowed_model_year(year: int) -> None:
+    allowed_year = get_catalog_model_year()
+    if year != allowed_year:
+        raise HTTPException(status_code=400, detail=f"Solo se permite año modelo {allowed_year}")
 
 # ============== AUTH ROUTES ==============
 
@@ -808,6 +986,67 @@ async def update_agency(agency_id: str, agency_data: AgencyCreate, request: Requ
     agency = await db.agencies.find_one({"_id": ObjectId(agency_id)})
     return serialize_doc(agency)
 
+# ============== VEHICLE CATALOG ROUTES ==============
+
+@api_router.get("/catalog/makes")
+async def get_catalog_makes(request: Request):
+    await get_current_user(request)
+    catalog = _build_catalog_tree_from_source()
+    return {
+        "model_year": catalog["model_year"],
+        "source_last_modified": catalog["source_last_modified"],
+        "items": [
+            {
+                "name": make_entry["name"],
+                "models_count": len(make_entry.get("models", []))
+            }
+            for make_entry in catalog.get("makes", [])
+        ]
+    }
+
+@api_router.get("/catalog/models")
+async def get_catalog_models(request: Request, make: str = Query(..., min_length=1)):
+    await get_current_user(request)
+    catalog = _build_catalog_tree_from_source()
+    make_entry = _find_catalog_make(catalog, make)
+    if not make_entry:
+        raise HTTPException(status_code=404, detail=f"Make not found in catalog for model year {catalog['model_year']}")
+
+    return {
+        "model_year": catalog["model_year"],
+        "make": make_entry["name"],
+        "items": [
+            {
+                "name": model_entry["name"],
+                "versions_count": len(model_entry.get("versions", []))
+            }
+            for model_entry in make_entry.get("models", [])
+        ]
+    }
+
+@api_router.get("/catalog/versions")
+async def get_catalog_versions(
+    request: Request,
+    make: str = Query(..., min_length=1),
+    model: str = Query(..., min_length=1)
+):
+    await get_current_user(request)
+    catalog = _build_catalog_tree_from_source()
+    make_entry = _find_catalog_make(catalog, make)
+    if not make_entry:
+        raise HTTPException(status_code=404, detail=f"Make not found in catalog for model year {catalog['model_year']}")
+
+    model_entry = _find_catalog_model(make_entry, model)
+    if not model_entry:
+        raise HTTPException(status_code=404, detail=f"Model not found for make {make_entry['name']}")
+
+    return {
+        "model_year": catalog["model_year"],
+        "make": make_entry["name"],
+        "model": model_entry["name"],
+        "items": model_entry.get("versions", [])
+    }
+
 # ============== FINANCIAL RATES ROUTES ==============
 
 @api_router.post("/financial-rates")
@@ -1007,6 +1246,8 @@ async def create_vehicle(vehicle_data: VehicleCreate, request: Request):
     current_user = await get_current_user(request)
     if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN, UserRole.BRAND_ADMIN, UserRole.AGENCY_ADMIN]:
         raise HTTPException(status_code=403, detail="Not authorized")
+
+    _ensure_allowed_model_year(vehicle_data.year)
     
     # Get agency to link brand and group
     agency = await db.agencies.find_one({"_id": ObjectId(vehicle_data.agency_id)})
@@ -2159,6 +2400,7 @@ async def import_vehicles(request: Request, file: UploadFile = File(...)):
     
     imported = 0
     errors = []
+    allowed_model_year = get_catalog_model_year()
     
     for idx, row in df.iterrows():
         try:
@@ -2172,11 +2414,16 @@ async def import_vehicles(request: Request, file: UploadFile = File(...)):
                 entry_date = datetime.now(timezone.utc)
             elif isinstance(entry_date, str):
                 entry_date = datetime.fromisoformat(entry_date.replace("Z", "+00:00"))
+
+            row_year = int(row['year'])
+            if row_year != allowed_model_year:
+                errors.append(f"Row {idx + 2}: only model year {allowed_model_year} is allowed")
+                continue
             
             vehicle_doc = {
                 "vin": str(row['vin']),
                 "model": str(row['model']),
-                "year": int(row['year']),
+                "year": row_year,
                 "trim": str(row['trim']),
                 "color": str(row['color']),
                 "vehicle_type": str(row['vehicle_type']),

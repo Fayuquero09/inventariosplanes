@@ -37,6 +37,7 @@ const CURRENT_TIIE = 11.25;
 
 export default function FinancialRatesPage() {
   const filters = useHierarchicalFilters();
+  const { getFilterParams, selectedGroup } = filters;
   const [rates, setRates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
@@ -54,7 +55,7 @@ export default function FinancialRatesPage() {
   const fetchRates = useCallback(async () => {
     setLoading(true);
     try {
-      const params = filters.getFilterParams();
+      const params = getFilterParams();
       const res = await financialRatesApi.getAll(params);
       setRates(res.data);
     } catch (error) {
@@ -62,7 +63,7 @@ export default function FinancialRatesPage() {
     } finally {
       setLoading(false);
     }
-  }, [filters.selectedGroup, filters.selectedBrand, filters.selectedAgency]);
+  }, [getFilterParams]);
 
   useEffect(() => {
     fetchRates();
@@ -100,7 +101,7 @@ export default function FinancialRatesPage() {
   const resetForm = () => {
     setFormData({
       name: '',
-      group_id: filters.selectedGroup !== 'all' ? filters.selectedGroup : '',
+      group_id: selectedGroup !== 'all' ? selectedGroup : '',
       brand_id: '',
       agency_id: '',
       tiie_rate: CURRENT_TIIE.toString(),

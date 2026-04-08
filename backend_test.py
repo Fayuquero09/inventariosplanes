@@ -164,7 +164,7 @@ class AutoConnectAPITester:
         vehicle_data = {
             "vin": f"TEST{datetime.now().strftime('%Y%m%d%H%M%S')}",
             "model": "Test Model",
-            "year": 2024,
+            "year": 2026,
             "trim": "Test Trim",
             "color": "Test Color",
             "vehicle_type": "new",

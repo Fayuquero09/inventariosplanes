@@ -40,6 +40,7 @@ const RULE_TYPES = [
 
 export default function CommissionsPage() {
   const filters = useHierarchicalFilters();
+  const { getFilterParams, selectedAgency } = filters;
   const [rules, setRules] = useState([]);
   const [loading, setLoading] = useState(true);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
@@ -56,7 +57,7 @@ export default function CommissionsPage() {
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const params = filters.getFilterParams();
+      const params = getFilterParams();
       const res = await commissionRulesApi.getAll(params);
       setRules(res.data);
     } catch (error) {
@@ -64,7 +65,7 @@ export default function CommissionsPage() {
     } finally {
       setLoading(false);
     }
-  }, [filters.selectedGroup, filters.selectedBrand, filters.selectedAgency]);
+  }, [getFilterParams]);
 
   useEffect(() => {
     fetchData();
@@ -99,7 +100,7 @@ export default function CommissionsPage() {
 
   const resetForm = () => {
     setFormData({
-      agency_id: filters.selectedAgency !== 'all' ? filters.selectedAgency : '',
+      agency_id: selectedAgency !== 'all' ? selectedAgency : '',
       name: '',
       rule_type: 'per_unit',
       value: '',

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { vehiclesApi } from '../lib/api';
+import { vehiclesApi, vehicleCatalogApi } from '../lib/api';
 import { useHierarchicalFilters, HierarchicalFilters } from '../components/HierarchicalFilters';
 import { Card, CardContent } from '../components/ui/card';
 import { Button } from '../components/ui/button';
@@ -56,17 +56,24 @@ function StatusBadge({ status }) {
 
 export default function InventoryPage() {
   const filters = useHierarchicalFilters();
+  const { getFilterParams } = filters;
   const [vehicles, setVehicles] = useState([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState('all');
   const [filterType, setFilterType] = useState('all');
+  const [catalogYear, setCatalogYear] = useState(2026);
+  const [catalogMakes, setCatalogMakes] = useState([]);
+  const [catalogModels, setCatalogModels] = useState([]);
+  const [catalogVersions, setCatalogVersions] = useState([]);
+  const [catalogLoading, setCatalogLoading] = useState(false);
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
   const [newVehicle, setNewVehicle] = useState({
     vin: '',
+    make: '',
     model: '',
-    year: new Date().getFullYear(),
+    year: 2026,
     trim: '',
     color: '',
     vehicle_type: 'new',
@@ -74,11 +81,74 @@ export default function InventoryPage() {
     agency_id: ''
   });
 
+  const getAgencyBrandName = useCallback((agencyId) => {
+    if (!agencyId) return '';
+    const agency = filters.agencies.find((item) => item.id === agencyId);
+    if (!agency) return '';
+    const brand = filters.brands.find((item) => item.id === agency.brand_id);
+    return (brand?.name || '').trim();
+  }, [filters.agencies, filters.brands]);
+
+  const findCatalogMakeByName = useCallback((brandName) => {
+    const normalized = (brandName || '').trim().toLowerCase();
+    if (!normalized) return null;
+    return catalogMakes.find((make) => (make.name || '').trim().toLowerCase() === normalized) || null;
+  }, [catalogMakes]);
+
+  const fetchCatalogMakes = useCallback(async () => {
+    setCatalogLoading(true);
+    try {
+      const res = await vehicleCatalogApi.getMakes();
+      const items = res.data?.items || [];
+      setCatalogMakes(items);
+      if (res.data?.model_year) {
+        const year = parseInt(res.data.model_year, 10);
+        if (!Number.isNaN(year)) {
+          setCatalogYear(year);
+          setNewVehicle((prev) => ({ ...prev, year }));
+        }
+      }
+    } catch (error) {
+      setCatalogMakes([]);
+      toast.error('No se pudo cargar el catalogo de marcas/modelos');
+    } finally {
+      setCatalogLoading(false);
+    }
+  }, []);
+
+  const fetchCatalogModels = useCallback(async (makeName) => {
+    if (!makeName) {
+      setCatalogModels([]);
+      return;
+    }
+    try {
+      const res = await vehicleCatalogApi.getModels(makeName);
+      setCatalogModels(res.data?.items || []);
+    } catch (error) {
+      setCatalogModels([]);
+      toast.error('No se pudieron cargar los modelos de la marca seleccionada');
+    }
+  }, []);
+
+  const fetchCatalogVersions = useCallback(async (makeName, modelName) => {
+    if (!makeName || !modelName) {
+      setCatalogVersions([]);
+      return;
+    }
+    try {
+      const res = await vehicleCatalogApi.getVersions(makeName, modelName);
+      setCatalogVersions(res.data?.items || []);
+    } catch (error) {
+      setCatalogVersions([]);
+      toast.error('No se pudieron cargar las versiones del modelo seleccionado');
+    }
+  }, []);
+
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
       const params = {
-        ...filters.getFilterParams(),
+        ...getFilterParams(),
         status: filterStatus !== 'all' ? filterStatus : undefined,
         vehicle_type: filterType !== 'all' ? filterType : undefined
       };
@@ -89,35 +159,96 @@ export default function InventoryPage() {
     } finally {
       setLoading(false);
     }
-  }, [filters.selectedGroup, filters.selectedBrand, filters.selectedAgency, filterStatus, filterType]);
+  }, [getFilterParams, filterStatus, filterType]);
 
   useEffect(() => {
     fetchData();
   }, [fetchData]);
 
+  useEffect(() => {
+    fetchCatalogMakes();
+  }, [fetchCatalogMakes]);
+
+  const resetVehicleForm = useCallback(() => {
+    setNewVehicle({
+      vin: '',
+      make: '',
+      model: '',
+      year: catalogYear,
+      trim: '',
+      color: '',
+      vehicle_type: 'new',
+      purchase_price: '',
+      agency_id: ''
+    });
+    setCatalogModels([]);
+    setCatalogVersions([]);
+  }, [catalogYear]);
+
+  const handleAgencyChange = async (agencyId) => {
+    const agencyBrandName = getAgencyBrandName(agencyId);
+    const matchedMake = findCatalogMakeByName(agencyBrandName);
+    const nextMake = matchedMake?.name || '';
+
+    setNewVehicle((prev) => ({
+      ...prev,
+      agency_id: agencyId,
+      make: nextMake,
+      model: '',
+      trim: '',
+      year: catalogYear
+    }));
+
+    if (nextMake) {
+      await fetchCatalogModels(nextMake);
+    } else {
+      setCatalogModels([]);
+    }
+    setCatalogVersions([]);
+  };
+
+  const handleMakeChange = async (makeName) => {
+    setNewVehicle((prev) => ({
+      ...prev,
+      make: makeName,
+      model: '',
+      trim: '',
+      year: catalogYear
+    }));
+    setCatalogVersions([]);
+    await fetchCatalogModels(makeName);
+  };
+
+  const handleModelChange = async (modelName) => {
+    setNewVehicle((prev) => ({
+      ...prev,
+      model: modelName,
+      trim: '',
+      year: catalogYear
+    }));
+    await fetchCatalogVersions(newVehicle.make, modelName);
+  };
+
   const handleAddVehicle = async (e) => {
     e.preventDefault();
+    if (!newVehicle.agency_id || !newVehicle.make || !newVehicle.model || !newVehicle.trim) {
+      toast.error('Completa agencia, marca, modelo y version');
+      return;
+    }
     try {
+      const { make, ...payload } = newVehicle;
       await vehiclesApi.create({
-        ...newVehicle,
+        ...payload,
         purchase_price: parseFloat(newVehicle.purchase_price),
-        year: parseInt(newVehicle.year)
+        year: catalogYear
       });
       toast.success('Vehículo agregado correctamente');
       setIsAddDialogOpen(false);
-      setNewVehicle({
-        vin: '',
-        model: '',
-        year: new Date().getFullYear(),
-        trim: '',
-        color: '',
-        vehicle_type: 'new',
-        purchase_price: '',
-        agency_id: ''
-      });
+      resetVehicleForm();
       fetchData();
     } catch (error) {
-      toast.error('Error al agregar vehículo');
+      const detail = error.response?.data?.detail;
+      toast.error(typeof detail === 'string' ? detail : 'Error al agregar vehículo');
     }
   };
 
@@ -134,7 +265,8 @@ export default function InventoryPage() {
       setIsImportDialogOpen(false);
       fetchData();
     } catch (error) {
-      toast.error('Error al importar archivo');
+      const detail = error.response?.data?.detail;
+      toast.error(typeof detail === 'string' ? detail : 'Error al importar archivo');
     }
   };
 
@@ -192,7 +324,7 @@ export default function InventoryPage() {
               </DialogHeader>
               <div className="space-y-4">
                 <p className="text-sm text-muted-foreground">
-                  Sube un archivo CSV o Excel con las columnas: vin, model, year, trim, color, vehicle_type, purchase_price, agency_id
+                  Sube un archivo CSV o Excel con las columnas: vin, model, year, trim, color, vehicle_type, purchase_price, agency_id (solo año {catalogYear})
                 </p>
                 <Input
                   type="file"
@@ -204,7 +336,13 @@ export default function InventoryPage() {
             </DialogContent>
           </Dialog>
 
-          <Dialog open={isAddDialogOpen} onOpenChange={setIsAddDialogOpen}>
+          <Dialog
+            open={isAddDialogOpen}
+            onOpenChange={(open) => {
+              setIsAddDialogOpen(open);
+              if (open) resetVehicleForm();
+            }}
+          >
             <DialogTrigger asChild>
               <Button className="bg-[#002FA7] hover:bg-[#002FA7]/90" data-testid="add-vehicle-btn">
                 <Plus size={18} className="mr-2" />
@@ -228,34 +366,86 @@ export default function InventoryPage() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="model">Modelo</Label>
-                    <Input
-                      id="model"
+                    <Label htmlFor="agency_id">Agencia</Label>
+                    <Select value={newVehicle.agency_id} onValueChange={handleAgencyChange}>
+                      <SelectTrigger data-testid="vehicle-agency-select">
+                        <SelectValue placeholder="Seleccionar" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {filters.filteredAgencies.map((agency) => (
+                          <SelectItem key={agency.id} value={agency.id}>
+                            {agency.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Marca</Label>
+                    <Select
+                      value={newVehicle.make}
+                      onValueChange={handleMakeChange}
+                      disabled={catalogLoading || catalogMakes.length === 0}
+                    >
+                      <SelectTrigger data-testid="vehicle-make-select">
+                        <SelectValue placeholder="Seleccionar marca" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {catalogMakes.map((make) => (
+                          <SelectItem key={make.name} value={make.name}>
+                            {make.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Modelo</Label>
+                    <Select
                       value={newVehicle.model}
-                      onChange={(e) => setNewVehicle({ ...newVehicle, model: e.target.value })}
-                      required
-                      data-testid="vehicle-model-input"
-                    />
+                      onValueChange={handleModelChange}
+                      disabled={!newVehicle.make || catalogModels.length === 0}
+                    >
+                      <SelectTrigger data-testid="vehicle-model-input">
+                        <SelectValue placeholder="Seleccionar modelo" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {catalogModels.map((model) => (
+                          <SelectItem key={model.name} value={model.name}>
+                            {model.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Versión</Label>
+                    <Select
+                      value={newVehicle.trim}
+                      onValueChange={(value) => setNewVehicle((prev) => ({ ...prev, trim: value, year: catalogYear }))}
+                      disabled={!newVehicle.model || catalogVersions.length === 0}
+                    >
+                      <SelectTrigger data-testid="vehicle-trim-input">
+                        <SelectValue placeholder="Seleccionar versión" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {catalogVersions.map((version) => (
+                          <SelectItem key={version.name} value={version.name}>
+                            {version.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="year">Año</Label>
                     <Input
                       id="year"
                       type="number"
-                      value={newVehicle.year}
-                      onChange={(e) => setNewVehicle({ ...newVehicle, year: e.target.value })}
-                      required
+                      value={catalogYear}
+                      disabled
+                      readOnly
                       data-testid="vehicle-year-input"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="trim">Trim</Label>
-                    <Input
-                      id="trim"
-                      value={newVehicle.trim}
-                      onChange={(e) => setNewVehicle({ ...newVehicle, trim: e.target.value })}
-                      required
-                      data-testid="vehicle-trim-input"
                     />
                   </div>
                   <div className="space-y-2">
@@ -293,24 +483,6 @@ export default function InventoryPage() {
                       required
                       data-testid="vehicle-price-input"
                     />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="agency_id">Agencia</Label>
-                    <Select
-                      value={newVehicle.agency_id}
-                      onValueChange={(value) => setNewVehicle({ ...newVehicle, agency_id: value })}
-                    >
-                      <SelectTrigger data-testid="vehicle-agency-select">
-                        <SelectValue placeholder="Seleccionar" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {filters.filteredAgencies.map((agency) => (
-                          <SelectItem key={agency.id} value={agency.id}>
-                            {agency.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
                   </div>
                 </div>
                 <div className="flex justify-end gap-2">

@@ -50,6 +50,7 @@ const MONTHS = [
 
 export default function ObjectivesPage() {
   const filters = useHierarchicalFilters({ includeSellers: true });
+  const { getFilterParams } = filters;
   const [objectives, setObjectives] = useState([]);
   const [sellerPerformance, setSellerPerformance] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -70,7 +71,7 @@ export default function ObjectivesPage() {
     setLoading(true);
     try {
       const params = {
-        ...filters.getFilterParams(),
+        ...getFilterParams(),
         month: selectedMonth,
         year: selectedYear
       };
@@ -87,7 +88,7 @@ export default function ObjectivesPage() {
     } finally {
       setLoading(false);
     }
-  }, [filters.selectedGroup, filters.selectedBrand, filters.selectedAgency, filters.selectedSeller, selectedMonth, selectedYear]);
+  }, [getFilterParams, selectedMonth, selectedYear]);
 
   useEffect(() => {
     fetchData();

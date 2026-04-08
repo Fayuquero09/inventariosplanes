@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { groupsApi, brandsApi, agenciesApi, sellersApi } from '../lib/api';
 import { Card, CardContent } from '../components/ui/card';
@@ -88,12 +88,22 @@ export function useHierarchicalFilters(options = {}) {
     setSelectedSeller('all');
   }, [selectedAgency]);
 
+  // Get filter params for API calls
+  const getFilterParams = useCallback(() => {
+    const params = {};
+    if (selectedGroup !== 'all') params.group_id = selectedGroup;
+    if (selectedBrand !== 'all') params.brand_id = selectedBrand;
+    if (selectedAgency !== 'all') params.agency_id = selectedAgency;
+    if (selectedSeller !== 'all') params.seller_id = selectedSeller;
+    return params;
+  }, [selectedGroup, selectedBrand, selectedAgency, selectedSeller]);
+
   // Notify parent of filter changes
   useEffect(() => {
     if (onFilterChange) {
       onFilterChange(getFilterParams());
     }
-  }, [selectedGroup, selectedBrand, selectedAgency, selectedSeller]);
+  }, [onFilterChange, getFilterParams]);
 
   // Filter brands by selected group
   const filteredBrands = selectedGroup !== 'all'
@@ -106,16 +116,6 @@ export function useHierarchicalFilters(options = {}) {
     : selectedGroup !== 'all'
       ? agencies.filter(a => a.group_id === selectedGroup)
       : agencies;
-
-  // Get filter params for API calls
-  const getFilterParams = () => {
-    const params = {};
-    if (selectedGroup !== 'all') params.group_id = selectedGroup;
-    if (selectedBrand !== 'all') params.brand_id = selectedBrand;
-    if (selectedAgency !== 'all') params.agency_id = selectedAgency;
-    if (selectedSeller !== 'all') params.seller_id = selectedSeller;
-    return params;
-  };
 
   // Get selected entities for breadcrumb
   const selectedGroupObj = groups.find(g => g.id === selectedGroup);
