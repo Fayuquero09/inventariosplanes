@@ -245,6 +245,11 @@ export default function SettingsPage() {
     }
   };
 
+  const openAgencyDialogForBrand = (brandId) => {
+    setAgencyForm((prev) => ({ ...prev, brand_id: brandId }));
+    setAgencyDialog(true);
+  };
+
   const handleCreateSeller = async (e) => {
     e.preventDefault();
     try {
@@ -272,6 +277,11 @@ export default function SettingsPage() {
       const detail = error.response?.data?.detail;
       toast.error(typeof detail === 'string' ? detail : 'Error al crear vendedor');
     }
+  };
+
+  const openSellerDialogForAgency = (agencyId) => {
+    setSellerForm((prev) => ({ ...prev, agency_id: agencyId }));
+    setSellerDialog(true);
   };
 
   const handleUpdateUserRole = async (userId, newRole) => {
@@ -622,7 +632,18 @@ export default function SettingsPage() {
                         <div className="font-medium">{brand.name}</div>
                         <div className="text-sm text-muted-foreground">{getGroupName(brand.group_id)}</div>
                       </div>
-                      <Badge variant="outline">{agencies.filter((a) => a.brand_id === brand.id).length} agencias</Badge>
+                      <div className="flex items-center gap-2">
+                        <Badge variant="outline">{agencies.filter((a) => a.brand_id === brand.id).length} agencias</Badge>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => openAgencyDialogForBrand(brand.id)}
+                          data-testid={`add-agency-for-brand-${brand.id}`}
+                        >
+                          <Plus size={14} className="mr-1" /> Agencia
+                        </Button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -716,6 +737,17 @@ export default function SettingsPage() {
                           {agency.brand_name || getBrandName(agency.brand_id)} • {agency.city || 'Sin ciudad'}
                         </div>
                       </div>
+                      {(isAdmin || user?.role === 'group_admin') && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => openSellerDialogForAgency(agency.id)}
+                          data-testid={`add-seller-for-agency-${agency.id}`}
+                        >
+                          <UserPlus size={14} className="mr-1" /> Vendedor
+                        </Button>
+                      )}
                     </div>
                   ))}
                 </div>
