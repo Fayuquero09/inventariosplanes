@@ -59,6 +59,23 @@ function PublicRoute({ children }) {
   return children;
 }
 
+const AGENCY_SCOPED_ROLES = new Set([
+  'agency_admin',
+  'agency_sales_manager',
+  'agency_general_manager',
+  'agency_commercial_manager',
+  'agency_user',
+  'seller',
+]);
+
+function FinancialRatesRoute() {
+  const { user } = useAuth();
+  if (AGENCY_SCOPED_ROLES.has(user?.role)) {
+    return <Navigate to="/" replace />;
+  }
+  return <FinancialRatesPage />;
+}
+
 function AppRoutes() {
   return (
     <Routes>
@@ -82,7 +99,7 @@ function AppRoutes() {
       >
         <Route path="/" element={<DashboardPage />} />
         <Route path="/inventory" element={<InventoryPage />} />
-        <Route path="/financial-rates" element={<FinancialRatesPage />} />
+        <Route path="/financial-rates" element={<FinancialRatesRoute />} />
         <Route path="/objectives" element={<ObjectivesPage />} />
         <Route path="/commissions" element={<CommissionsPage />} />
         <Route path="/settings" element={<SettingsPage />} />

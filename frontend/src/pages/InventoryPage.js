@@ -151,7 +151,8 @@ export default function InventoryPage() {
       const params = {
         ...getFilterParams(),
         status: filterStatus !== 'all' ? filterStatus : undefined,
-        vehicle_type: filterType !== 'all' ? filterType : undefined
+        vehicle_type: filterType !== 'all' ? filterType : undefined,
+        sold_current_month_only: true
       };
       const res = await vehiclesApi.getAll(params);
       setVehicles(res.data);

@@ -36,6 +36,14 @@ const NAV_ITEMS = [
 ];
 
 const GROUP_FINANCE_ALLOWED_PATHS = new Set(['/', '/inventory', '/financial-rates']);
+const AGENCY_SCOPED_ROLES = new Set([
+  'agency_admin',
+  'agency_sales_manager',
+  'agency_general_manager',
+  'agency_commercial_manager',
+  'agency_user',
+  'seller',
+]);
 
 export default function MainLayout() {
   const { user, logout } = useAuth();
@@ -43,17 +51,28 @@ export default function MainLayout() {
   const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const isGroupFinanceManager = user?.role === 'group_finance_manager';
+  const isAgencyScopedUser = AGENCY_SCOPED_ROLES.has(user?.role);
   const visibleNavItems = useMemo(() => {
-    if (!isGroupFinanceManager) return NAV_ITEMS;
-    return NAV_ITEMS.filter((item) => GROUP_FINANCE_ALLOWED_PATHS.has(item.path));
-  }, [isGroupFinanceManager]);
+    let items = NAV_ITEMS;
+    if (isAgencyScopedUser) {
+      items = items.filter((item) => item.path !== '/financial-rates');
+    }
+    if (isGroupFinanceManager) {
+      items = items.filter((item) => GROUP_FINANCE_ALLOWED_PATHS.has(item.path));
+    }
+    return items;
+  }, [isAgencyScopedUser, isGroupFinanceManager]);
 
   useEffect(() => {
+    if (isAgencyScopedUser && location.pathname === '/financial-rates') {
+      navigate('/', { replace: true });
+      return;
+    }
     if (!isGroupFinanceManager) return;
     if (!GROUP_FINANCE_ALLOWED_PATHS.has(location.pathname)) {
       navigate('/financial-rates', { replace: true });
     }
-  }, [isGroupFinanceManager, location.pathname, navigate]);
+  }, [isAgencyScopedUser, isGroupFinanceManager, location.pathname, navigate]);
 
   const handleLogout = async () => {
     await logout();

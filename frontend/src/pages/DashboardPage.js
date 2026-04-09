@@ -312,6 +312,16 @@ export default function DashboardPage() {
     return params;
   }, [selectedGroup, selectedBrand, selectedAgency, selectedSeller]);
 
+  const hasBrandContext = useMemo(
+    () => (
+      selectedBrand !== 'all'
+      || selectedAgency !== 'all'
+      || Boolean(user?.brand_id)
+      || Boolean(user?.agency_id)
+    ),
+    [selectedBrand, selectedAgency, user?.brand_id, user?.agency_id],
+  );
+
   // Fetch dashboard data
   const fetchData = useCallback(async () => {
     const requestId = latestRequestRef.current + 1;
@@ -320,7 +330,6 @@ export default function DashboardPage() {
     try {
       const params = { ...scopeParams };
 
-      const hasSpecificBrand = selectedBrand !== 'all';
       const isSellerScope = selectedSeller !== 'all';
       const trendParams = isSellerScope
         ? { ...params, months: 6 }
@@ -335,7 +344,7 @@ export default function DashboardPage() {
       setKpis(kpisRes.data);
       setTrends(trendsRes.data || []);
 
-      if (hasSpecificBrand) {
+      if (hasBrandContext) {
         const [suggestionsRes, vehiclesRes] = await Promise.all([
           dashboardApi.getSuggestions({
             group_id: params.group_id,
@@ -373,7 +382,7 @@ export default function DashboardPage() {
         setLoading(false);
       }
     }
-  }, [scopeParams, selectedBrand, selectedSeller]);
+  }, [hasBrandContext, scopeParams, selectedSeller]);
 
   useEffect(() => {
     fetchData();
@@ -450,7 +459,6 @@ export default function DashboardPage() {
 
   // Check if viewing seller level
   const isSellerView = selectedSeller !== 'all';
-  const hasSpecificBrand = selectedBrand !== 'all';
   const currentMonthKey = useMemo(() => {
     const now = new Date();
     return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
@@ -1116,7 +1124,7 @@ export default function DashboardPage() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              {!hasSpecificBrand && (
+              {!hasBrandContext && (
                 <p className="text-xs text-muted-foreground mb-3">
                   Mostrando todas las marcas del alcance seleccionado.
                 </p>
@@ -1214,7 +1222,7 @@ export default function DashboardPage() {
       {/* Bottom Row */}
       <div className="grid lg:grid-cols-2 gap-6">
         {/* Vehicle Detail (only for non-seller view when brand selected) */}
-        {!isSellerView && hasSpecificBrand && (
+        {!isSellerView && hasBrandContext && (
           <Card className="border-border/40" data-testid="top-aging-vehicles">
             <CardHeader className="pb-2 flex flex-row items-center justify-between">
               <CardTitle className="text-lg" style={{ fontFamily: 'Cabinet Grotesk' }}>
@@ -1314,7 +1322,7 @@ export default function DashboardPage() {
 
         {/* Smart Suggestions */}
         <Card
-          className={`border-border/40 ${isSellerView || !hasSpecificBrand ? 'lg:col-span-2' : ''}`}
+          className={`border-border/40 ${isSellerView || !hasBrandContext ? 'lg:col-span-2' : ''}`}
           data-testid="smart-suggestions"
         >
           <CardHeader className="pb-2 flex flex-row items-center justify-between">
@@ -1330,7 +1338,7 @@ export default function DashboardPage() {
                   <Skeleton key={i} className="h-20 w-full" />
                 ))}
               </div>
-            ) : !hasSpecificBrand ? (
+            ) : !hasBrandContext ? (
               <p className="text-center text-muted-foreground py-8">
                 Selecciona una marca para activar Aging y sugerencias.
               </p>

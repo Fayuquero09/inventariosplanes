@@ -44,6 +44,7 @@ LOGO_DIRECTORY_ENV = "STRAPI_LOGOS_DIR"
 catalog_cache: Dict[str, Any] = {
     "source_path": None,
     "model_year": None,
+    "all_years": False,
     "mtime": None,
     "payload": None,
 }
@@ -417,7 +418,7 @@ class VehicleResponse(BaseModel):
     created_at: str
 
 class SalesObjectiveCreate(BaseModel):
-    seller_id: Optional[str] = None  # legado: los nuevos objetivos se capturan por agencia-marca
+    seller_id: Optional[str] = None
     agency_id: str
     month: int
     year: int
@@ -938,6 +939,17 @@ def _parse_catalog_year(value: Any) -> Optional[int]:
     except ValueError:
         return None
 
+def _parse_catalog_price(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed <= 0:
+        return None
+    return parsed
+
 MEX_STATE_SUFFIX_PATTERN = (
     r"(?:Aguascalientes|Ags\.?|Baja California(?: Sur)?|B\.?C\.?S?\.?|Campeche|Camp\.?|Chiapas|Chis\.?|"
     r"Chihuahua|Chih\.?|Coahuila|Coah\.?|Colima|Col\.?|Durango|Dgo\.?|Guanajuato|Gto\.?|Guerrero|Gro\.?|"
@@ -1152,9 +1164,10 @@ async def backfill_agency_locations() -> Dict[str, int]:
         "filled_postal_code": filled_postal_code,
     }
 
-def _build_catalog_tree_from_source() -> Dict[str, Any]:
+def _build_catalog_tree_from_source(all_years: bool = False) -> Dict[str, Any]:
     source_path = get_catalog_source_path()
     model_year = get_catalog_model_year()
+    target_model_year: Optional[int] = None if all_years else model_year
     source_file = Path(source_path)
     if not source_file.exists():
         raise HTTPException(
@@ -1166,7 +1179,8 @@ def _build_catalog_tree_from_source() -> Dict[str, Any]:
     if (
         catalog_cache.get("payload") is not None and
         catalog_cache.get("source_path") == source_path and
-        catalog_cache.get("model_year") == model_year and
+        catalog_cache.get("model_year") == target_model_year and
+        catalog_cache.get("all_years") == bool(all_years) and
         catalog_cache.get("mtime") == source_mtime
     ):
         return catalog_cache["payload"]
@@ -1188,6 +1202,7 @@ def _build_catalog_tree_from_source() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail="Invalid catalog format: vehicles list is required")
 
     make_map: Dict[str, Dict[str, Any]] = {}
+    available_years: set[int] = set()
     matched_rows = 0
 
     for item in vehicles:
@@ -1197,7 +1212,9 @@ def _build_catalog_tree_from_source() -> Dict[str, Any]:
         version_data = item.get("version")
         version_data = version_data if isinstance(version_data, dict) else {}
         row_year = _parse_catalog_year(version_data.get("year"))
-        if row_year != model_year:
+        if row_year is not None:
+            available_years.add(row_year)
+        if target_model_year is not None and row_year != target_model_year:
             continue
 
         make_data = item.get("make")
@@ -1205,6 +1222,9 @@ def _build_catalog_tree_from_source() -> Dict[str, Any]:
         make_name = _normalize_catalog_text(make_data.get("name") if isinstance(make_data, dict) else make_data)
         model_name = _normalize_catalog_text(model_data.get("name") if isinstance(model_data, dict) else model_data)
         version_name = _normalize_catalog_text(version_data.get("name"))
+        pricing_data = item.get("pricing")
+        pricing_data = pricing_data if isinstance(pricing_data, dict) else {}
+        msrp_value = _parse_catalog_price(pricing_data.get("msrp"))
 
         if not make_name or not model_name or not version_name:
             continue
@@ -1215,8 +1235,23 @@ def _build_catalog_tree_from_source() -> Dict[str, Any]:
         version_key = version_name.casefold()
 
         make_entry = make_map.setdefault(make_key, {"name": make_name, "models": {}})
-        model_entry = make_entry["models"].setdefault(model_key, {"name": model_name, "versions": {}})
-        model_entry["versions"][version_key] = {"name": version_name}
+        model_entry = make_entry["models"].setdefault(
+            model_key,
+            {"name": model_name, "versions": {}, "min_msrp": None},
+        )
+
+        existing_version = model_entry["versions"].get(version_key)
+        if not existing_version:
+            model_entry["versions"][version_key] = {"name": version_name, "msrp": msrp_value}
+        elif msrp_value is not None:
+            current_msrp = _parse_catalog_price(existing_version.get("msrp"))
+            if current_msrp is None or msrp_value < current_msrp:
+                existing_version["msrp"] = msrp_value
+
+        if msrp_value is not None:
+            current_min_msrp = _parse_catalog_price(model_entry.get("min_msrp"))
+            if current_min_msrp is None or msrp_value < current_min_msrp:
+                model_entry["min_msrp"] = msrp_value
 
     makes: List[Dict[str, Any]] = []
     total_models = 0
@@ -1226,13 +1261,17 @@ def _build_catalog_tree_from_source() -> Dict[str, Any]:
         models: List[Dict[str, Any]] = []
         for model_entry in sorted(make_entry["models"].values(), key=lambda x: x["name"].casefold()):
             versions = [
-                {"name": version_entry["name"]}
+                {
+                    "name": version_entry["name"],
+                    "msrp": _parse_catalog_price(version_entry.get("msrp")),
+                }
                 for version_entry in sorted(model_entry["versions"].values(), key=lambda x: x["name"].casefold())
             ]
             total_models += 1
             total_versions += len(versions)
             models.append({
                 "name": model_entry["name"],
+                "min_msrp": _parse_catalog_price(model_entry.get("min_msrp")),
                 "versions": versions
             })
         makes.append({
@@ -1241,7 +1280,9 @@ def _build_catalog_tree_from_source() -> Dict[str, Any]:
         })
 
     payload = {
-        "model_year": model_year,
+        "model_year": target_model_year,
+        "all_years": bool(all_years),
+        "available_years": sorted(list(available_years)),
         "source_path": source_path,
         "source_last_modified": datetime.fromtimestamp(source_mtime, tz=timezone.utc).isoformat(),
         "rows_matched": matched_rows,
@@ -1254,7 +1295,8 @@ def _build_catalog_tree_from_source() -> Dict[str, Any]:
     }
 
     catalog_cache["source_path"] = source_path
-    catalog_cache["model_year"] = model_year
+    catalog_cache["model_year"] = target_model_year
+    catalog_cache["all_years"] = bool(all_years)
     catalog_cache["mtime"] = source_mtime
     catalog_cache["payload"] = payload
     return payload
@@ -2477,20 +2519,29 @@ async def get_catalog_makes(request: Request):
     }
 
 @api_router.get("/catalog/models")
-async def get_catalog_models(request: Request, make: str = Query(..., min_length=1)):
+async def get_catalog_models(
+    request: Request,
+    make: str = Query(..., min_length=1),
+    all_years: bool = Query(False),
+):
     await get_current_user(request)
-    catalog = _build_catalog_tree_from_source()
+    catalog = _build_catalog_tree_from_source(all_years=all_years)
     make_entry = _find_catalog_make(catalog, make)
     if not make_entry:
+        if catalog.get("all_years"):
+            raise HTTPException(status_code=404, detail="Make not found in catalog")
         raise HTTPException(status_code=404, detail=f"Make not found in catalog for model year {catalog['model_year']}")
 
     return {
         "model_year": catalog["model_year"],
+        "all_years": bool(catalog.get("all_years")),
+        "available_years": catalog.get("available_years", []),
         "make": make_entry["name"],
         "items": [
             {
                 "name": model_entry["name"],
-                "versions_count": len(model_entry.get("versions", []))
+                "versions_count": len(model_entry.get("versions", [])),
+                "min_msrp": _parse_catalog_price(model_entry.get("min_msrp")),
             }
             for model_entry in make_entry.get("models", [])
         ]
@@ -2884,6 +2935,8 @@ async def get_financial_rates(
     agency_id: Optional[str] = None
 ):
     current_user = await get_current_user(request)
+    if current_user.get("role") in AGENCY_SCOPED_ROLES:
+        raise HTTPException(status_code=403, detail="No autorizado para ver tasas financieras")
     query = _build_scope_query(current_user)
     if not _scope_query_has_access(query):
         return []
@@ -3261,7 +3314,7 @@ async def create_vehicle(vehicle_data: VehicleCreate, request: Request):
     agency = await db.agencies.find_one({"_id": ObjectId(vehicle_data.agency_id)})
     if not agency:
         raise HTTPException(status_code=404, detail="Agency not found")
-    _ensure_doc_scope_access(current_user, agency, detail="No tienes acceso a esta agencia")
+    _ensure_doc_scope_access(current_user, agency, agency_field="_id", detail="No tienes acceso a esta agencia")
     
     entry_date = vehicle_data.entry_date
     if entry_date:
@@ -3316,7 +3369,8 @@ async def get_vehicles(
     brand_id: Optional[str] = None,
     group_id: Optional[str] = None,
     status: Optional[str] = None,
-    vehicle_type: Optional[str] = None
+    vehicle_type: Optional[str] = None,
+    sold_current_month_only: bool = False,
 ):
     current_user = await get_current_user(request)
     query = _build_scope_query(current_user)
@@ -3335,6 +3389,34 @@ async def get_vehicles(
         query["status"] = status
     if vehicle_type:
         query["vehicle_type"] = vehicle_type
+
+    if sold_current_month_only:
+        now = datetime.now(timezone.utc)
+        start_of_month = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+        if now.month == 12:
+            end_of_month = datetime(now.year + 1, 1, 1, tzinfo=timezone.utc)
+        else:
+            end_of_month = datetime(now.year, now.month + 1, 1, tzinfo=timezone.utc)
+
+        sold_month_clause = {
+            "status": "sold",
+            "exit_date": {"$gte": start_of_month, "$lt": end_of_month},
+        }
+
+        if status == "sold":
+            query["exit_date"] = {"$gte": start_of_month, "$lt": end_of_month}
+        elif not status:
+            query = {
+                "$and": [
+                    query,
+                    {
+                        "$or": [
+                            {"status": {"$ne": "sold"}},
+                            sold_month_clause,
+                        ]
+                    },
+                ]
+            }
     
     vehicles = await db.vehicles.find(query).to_list(1000)
     return [await enrich_vehicle(v) for v in vehicles]
@@ -3364,7 +3446,7 @@ async def update_vehicle(vehicle_id: str, request: Request):
         target_agency = await db.agencies.find_one({"_id": ObjectId(update_data["agency_id"])})
         if not target_agency:
             raise HTTPException(status_code=404, detail="Agency not found")
-        _ensure_doc_scope_access(current_user, target_agency, detail="No puedes mover este vehículo a otra agencia")
+        _ensure_doc_scope_access(current_user, target_agency, agency_field="_id", detail="No puedes mover este vehículo a otra agencia")
         update_data["group_id"] = target_agency.get("group_id")
         update_data["brand_id"] = target_agency.get("brand_id")
 
@@ -3404,16 +3486,23 @@ async def create_sales_objective(objective_data: SalesObjectiveCreate, request: 
     agency = await db.agencies.find_one({"_id": ObjectId(objective_data.agency_id)})
     if not agency:
         raise HTTPException(status_code=404, detail="Agency not found")
-    _ensure_doc_scope_access(current_user, agency, detail="No tienes acceso a esta agencia")
+    _ensure_doc_scope_access(current_user, agency, agency_field="_id", detail="No tienes acceso a esta agencia")
 
-    # Objetivos operativos actuales: agencia-marca (no por vendedor).
-    # Mantener seller_id como campo legado para compatibilidad de payloads antiguos.
-    if objective_data.seller_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Los objetivos nuevos se capturan por agencia-marca. No enviar seller_id.",
-        )
     seller_id = None
+    if objective_data.seller_id:
+        if not ObjectId.is_valid(objective_data.seller_id):
+            raise HTTPException(status_code=400, detail="Invalid seller_id")
+        seller = await db.users.find_one({"_id": ObjectId(objective_data.seller_id)})
+        if not seller:
+            raise HTTPException(status_code=404, detail="Seller not found")
+        _ensure_doc_scope_access(current_user, seller, detail="No tienes acceso a este vendedor")
+        if seller.get("role") != UserRole.SELLER:
+            raise HTTPException(status_code=400, detail="Selected user is not a seller")
+        if str(seller.get("agency_id") or "") != objective_data.agency_id:
+            raise HTTPException(status_code=400, detail="Seller does not belong to selected agency")
+        seller_id = objective_data.seller_id
+
+    normalized_vehicle_line = str(objective_data.vehicle_line or "").strip() or None
 
     now = datetime.now(timezone.utc)
     current_user_id = current_user.get("id")
@@ -3427,7 +3516,7 @@ async def create_sales_objective(objective_data: SalesObjectiveCreate, request: 
         "year": objective_data.year,
         "units_target": objective_data.units_target,
         "revenue_target": objective_data.revenue_target,
-        "vehicle_line": objective_data.vehicle_line,
+        "vehicle_line": normalized_vehicle_line,
         "approval_status": approval_status,
         "approval_comment": None,
         "created_by": current_user_id,
@@ -3457,7 +3546,7 @@ async def create_sales_objective(objective_data: SalesObjectiveCreate, request: 
             "year": objective_data.year,
             "units_target": objective_data.units_target,
             "revenue_target": objective_data.revenue_target,
-            "vehicle_line": objective_data.vehicle_line,
+            "vehicle_line": normalized_vehicle_line,
             "approval_status": approval_status,
         },
     )
@@ -3471,7 +3560,8 @@ async def get_sales_objectives(
     agency_id: Optional[str] = None,
     seller_id: Optional[str] = None,
     month: Optional[int] = None,
-    year: Optional[int] = None
+    year: Optional[int] = None,
+    include_seller_objectives: bool = False,
 ):
     current_user = await get_current_user(request)
     query = _build_scope_query(current_user)
@@ -3485,6 +3575,7 @@ async def get_sales_objectives(
             return []
         if seller_id and seller_id != current_seller_id:
             raise HTTPException(status_code=403, detail="No tienes acceso a este vendedor")
+        query["seller_id"] = current_seller_id
     elif seller_id:
         query["seller_id"] = seller_id
     if agency_id:
@@ -3501,7 +3592,7 @@ async def get_sales_objectives(
 
     # Modo actual por defecto: solo objetivos de agencia-marca (sin seller_id).
     # seller_id explícito conserva lectura legado para auditoría/histórico.
-    if not seller_id:
+    if not seller_id and not include_seller_objectives and "seller_id" not in query:
         query["$or"] = [
             {"seller_id": None},
             {"seller_id": {"$exists": False}},
@@ -3567,7 +3658,10 @@ async def get_sales_objectives(
             sales_query["seller_id"] = obj["seller_id"]
         elif obj.get("agency_id"):
             sales_query["agency_id"] = obj["agency_id"]
-        
+        model_scope = str(obj.get("vehicle_line") or "").strip()
+        if model_scope:
+            sales_query["model"] = {"$regex": f"^{re.escape(model_scope)}$", "$options": "i"}
+
         sales = await db.sales.find(sales_query).to_list(1000)
         serialized["units_sold"] = len(sales)
         serialized["revenue_achieved"] = sum(s.get("sale_price", 0) for s in sales)
@@ -3578,6 +3672,223 @@ async def get_sales_objectives(
         result.append(serialized)
     
     return result
+
+@api_router.get("/sales-objectives/suggestion")
+async def get_sales_objective_suggestion(
+    request: Request,
+    agency_id: str,
+    seller_id: str,
+    month: Optional[int] = None,
+    year: Optional[int] = None,
+    lookback_months: int = 6,
+):
+    current_user = await get_current_user(request)
+    now = datetime.now(timezone.utc)
+    target_month = int(month or now.month)
+    target_year = int(year or now.year)
+    safe_lookback = max(3, min(int(lookback_months), 24))
+
+    if target_month < 1 or target_month > 12:
+        raise HTTPException(status_code=400, detail="Month must be between 1 and 12")
+    if target_year < 2000 or target_year > 2100:
+        raise HTTPException(status_code=400, detail="Year must be between 2000 and 2100")
+    if not ObjectId.is_valid(agency_id):
+        raise HTTPException(status_code=400, detail="Invalid agency_id")
+    if not ObjectId.is_valid(seller_id):
+        raise HTTPException(status_code=400, detail="Invalid seller_id")
+
+    agency = await db.agencies.find_one({"_id": ObjectId(agency_id)})
+    if not agency:
+        raise HTTPException(status_code=404, detail="Agency not found")
+    _ensure_doc_scope_access(current_user, agency, agency_field="_id", detail="No tienes acceso a esta agencia")
+
+    seller = await db.users.find_one({"_id": ObjectId(seller_id)})
+    if not seller:
+        raise HTTPException(status_code=404, detail="Seller not found")
+    _ensure_doc_scope_access(current_user, seller, detail="No tienes acceso a este vendedor")
+    if seller.get("role") != UserRole.SELLER:
+        raise HTTPException(status_code=400, detail="Selected user is not a seller")
+    if str(seller.get("agency_id") or "") != agency_id:
+        raise HTTPException(status_code=400, detail="Seller does not belong to selected agency")
+
+    def _month_bounds(y: int, m: int) -> Tuple[datetime, datetime]:
+        start = datetime(y, m, 1, tzinfo=timezone.utc)
+        if m == 12:
+            end = datetime(y + 1, 1, 1, tzinfo=timezone.utc)
+        else:
+            end = datetime(y, m + 1, 1, tzinfo=timezone.utc)
+        return start, end
+
+    query_base = {
+        "agency_id": agency_id,
+        "seller_id": seller_id,
+    }
+
+    prev_start, prev_end = _month_bounds(target_year - 1, target_month)
+    previous_year_sales = await db.sales.find({
+        **query_base,
+        "sale_date": {"$gte": prev_start, "$lt": prev_end},
+    }).to_list(20000)
+
+    month_totals_recent: List[int] = []
+    model_recent_totals: Dict[str, int] = {}
+    model_previous_year_totals: Dict[str, int] = {}
+    model_price_totals: Dict[str, float] = {}
+    model_price_counts: Dict[str, int] = {}
+
+    for sale in previous_year_sales:
+        model_name = str(sale.get("model") or "").strip()
+        if model_name:
+            model_previous_year_totals[model_name] = model_previous_year_totals.get(model_name, 0) + 1
+        sale_price = float(sale.get("sale_price", 0) or 0)
+        if model_name and sale_price > 0:
+            model_price_totals[model_name] = model_price_totals.get(model_name, 0.0) + sale_price
+            model_price_counts[model_name] = model_price_counts.get(model_name, 0) + 1
+
+    for offset in range(-safe_lookback, 0):
+        cursor_year, cursor_month = _add_months_ym(target_year, target_month, offset)
+        recent_start, recent_end = _month_bounds(cursor_year, cursor_month)
+        sales_in_month = await db.sales.find({
+            **query_base,
+            "sale_date": {"$gte": recent_start, "$lt": recent_end},
+        }).to_list(20000)
+        month_totals_recent.append(len(sales_in_month))
+        for sale in sales_in_month:
+            model_name = str(sale.get("model") or "").strip()
+            if model_name:
+                model_recent_totals[model_name] = model_recent_totals.get(model_name, 0) + 1
+            sale_price = float(sale.get("sale_price", 0) or 0)
+            if model_name and sale_price > 0:
+                model_price_totals[model_name] = model_price_totals.get(model_name, 0.0) + sale_price
+                model_price_counts[model_name] = model_price_counts.get(model_name, 0) + 1
+
+    previous_year_units = len(previous_year_sales)
+    recent_avg_units = (sum(month_totals_recent) / safe_lookback) if safe_lookback > 0 else 0.0
+    suggested_total_units = int(round((previous_year_units * 0.6) + (recent_avg_units * 0.4)))
+    if suggested_total_units <= 0:
+        blended_hist = previous_year_units + sum(month_totals_recent)
+        suggested_total_units = int(round(blended_hist / max(1, safe_lookback + 1))) if blended_hist > 0 else 0
+
+    brand_name = str(agency.get("brand_name") or "").strip()
+    if not brand_name and agency.get("brand_id") and ObjectId.is_valid(str(agency.get("brand_id"))):
+        brand_doc = await db.brands.find_one({"_id": ObjectId(str(agency.get("brand_id")))})
+        if brand_doc:
+            brand_name = str(brand_doc.get("name") or "").strip()
+
+    catalog_min_msrp_by_model: Dict[str, float] = {}
+    if brand_name:
+        try:
+            catalog = _build_catalog_tree_from_source(all_years=True)
+            make_entry = _find_catalog_make(catalog, brand_name)
+            if make_entry:
+                for model_entry in make_entry.get("models", []):
+                    model_name = str(model_entry.get("name") or "").strip()
+                    min_msrp = _parse_catalog_price(model_entry.get("min_msrp"))
+                    if model_name and min_msrp:
+                        catalog_min_msrp_by_model[model_name.casefold()] = float(min_msrp)
+        except Exception:
+            # Best-effort enhancement only; suggestions can still be computed without catalog.
+            pass
+
+    model_keys = set(model_previous_year_totals.keys()) | set(model_recent_totals.keys())
+    model_scores: List[Dict[str, Any]] = []
+    for model_name in model_keys:
+        previous_units_model = int(model_previous_year_totals.get(model_name, 0) or 0)
+        recent_avg_model = float(model_recent_totals.get(model_name, 0) or 0) / safe_lookback
+        blended_score = (previous_units_model * 0.65) + (recent_avg_model * 0.35)
+        if blended_score <= 0:
+            continue
+        model_scores.append({
+            "model": model_name,
+            "score": blended_score,
+            "previous_year_units": previous_units_model,
+            "recent_avg_units": round(recent_avg_model, 2),
+        })
+
+    score_total = sum(float(item["score"]) for item in model_scores)
+    if suggested_total_units <= 0 and score_total > 0:
+        suggested_total_units = int(round(score_total))
+
+    raw_allocations: List[Dict[str, Any]] = []
+    for item in model_scores:
+        if score_total > 0 and suggested_total_units > 0:
+            raw_units = (float(item["score"]) / score_total) * suggested_total_units
+        else:
+            raw_units = float(item["score"])
+        floor_units = int(raw_units)
+        raw_allocations.append({
+            **item,
+            "raw_units": raw_units,
+            "units": floor_units,
+            "fraction": raw_units - floor_units,
+        })
+
+    target_total_units = max(0, suggested_total_units)
+    current_total_units = sum(int(item["units"]) for item in raw_allocations)
+    if target_total_units > current_total_units:
+        pending = target_total_units - current_total_units
+        ranked = sorted(raw_allocations, key=lambda x: (x["fraction"], x["score"]), reverse=True)
+        if ranked:
+            idx = 0
+            while pending > 0:
+                ranked[idx % len(ranked)]["units"] += 1
+                pending -= 1
+                idx += 1
+    elif current_total_units > target_total_units:
+        overflow = current_total_units - target_total_units
+        ranked = sorted(raw_allocations, key=lambda x: (x["units"], x["fraction"]), reverse=True)
+        for item in ranked:
+            if overflow <= 0:
+                break
+            removable = min(item["units"], overflow)
+            item["units"] -= removable
+            overflow -= removable
+
+    suggestion_items: List[Dict[str, Any]] = []
+    suggestion_total_revenue = 0.0
+    for item in sorted(raw_allocations, key=lambda x: (x["units"], x["score"]), reverse=True):
+        units = int(item["units"])
+        if units <= 0:
+            continue
+        model_name = str(item["model"])
+        avg_sale_price = (
+            (model_price_totals.get(model_name, 0.0) / model_price_counts.get(model_name, 1))
+            if model_price_counts.get(model_name, 0) > 0
+            else 0.0
+        )
+        catalog_min_msrp = float(catalog_min_msrp_by_model.get(model_name.casefold(), 0.0) or 0.0)
+        effective_price = avg_sale_price if avg_sale_price > 0 else catalog_min_msrp
+        suggested_revenue = round(units * effective_price, 2) if effective_price > 0 else 0.0
+        suggestion_total_revenue += suggested_revenue
+        suggestion_items.append({
+            "model": model_name,
+            "suggested_units": units,
+            "suggested_revenue": suggested_revenue,
+            "previous_year_units": int(item["previous_year_units"]),
+            "recent_avg_units": float(item["recent_avg_units"]),
+            "avg_sale_price": round(avg_sale_price, 2) if avg_sale_price > 0 else None,
+            "min_msrp": round(catalog_min_msrp, 2) if catalog_min_msrp > 0 else None,
+        })
+
+    return {
+        "agency_id": agency_id,
+        "agency_name": agency.get("name"),
+        "seller_id": seller_id,
+        "seller_name": seller.get("name"),
+        "month": target_month,
+        "year": target_year,
+        "lookback_months": safe_lookback,
+        "baseline": {
+            "previous_year_same_month_units": int(previous_year_units),
+            "recent_avg_units": round(recent_avg_units, 2),
+            "suggested_total_units": int(sum(item["suggested_units"] for item in suggestion_items)),
+        },
+        "totals": {
+            "suggested_units": int(sum(item["suggested_units"] for item in suggestion_items)),
+            "suggested_revenue": round(suggestion_total_revenue, 2),
+        },
+        "items": suggestion_items,
+    }
 
 @api_router.put("/sales-objectives/{objective_id}")
 async def update_sales_objective(objective_id: str, objective_data: SalesObjectiveCreate, request: Request):
@@ -3591,6 +3902,12 @@ async def update_sales_objective(objective_id: str, objective_data: SalesObjecti
 
     previous = await db.sales_objectives.find_one({"_id": ObjectId(objective_id)})
     _ensure_doc_scope_access(current_user, previous, detail="No tienes acceso a este objetivo")
+    previous_status = str(previous.get("approval_status") or OBJECTIVE_APPROVED).strip().lower() if previous else OBJECTIVE_APPROVED
+    if previous_status == OBJECTIVE_PENDING:
+        raise HTTPException(
+            status_code=409,
+            detail="Este objetivo está en aprobación y no se puede editar hasta que sea aprobado o rechazado.",
+        )
     now = datetime.now(timezone.utc)
     update_fields: Dict[str, Any] = {
         "units_target": objective_data.units_target,
@@ -3722,7 +4039,7 @@ async def create_commission_rule(rule_data: CommissionRuleCreate, request: Reque
     agency = await db.agencies.find_one({"_id": ObjectId(rule_data.agency_id)})
     if not agency:
         raise HTTPException(status_code=404, detail="Agency not found")
-    _ensure_doc_scope_access(current_user, agency, detail="No tienes acceso a esta agencia")
+    _ensure_doc_scope_access(current_user, agency, agency_field="_id", detail="No tienes acceso a esta agencia")
     
     now = datetime.now(timezone.utc)
     rule_doc = {
@@ -4029,7 +4346,7 @@ async def commission_simulator(payload: CommissionSimulatorInput, request: Reque
     agency = await db.agencies.find_one({"_id": ObjectId(payload.agency_id)})
     if not agency:
         raise HTTPException(status_code=404, detail="Agency not found")
-    _ensure_doc_scope_access(current_user, agency, detail="No tienes acceso a esta agencia")
+    _ensure_doc_scope_access(current_user, agency, agency_field="_id", detail="No tienes acceso a esta agencia")
 
     if role == DEALER_SELLER_ROLE:
         seller_id = current_user.get("id")
@@ -4105,7 +4422,7 @@ async def create_commission_closure(payload: CommissionClosureCreate, request: R
     agency = await db.agencies.find_one({"_id": ObjectId(payload.agency_id)})
     if not agency:
         raise HTTPException(status_code=404, detail="Agency not found")
-    _ensure_doc_scope_access(current_user, agency, detail="No tienes acceso a esta agencia")
+    _ensure_doc_scope_access(current_user, agency, agency_field="_id", detail="No tienes acceso a esta agencia")
 
     seller = await db.users.find_one({"_id": ObjectId(payload.seller_id)})
     if not seller:

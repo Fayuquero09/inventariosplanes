@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { salesObjectivesApi, dashboardApi } from '../lib/api';
+import { salesObjectivesApi, dashboardApi, vehicleCatalogApi, sellersApi } from '../lib/api';
 import { useHierarchicalFilters, HierarchicalFilters } from '../components/HierarchicalFilters';
 import { useAuth } from '../contexts/AuthContext';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
@@ -9,20 +9,7 @@ import { Label } from '../components/ui/label';
 import { Badge } from '../components/ui/badge';
 import { Skeleton } from '../components/ui/skeleton';
 import { Progress } from '../components/ui/progress';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle
-} from '../components/ui/dialog';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from '../components/ui/select';
-import { Plus, Target, Users, Storefront } from '@phosphor-icons/react';
+import { Target, Users, Storefront } from '@phosphor-icons/react';
 import { toast } from 'sonner';
 import {
   BarChart,
@@ -63,6 +50,16 @@ const OBJECTIVE_STATUS_LABELS = {
   [OBJECTIVE_REJECTED]: 'Rechazado'
 };
 
+const CAPTURE_SCOPE = {
+  AGENCY: 'agency',
+  SELLER: 'seller',
+};
+
+const CAPTURE_MODE = {
+  TOTAL: 'total',
+  MODEL: 'model',
+};
+
 export default function ObjectivesPage() {
   const { user } = useAuth();
   const filters = useHierarchicalFilters({ includeSellers: false });
@@ -70,16 +67,25 @@ export default function ObjectivesPage() {
   const [objectives, setObjectives] = useState([]);
   const [sellerPerformance, setSellerPerformance] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
+  const [availableModels, setAvailableModels] = useState([]);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [availableSellers, setAvailableSellers] = useState([]);
+  const [loadingSellers, setLoadingSellers] = useState(false);
+  const [modelSearch, setModelSearch] = useState('');
+  const [modelTargets, setModelTargets] = useState({});
+  const [captureScope, setCaptureScope] = useState(CAPTURE_SCOPE.AGENCY);
+  const [captureMode, setCaptureMode] = useState(CAPTURE_MODE.MODEL);
+  const [totalUnitsInput, setTotalUnitsInput] = useState('');
+  const [totalRevenueInput, setTotalRevenueInput] = useState('');
+  const [loadingSuggestion, setLoadingSuggestion] = useState(false);
+  const [lastSuggestionMeta, setLastSuggestionMeta] = useState(null);
   const [formData, setFormData] = useState({
     agency_id: '',
+    seller_id: '',
     month: new Date().getMonth() + 1,
-    year: new Date().getFullYear(),
-    units_target: '',
-    revenue_target: '',
-    vehicle_line: ''
+    year: new Date().getFullYear()
   });
 
   const canCreateObjectives = OBJECTIVE_EDITOR_ROLES.includes(user?.role);
@@ -90,9 +96,204 @@ export default function ObjectivesPage() {
   const shouldLockAgencySelector = isAgencyScopedUser && Boolean(singleAgencyId);
 
   useEffect(() => {
-    if (!isDialogOpen || !shouldLockAgencySelector || !singleAgencyId) return;
-    setFormData((prev) => ({ ...prev, agency_id: singleAgencyId }));
-  }, [isDialogOpen, shouldLockAgencySelector, singleAgencyId]);
+    if (!shouldLockAgencySelector || !singleAgencyId) return;
+    setFormData((prev) => (
+      prev.agency_id === singleAgencyId ? prev : { ...prev, agency_id: singleAgencyId }
+    ));
+  }, [shouldLockAgencySelector, singleAgencyId]);
+
+  useEffect(() => {
+    if (filters.selectedAgency === 'all') return;
+    setFormData((prev) => (
+      prev.agency_id === filters.selectedAgency ? prev : { ...prev, agency_id: filters.selectedAgency }
+    ));
+  }, [filters.selectedAgency]);
+
+  useEffect(() => {
+    setFormData((prev) => {
+      if (prev.month === selectedMonth && prev.year === selectedYear) return prev;
+      return { ...prev, month: selectedMonth, year: selectedYear };
+    });
+  }, [selectedMonth, selectedYear]);
+
+  useEffect(() => {
+    if (captureScope === CAPTURE_SCOPE.SELLER) return;
+    setFormData((prev) => (prev.seller_id ? { ...prev, seller_id: '' } : prev));
+  }, [captureScope]);
+
+  useEffect(() => {
+    setLastSuggestionMeta(null);
+  }, [captureScope, captureMode, formData.agency_id, formData.seller_id, formData.month, formData.year]);
+
+  const loadAgencyModels = useCallback(async (agencyId) => {
+    if (!agencyId) {
+      setAvailableModels([]);
+      setModelSearch('');
+      setModelTargets({});
+      return;
+    }
+
+    const agency = (filters.agencies || []).find((item) => item.id === agencyId);
+    const makeName = String(agency?.brand_name || '').trim();
+
+    if (!makeName) {
+      setAvailableModels([]);
+      setModelSearch('');
+      setModelTargets({});
+      return;
+    }
+
+    setLoadingModels(true);
+    try {
+      const response = await vehicleCatalogApi.getModels(makeName, { allYears: true });
+      const items = Array.isArray(response?.data?.items) ? response.data.items : [];
+      const models = items
+        .map((item) => ({
+          name: String(item?.name || '').trim(),
+          min_msrp: Number(item?.min_msrp || 0),
+        }))
+        .filter((item) => item.name)
+        .sort((a, b) => a.name.localeCompare(b.name, 'es-MX'));
+      setAvailableModels(models);
+      setModelSearch('');
+    } catch (error) {
+      setAvailableModels([]);
+      setModelSearch('');
+      setModelTargets({});
+      toast.error('No se pudo cargar el catálogo de modelos para esta marca');
+    } finally {
+      setLoadingModels(false);
+    }
+  }, [filters.agencies]);
+
+  const loadAgencySellers = useCallback(async (agencyId) => {
+    if (!agencyId) {
+      setAvailableSellers([]);
+      return;
+    }
+    setLoadingSellers(true);
+    try {
+      const response = await sellersApi.getAll({ agency_id: agencyId });
+      const sellers = Array.isArray(response?.data) ? response.data : [];
+      setAvailableSellers(sellers);
+    } catch (error) {
+      setAvailableSellers([]);
+      toast.error('No se pudo cargar la lista de vendedores');
+    } finally {
+      setLoadingSellers(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!canCreateObjectives) return;
+    loadAgencyModels(formData.agency_id);
+  }, [canCreateObjectives, formData.agency_id, loadAgencyModels]);
+
+  useEffect(() => {
+    if (!canCreateObjectives || captureScope !== CAPTURE_SCOPE.SELLER) return;
+    loadAgencySellers(formData.agency_id);
+  }, [canCreateObjectives, captureScope, formData.agency_id, loadAgencySellers]);
+
+  useEffect(() => {
+    if (captureScope !== CAPTURE_SCOPE.SELLER) return;
+    if (!formData.seller_id) return;
+    const exists = availableSellers.some((seller) => seller.id === formData.seller_id);
+    if (!exists) {
+      setFormData((prev) => ({ ...prev, seller_id: '' }));
+    }
+  }, [captureScope, formData.seller_id, availableSellers]);
+
+  const scopedObjectives = objectives.filter((objective) => {
+    if (!formData.agency_id) return false;
+    if (objective?.agency_id !== formData.agency_id) return false;
+    if (Number(objective?.month) !== Number(formData.month)) return false;
+    if (Number(objective?.year) !== Number(formData.year)) return false;
+    if (captureScope === CAPTURE_SCOPE.SELLER) {
+      if (!formData.seller_id) return false;
+      return String(objective?.seller_id || '') === formData.seller_id;
+    }
+    return !objective?.seller_id;
+  });
+  const isScopePendingApproval = scopedObjectives.some((objective) => (
+    String(objective?.approval_status || OBJECTIVE_APPROVED).toLowerCase() === OBJECTIVE_PENDING
+  ));
+  const canSuggestByHistory = (
+    captureScope === CAPTURE_SCOPE.SELLER
+    && Boolean(formData.agency_id)
+    && Boolean(formData.seller_id)
+  );
+  const sellerOptions = availableSellers
+    .filter((seller) => Boolean(seller?.id))
+    .reduce((acc, seller) => {
+      if (!acc.some((item) => item.id === seller.id)) acc.push(seller);
+      return acc;
+    }, []);
+
+  useEffect(() => {
+    if (!canCreateObjectives || captureMode !== CAPTURE_MODE.MODEL) return;
+    if (!formData.agency_id || loadingModels || availableModels.length === 0) return;
+    if (captureScope === CAPTURE_SCOPE.SELLER && !formData.seller_id) {
+      setModelTargets({});
+      return;
+    }
+    const existingByModel = new Map(
+      scopedObjectives
+        .filter((objective) => String(objective?.vehicle_line || '').trim())
+        .map((objective) => [String(objective?.vehicle_line || '').trim().toLowerCase(), objective])
+    );
+
+    const nextTargets = {};
+    availableModels.forEach((modelItem) => {
+      const modelKey = modelItem.name.toLowerCase();
+      const existingObjective = existingByModel.get(modelKey);
+      nextTargets[modelItem.name] = existingObjective ? String(Math.max(0, Number(existingObjective.units_target || 0))) : '';
+    });
+
+    setModelTargets((prev) => {
+      const prevKeys = Object.keys(prev);
+      const nextKeys = Object.keys(nextTargets);
+      if (prevKeys.length !== nextKeys.length) return nextTargets;
+      for (const key of nextKeys) {
+        if ((prev[key] || '') !== (nextTargets[key] || '')) {
+          return nextTargets;
+        }
+      }
+      return prev;
+    });
+  }, [
+    canCreateObjectives,
+    captureMode,
+    captureScope,
+    formData.agency_id,
+    formData.seller_id,
+    formData.month,
+    formData.year,
+    availableModels,
+    loadingModels,
+    scopedObjectives,
+  ]);
+
+  useEffect(() => {
+    if (!canCreateObjectives || captureMode !== CAPTURE_MODE.TOTAL) return;
+    if (!formData.agency_id) return;
+    if (captureScope === CAPTURE_SCOPE.SELLER && !formData.seller_id) {
+      setTotalUnitsInput('');
+      setTotalRevenueInput('');
+      return;
+    }
+    const totalObjective = scopedObjectives.find((objective) => !String(objective?.vehicle_line || '').trim());
+    const nextUnits = totalObjective ? String(Math.max(0, Number(totalObjective.units_target || 0))) : '';
+    const nextRevenue = totalObjective ? String(Math.max(0, Number(totalObjective.revenue_target || 0))) : '';
+    setTotalUnitsInput((prev) => (prev === nextUnits ? prev : nextUnits));
+    setTotalRevenueInput((prev) => (prev === nextRevenue ? prev : nextRevenue));
+  }, [
+    canCreateObjectives,
+    captureMode,
+    captureScope,
+    formData.agency_id,
+    formData.seller_id,
+    scopedObjectives,
+  ]);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -100,7 +301,8 @@ export default function ObjectivesPage() {
       const params = {
         ...getFilterParams(),
         month: selectedMonth,
-        year: selectedYear
+        year: selectedYear,
+        include_seller_objectives: true,
       };
       
       const [objectivesRes, performanceRes] = await Promise.all([
@@ -123,37 +325,228 @@ export default function ObjectivesPage() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (isScopePendingApproval) {
+      toast.error('Este alcance ya está enviado a aprobación. Espera aprobación/rechazo para editar.');
+      return;
+    }
     if (!formData.agency_id) {
       toast.error('Selecciona una agencia para capturar el objetivo');
       return;
     }
-    try {
-      const response = await salesObjectivesApi.create({
-        ...formData,
-        seller_id: null,
-        units_target: parseInt(formData.units_target),
-        revenue_target: parseFloat(formData.revenue_target),
-        vehicle_line: formData.vehicle_line || null
-      });
-      const createdStatus = String(response?.data?.approval_status || '').toLowerCase();
-      if (createdStatus === OBJECTIVE_PENDING) {
-        toast.success('Objetivo enviado a aprobación');
-      } else {
-        toast.success('Objetivo creado y aprobado');
+    if (captureScope === CAPTURE_SCOPE.SELLER && !formData.seller_id) {
+      toast.error('Selecciona un vendedor para capturar objetivo por vendedor');
+      return;
+    }
+
+    const targetSellerId = captureScope === CAPTURE_SCOPE.SELLER ? formData.seller_id : '';
+    const scopedForSave = objectives.filter((objective) => {
+      if (objective?.agency_id !== formData.agency_id) return false;
+      if (Number(objective?.month) !== Number(formData.month)) return false;
+      if (Number(objective?.year) !== Number(formData.year)) return false;
+      if (targetSellerId) return String(objective?.seller_id || '') === targetSellerId;
+      return !objective?.seller_id;
+    });
+
+    if (captureMode === CAPTURE_MODE.TOTAL) {
+      const rawUnits = String(totalUnitsInput || '').trim();
+      if (!/^\d+$/.test(rawUnits)) {
+        toast.error('Meta unidades debe ser entero positivo (sin decimales)');
+        return;
       }
-      setIsDialogOpen(false);
-      setFormData({
-        agency_id: '',
-        month: new Date().getMonth() + 1,
-        year: new Date().getFullYear(),
-        units_target: '',
-        revenue_target: '',
-        vehicle_line: ''
+      const unitsTarget = Number(rawUnits);
+      if (unitsTarget <= 0) {
+        toast.error('Meta unidades debe ser mayor a 0');
+        return;
+      }
+      const revenueTarget = Number(totalRevenueInput);
+      if (!Number.isFinite(revenueTarget) || revenueTarget < 0) {
+        toast.error('Meta ingresos debe ser un número válido (>= 0)');
+        return;
+      }
+      const existingTotalObjective = scopedForSave.find((objective) => !String(objective?.vehicle_line || '').trim());
+      const payload = {
+        agency_id: formData.agency_id,
+        seller_id: targetSellerId || null,
+        month: Number(formData.month),
+        year: Number(formData.year),
+        units_target: unitsTarget,
+        revenue_target: revenueTarget,
+        vehicle_line: null,
+      };
+
+      try {
+        if (existingTotalObjective?.id) {
+          await salesObjectivesApi.update(existingTotalObjective.id, payload);
+          toast.success('Objetivo total actualizado');
+        } else {
+          await salesObjectivesApi.create(payload);
+          toast.success('Objetivo total creado');
+        }
+        fetchData();
+      } catch (error) {
+        const detail = error.response?.data?.detail;
+        toast.error(typeof detail === 'string' ? detail : 'Error al guardar objetivo total');
+      }
+      return;
+    }
+
+    const rowsToSave = availableModels
+      .map((modelItem) => {
+        const rawUnits = String(modelTargets[modelItem.name] || '').trim();
+        if (!rawUnits) return null;
+        if (!/^\d+$/.test(rawUnits)) return { invalid: true, model: modelItem.name };
+        const units = Number(rawUnits);
+        if (units <= 0) return null;
+        const minMsrp = Number(modelItem.min_msrp || 0);
+        const revenueTarget = minMsrp > 0 ? Math.round(units * minMsrp) : 0;
+        return { model: modelItem.name, unitsTarget: units, revenueTarget };
+      })
+      .filter(Boolean);
+
+    const invalidRows = rowsToSave.filter((row) => row.invalid);
+    if (invalidRows.length > 0) {
+      toast.error(`Unidades inválidas en ${invalidRows.length} modelo(s). Usa enteros sin decimales.`);
+      return;
+    }
+
+    const validRows = rowsToSave.filter((row) => !row.invalid);
+    if (validRows.length === 0) {
+      toast.error('Captura al menos una meta de unidades (> 0) por modelo');
+      return;
+    }
+
+    const existingByModel = new Map(
+      scopedForSave
+        .filter((objective) => String(objective?.vehicle_line || '').trim())
+        .map((objective) => [String(objective?.vehicle_line || '').trim().toLowerCase(), objective])
+    );
+
+    try {
+      const saveResults = await Promise.allSettled(
+        validRows.map(async (row) => {
+          const payload = {
+            agency_id: formData.agency_id,
+            month: Number(formData.month),
+            year: Number(formData.year),
+            seller_id: targetSellerId || null,
+            units_target: row.unitsTarget,
+            revenue_target: row.revenueTarget,
+            vehicle_line: row.model,
+          };
+          const existingObjective = existingByModel.get(row.model.toLowerCase());
+          if (existingObjective?.id) {
+            await salesObjectivesApi.update(existingObjective.id, payload);
+            return { mode: 'updated' };
+          }
+          await salesObjectivesApi.create(payload);
+          return { mode: 'created' };
+        })
+      );
+
+      const successful = saveResults.filter((result) => result.status === 'fulfilled');
+      const failed = saveResults.length - successful.length;
+      const createdCount = successful.filter((result) => result.value?.mode === 'created').length;
+      const updatedCount = successful.filter((result) => result.value?.mode === 'updated').length;
+      const failedRows = [];
+      saveResults.forEach((result, index) => {
+        if (result.status === 'rejected') {
+          const row = validRows[index];
+          const detail = result.reason?.response?.data?.detail || result.reason?.message || 'Error desconocido';
+          failedRows.push({ model: row?.model || 'Modelo', detail: String(detail) });
+        }
       });
+
+      if (successful.length > 0) {
+        toast.success(`Objetivos guardados: ${successful.length} (${createdCount} nuevos, ${updatedCount} actualizados)`);
+      }
+      if (failed > 0) {
+        const firstFailure = failedRows[0];
+        toast.error(
+          firstFailure
+            ? `No se pudieron guardar ${failed} modelo(s). ${firstFailure.model}: ${firstFailure.detail}`
+            : `No se pudieron guardar ${failed} modelo(s). Revisa permisos o datos.`
+        );
+      }
+
+      if (failed === 0) setModelSearch('');
       fetchData();
     } catch (error) {
       const detail = error.response?.data?.detail;
       toast.error(typeof detail === 'string' ? detail : 'Error al crear objetivo');
+    }
+  };
+
+  const handleSuggestFromHistory = async () => {
+    if (isScopePendingApproval) {
+      toast.error('Este alcance ya está enviado a aprobación. Espera aprobación/rechazo para editar.');
+      return;
+    }
+    if (!formData.agency_id || !formData.seller_id) {
+      toast.error('Selecciona agencia y vendedor para calcular sugerencias');
+      return;
+    }
+
+    setLoadingSuggestion(true);
+    try {
+      const response = await salesObjectivesApi.suggest({
+        agency_id: formData.agency_id,
+        seller_id: formData.seller_id,
+        month: Number(formData.month),
+        year: Number(formData.year),
+        lookback_months: 6,
+      });
+      const payload = response?.data || {};
+      const items = Array.isArray(payload?.items) ? payload.items : [];
+      const totals = payload?.totals || {};
+      const baseline = payload?.baseline || {};
+
+      if (captureMode === CAPTURE_MODE.TOTAL) {
+        setTotalUnitsInput(String(Math.max(0, Number(totals?.suggested_units || 0))));
+        setTotalRevenueInput(String(Math.max(0, Math.round(Number(totals?.suggested_revenue || 0)))));
+        setLastSuggestionMeta({
+          totalUnits: Number(totals?.suggested_units || 0),
+          previousYearUnits: Number(baseline?.previous_year_same_month_units || 0),
+          recentAvgUnits: Number(baseline?.recent_avg_units || 0),
+          rowsApplied: 1,
+        });
+        toast.success('Objetivo total sugerido cargado');
+        return;
+      }
+
+      const canonicalByLower = new Map(
+        availableModels.map((modelItem) => [String(modelItem.name || '').trim().toLowerCase(), modelItem.name])
+      );
+      const nextTargets = {};
+      availableModels.forEach((modelItem) => { nextTargets[modelItem.name] = ''; });
+
+      let applied = 0;
+      items.forEach((item) => {
+        const key = String(item?.model || '').trim().toLowerCase();
+        if (!key) return;
+        const canonicalName = canonicalByLower.get(key);
+        if (!canonicalName) return;
+        const suggestedUnits = Math.max(0, Number(item?.suggested_units || 0));
+        if (suggestedUnits <= 0) return;
+        nextTargets[canonicalName] = String(Math.round(suggestedUnits));
+        applied += 1;
+      });
+      setModelTargets(nextTargets);
+      setLastSuggestionMeta({
+        totalUnits: Number(totals?.suggested_units || 0),
+        previousYearUnits: Number(baseline?.previous_year_same_month_units || 0),
+        recentAvgUnits: Number(baseline?.recent_avg_units || 0),
+        rowsApplied: applied,
+      });
+      if (applied > 0) {
+        toast.success(`Sugerencias aplicadas en ${applied} modelos`);
+      } else {
+        toast.error('No hubo coincidencias de modelos con el catálogo de esta agencia');
+      }
+    } catch (error) {
+      const detail = error.response?.data?.detail;
+      toast.error(typeof detail === 'string' ? detail : 'No se pudo calcular sugerencias históricas');
+    } finally {
+      setLoadingSuggestion(false);
     }
   };
 
@@ -202,13 +595,6 @@ export default function ObjectivesPage() {
     }).format(Number(value || 0));
   };
 
-  const getProgressColor = (progress) => {
-    if (progress >= 100) return '#2A9D8F';
-    if (progress >= 75) return '#002FA7';
-    if (progress >= 50) return '#E9C46A';
-    return '#E63946';
-  };
-
   const getObjectiveStatus = (objective) => {
     const status = String(objective?.approval_status || '').toLowerCase();
     if (status === OBJECTIVE_PENDING || status === OBJECTIVE_REJECTED || status === OBJECTIVE_APPROVED) {
@@ -230,10 +616,10 @@ export default function ObjectivesPage() {
     commission: s.commission
   }));
 
-  // Objetivos operativos actuales: agencia-marca.
-  const agencyObjectives = objectives.filter(o => !o.seller_id);
+  // Objetivos operativos visibles en el periodo (agencia y/o vendedor).
+  const operationalObjectives = objectives;
   const brandsWithObjectivesCount = new Set(
-    agencyObjectives
+    operationalObjectives
       .map((objective) => objective?.brand_id)
       .filter(Boolean)
   ).size;
@@ -253,52 +639,30 @@ export default function ObjectivesPage() {
             Objetivos de Ventas
           </h1>
           <p className="text-muted-foreground">
-            Gestiona objetivos por agencia-marca
+            Gestiona objetivos por agencia, vendedor, modelo o totales
           </p>
         </div>
         <div className="flex gap-2">
-          <Select value={selectedMonth.toString()} onValueChange={(v) => setSelectedMonth(parseInt(v))}>
-            <SelectTrigger className="w-[140px]" data-testid="select-month">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {MONTHS.map((m) => (
-                <SelectItem key={m.value} value={m.value.toString()}>
-                  {m.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Select value={selectedYear.toString()} onValueChange={(v) => setSelectedYear(parseInt(v))}>
-            <SelectTrigger className="w-[100px]" data-testid="select-year">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {[2024, 2025, 2026].map((y) => (
-                <SelectItem key={y} value={y.toString()}>
-                  {y}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          {canCreateObjectives && (
-            <Button
-              onClick={() => {
-                setFormData((prev) => ({
-                  ...prev,
-                  month: selectedMonth,
-                  year: selectedYear,
-                  agency_id: prev.agency_id || (shouldLockAgencySelector ? singleAgencyId : prev.agency_id)
-                }));
-                setIsDialogOpen(true);
-              }}
-              className="bg-[#002FA7] hover:bg-[#002FA7]/90"
-              data-testid="add-objective-btn"
-            >
-              <Plus size={18} className="mr-2" />
-              Nuevo Objetivo
-            </Button>
-          )}
+          <select
+            value={selectedMonth}
+            onChange={(e) => setSelectedMonth(parseInt(e.target.value, 10))}
+            className="h-9 w-[140px] rounded-md border border-input bg-transparent px-3 py-2 text-sm"
+            data-testid="select-month"
+          >
+            {MONTHS.map((m) => (
+              <option key={m.value} value={m.value}>{m.label}</option>
+            ))}
+          </select>
+          <select
+            value={selectedYear}
+            onChange={(e) => setSelectedYear(parseInt(e.target.value, 10))}
+            className="h-9 w-[100px] rounded-md border border-input bg-transparent px-3 py-2 text-sm"
+            data-testid="select-year"
+          >
+            {[2024, 2025, 2026].map((y) => (
+              <option key={y} value={y}>{y}</option>
+            ))}
+          </select>
         </div>
       </div>
 
@@ -340,9 +704,9 @@ export default function ObjectivesPage() {
         <Card className="border-border/40">
           <CardContent className="p-4">
             <div className="text-xs font-semibold tracking-widest uppercase text-muted-foreground mb-1">
-              Objetivos de Agencia
+              Objetivos Configurados
             </div>
-            <div className="text-2xl font-bold">{agencyObjectives.length}</div>
+            <div className="text-2xl font-bold">{operationalObjectives.length}</div>
             <div className="text-sm text-muted-foreground mt-1">
               configurados
             </div>
@@ -365,112 +729,387 @@ export default function ObjectivesPage() {
       <div className="space-y-4">
         <h2 className="text-lg font-semibold flex items-center gap-2" style={{ fontFamily: 'Cabinet Grotesk' }}>
           <Storefront size={20} weight="duotone" className="text-[#002FA7]" />
-          Objetivos por Agencia
+          Objetivos por Agencia y Vendedor
         </h2>
-        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {loading ? (
-            [...Array(3)].map((_, i) => (
-              <Card key={i} className="border-border/40">
-                <CardContent className="p-4">
-                  <Skeleton className="h-32 w-full" />
-                </CardContent>
-              </Card>
-            ))
-          ) : agencyObjectives.length === 0 ? (
-            <Card className="border-border/40 col-span-full">
-              <CardContent className="p-12 text-center">
-                <Target size={48} className="mx-auto text-muted-foreground mb-4" />
-                <p className="text-muted-foreground">No hay objetivos de agencia para este período</p>
-              </CardContent>
-            </Card>
-          ) : (
-            agencyObjectives.map((objective) => {
-              const objectiveStatus = getObjectiveStatus(objective);
-              return (
-                <Card key={objective.id} className="border-border/40" data-testid={`objective-card-${objective.id}`}>
-                  <CardHeader className="pb-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <CardTitle className="text-base">{objective.agency_name}</CardTitle>
-                      <div className="flex items-center gap-2">
-                        {objective.vehicle_line && (
-                          <Badge variant="outline">{objective.vehicle_line}</Badge>
-                        )}
-                        <Badge variant="outline" className={getObjectiveStatusBadgeClass(objectiveStatus)}>
-                          {OBJECTIVE_STATUS_LABELS[objectiveStatus]}
-                        </Badge>
-                      </div>
+        {canCreateObjectives && (
+          <Card className="border-border/40">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base" style={{ fontFamily: 'Cabinet Grotesk' }}>
+                Captura En Lienzo (Sin Popup)
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <form onSubmit={handleSubmit} className="space-y-4">
+                <div className="grid md:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="capture_scope">Ámbito</Label>
+                    <select
+                      id="capture_scope"
+                      value={captureScope}
+                      onChange={(e) => setCaptureScope(e.target.value)}
+                      className="h-9 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm"
+                      data-testid="objective-scope-select"
+                    >
+                      <option value={CAPTURE_SCOPE.AGENCY}>Agencia</option>
+                      <option value={CAPTURE_SCOPE.SELLER}>Vendedor</option>
+                    </select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="capture_mode">Tipo de Captura</Label>
+                    <select
+                      id="capture_mode"
+                      value={captureMode}
+                      onChange={(e) => setCaptureMode(e.target.value)}
+                      className="h-9 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm"
+                      data-testid="objective-mode-select"
+                    >
+                      <option value={CAPTURE_MODE.MODEL}>Por Modelo</option>
+                      <option value={CAPTURE_MODE.TOTAL}>Totales</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid md:grid-cols-4 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="agency_id">Agencia</Label>
+                    <select
+                      id="agency_id"
+                      value={formData.agency_id}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        setModelSearch('');
+                        setModelTargets({});
+                        setTotalUnitsInput('');
+                        setTotalRevenueInput('');
+                        setFormData({ ...formData, agency_id: value, seller_id: '' });
+                      }}
+                      disabled={shouldLockAgencySelector}
+                      className="h-9 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm disabled:opacity-50"
+                      data-testid="objective-agency-select"
+                    >
+                      <option value="">Seleccionar agencia</option>
+                      {filters.filteredAgencies.map((agency) => (
+                        <option key={agency.id} value={agency.id}>
+                          {agency.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {captureScope === CAPTURE_SCOPE.SELLER && (
+                    <div className="space-y-2">
+                      <Label htmlFor="seller_id">Vendedor</Label>
+                      <select
+                        id="seller_id"
+                        value={formData.seller_id}
+                        onChange={(e) => setFormData({ ...formData, seller_id: e.target.value })}
+                        disabled={!formData.agency_id || loadingSellers}
+                        className="h-9 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm disabled:opacity-50"
+                        data-testid="objective-seller-select"
+                      >
+                        <option value="">
+                          {loadingSellers ? 'Cargando vendedores...' : 'Seleccionar vendedor'}
+                        </option>
+                        {sellerOptions.map((seller) => (
+                          <option key={seller.id} value={seller.id}>
+                            {seller.name}
+                          </option>
+                        ))}
+                      </select>
                     </div>
-                    <div className="text-sm text-muted-foreground">
-                      {objective.brand_name} • {objective.group_name}
+                  )}
+                  <div className="space-y-2">
+                    <Label htmlFor="month">Mes</Label>
+                    <select
+                      id="month"
+                      value={formData.month}
+                      onChange={(e) => setFormData({ ...formData, month: parseInt(e.target.value, 10) })}
+                      className="h-9 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm"
+                      data-testid="objective-month-select"
+                    >
+                      {MONTHS.map((m) => (
+                        <option key={m.value} value={m.value}>
+                          {m.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="year">Año</Label>
+                    <select
+                      id="year"
+                      value={formData.year}
+                      onChange={(e) => setFormData({ ...formData, year: parseInt(e.target.value, 10) })}
+                      className="h-9 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm"
+                      data-testid="objective-year-select"
+                    >
+                      {[2024, 2025, 2026].map((y) => (
+                        <option key={y} value={y}>
+                          {y}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {captureMode === CAPTURE_MODE.MODEL ? (
+                  <div className="space-y-2">
+                    <Label htmlFor="vehicle_line">Objetivo por Modelo (unidades)</Label>
+                    <Input
+                      id="objective-model-search"
+                      value={modelSearch}
+                      onChange={(e) => setModelSearch(e.target.value)}
+                      placeholder="Buscar modelo..."
+                      disabled={
+                        isScopePendingApproval
+                        || !formData.agency_id
+                        || loadingModels
+                        || (captureScope === CAPTURE_SCOPE.SELLER && !formData.seller_id)
+                      }
+                    />
+                    <div className="max-h-64 overflow-y-auto rounded-md border border-border/60" data-testid="objective-line-input">
+                      {!formData.agency_id ? (
+                        <p className="text-xs text-muted-foreground p-3">Selecciona una agencia para ver modelos.</p>
+                      ) : captureScope === CAPTURE_SCOPE.SELLER && !formData.seller_id ? (
+                        <p className="text-xs text-muted-foreground p-3">Selecciona un vendedor para capturar objetivos por modelo.</p>
+                      ) : loadingModels ? (
+                        <p className="text-xs text-muted-foreground p-3">Cargando modelos...</p>
+                      ) : (
+                        <table className="w-full text-sm">
+                          <thead className="bg-muted/40 sticky top-0">
+                            <tr>
+                              <th className="text-left px-3 py-2 font-semibold">Modelo</th>
+                              <th className="text-right px-3 py-2 font-semibold">Min MSRP</th>
+                              <th className="text-right px-3 py-2 font-semibold">Meta Unidades</th>
+                              <th className="text-right px-3 py-2 font-semibold">Meta Ingresos (auto)</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {availableModels
+                              .filter((modelItem) => modelItem.name.toLowerCase().includes(modelSearch.toLowerCase()))
+                              .map((modelItem) => {
+                                const unitsRaw = String(modelTargets[modelItem.name] || '');
+                                const units = Number(unitsRaw || 0);
+                                const minMsrp = Number(modelItem.min_msrp || 0);
+                                const autoRevenue = units > 0 && minMsrp > 0 ? units * minMsrp : 0;
+                                return (
+                                  <tr key={modelItem.name} className="border-t border-border/40">
+                                    <td className="px-3 py-2">{modelItem.name}</td>
+                                    <td className="px-3 py-2 text-right text-muted-foreground">
+                                      {minMsrp > 0 ? formatCurrency(minMsrp) : 'N/D'}
+                                    </td>
+                                    <td className="px-3 py-2 text-right">
+                                      <Input
+                                        type="number"
+                                        min={0}
+                                        step={1}
+                                        inputMode="numeric"
+                                        value={unitsRaw}
+                                        onChange={(e) => {
+                                          const integerOnly = String(e.target.value || '').replace(/[^\d]/g, '');
+                                          setModelTargets((prev) => ({ ...prev, [modelItem.name]: integerOnly }));
+                                        }}
+                                        placeholder="0"
+                                        className="w-24 ml-auto text-right"
+                                        data-testid={`objective-units-input-${modelItem.name}`}
+                                        disabled={isScopePendingApproval}
+                                      />
+                                    </td>
+                                    <td className="px-3 py-2 text-right font-medium">
+                                      {formatCurrency(autoRevenue)}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                          </tbody>
+                        </table>
+                      )}
                     </div>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    <div>
-                      <div className="flex justify-between text-sm mb-1">
-                        <span className="text-muted-foreground">Unidades</span>
-                        <span className="font-medium">{formatUnits(objective.units_sold)} / {formatUnits(objective.units_target)}</span>
-                      </div>
-                      <Progress
-                        value={Math.min(objective.progress_units, 100)}
-                        className="h-2"
-                        style={{ '--progress-background': getProgressColor(objective.progress_units) }}
+                    {!loadingModels && formData.agency_id && availableModels.length === 0 && (
+                      <p className="text-xs text-muted-foreground">
+                        No se encontraron modelos para esta marca en el catálogo.
+                      </p>
+                    )}
+                    <p className="text-xs text-muted-foreground">
+                      Solo se guardan filas con unidades mayores a 0. La meta ingresos se calcula en automático con MSRP mínimo por modelo.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="grid md:grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="total_units">Meta Unidades (total)</Label>
+                      <Input
+                        id="total_units"
+                        type="number"
+                        min={0}
+                        step={1}
+                        inputMode="numeric"
+                        value={totalUnitsInput}
+                        onChange={(e) => setTotalUnitsInput(String(e.target.value || '').replace(/[^\d]/g, ''))}
+                        placeholder="Ej: 80"
+                        data-testid="objective-total-units-input"
+                        disabled={isScopePendingApproval}
                       />
-                      <div className="text-right text-xs text-muted-foreground mt-1">
-                        {objective.progress_units.toFixed(1)}%
-                      </div>
                     </div>
-                    <div>
-                      <div className="flex justify-between text-sm mb-1">
-                        <span className="text-muted-foreground">Ingresos</span>
-                        <span className="font-medium">{formatCurrency(objective.revenue_achieved)}</span>
-                      </div>
-                      <Progress
-                        value={Math.min(objective.progress_revenue, 100)}
-                        className="h-2"
-                        style={{ '--progress-background': getProgressColor(objective.progress_revenue) }}
+                    <div className="space-y-2">
+                      <Label htmlFor="total_revenue">Meta Ingresos (total)</Label>
+                      <Input
+                        id="total_revenue"
+                        type="number"
+                        min={0}
+                        step={1}
+                        inputMode="numeric"
+                        value={totalRevenueInput}
+                        onChange={(e) => setTotalRevenueInput(String(e.target.value || '').replace(/[^\d]/g, ''))}
+                        placeholder="Ej: 25000000"
+                        data-testid="objective-total-revenue-input"
+                        disabled={isScopePendingApproval}
                       />
-                      <div className="flex justify-between text-xs text-muted-foreground mt-1">
-                        <span>Meta: {formatCurrency(objective.revenue_target)}</span>
-                        <span>{objective.progress_revenue.toFixed(1)}%</span>
-                      </div>
                     </div>
+                    <p className="text-xs text-muted-foreground md:col-span-2">
+                      En modo Totales se guarda un solo objetivo agregado (sin modelo) para el alcance seleccionado.
+                    </p>
+                  </div>
+                )}
 
-                    {objectiveStatus === OBJECTIVE_PENDING && canApproveObjectives && (
-                      <div className="flex items-center justify-end gap-2 pt-1">
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={() => handleApprovalDecision(objective, OBJECTIVE_REJECTED)}
-                          data-testid={`reject-objective-${objective.id}`}
-                        >
-                          Rechazar
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          className="bg-[#2A9D8F] hover:bg-[#2A9D8F]/90"
-                          onClick={() => handleApprovalDecision(objective, OBJECTIVE_APPROVED)}
-                          data-testid={`approve-objective-${objective.id}`}
-                        >
-                          Aprobar
-                        </Button>
-                      </div>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex-1">
+                    {canSuggestByHistory && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={handleSuggestFromHistory}
+                        disabled={isScopePendingApproval || loadingSuggestion || (captureMode === CAPTURE_MODE.MODEL && loadingModels)}
+                        data-testid="suggest-objective-btn"
+                      >
+                        {loadingSuggestion ? 'Calculando sugerencia...' : 'Sugerir por histórico'}
+                      </Button>
                     )}
-
-                    {objectiveStatus === OBJECTIVE_REJECTED && objective.approval_comment && (
-                      <p className="text-xs text-[#E63946]">Motivo rechazo: {objective.approval_comment}</p>
-                    )}
-
-                    {objectiveStatus === OBJECTIVE_APPROVED && objective.approved_by_name && (
-                      <p className="text-xs text-[#2A9D8F]">Aprobado por: {objective.approved_by_name}</p>
-                    )}
-                  </CardContent>
-                </Card>
-              );
-            })
-          )}
-        </div>
+                  </div>
+                  <Button
+                    type="submit"
+                    className="bg-[#002FA7] hover:bg-[#002FA7]/90"
+                    data-testid="save-objective-btn"
+                    disabled={isScopePendingApproval}
+                  >
+                    {objectiveSubmitLabel}
+                  </Button>
+                </div>
+                {lastSuggestionMeta && canSuggestByHistory && (
+                  <p className="text-xs text-muted-foreground">
+                    Sugerencia aplicada. Año pasado mismo mes: {formatUnits(lastSuggestionMeta.previousYearUnits)} u ·
+                    promedio reciente: {Number(lastSuggestionMeta.recentAvgUnits || 0).toFixed(1)} u/mes ·
+                    objetivo sugerido: {formatUnits(lastSuggestionMeta.totalUnits)} u.
+                  </p>
+                )}
+                {isScopePendingApproval && (
+                  <p className="text-xs text-[#8A6D1A]">
+                    Objetivos bloqueados: este alcance ya fue enviado a aprobación. Espera aprobación o rechazo para volver a editar.
+                  </p>
+                )}
+              </form>
+            </CardContent>
+          </Card>
+        )}
+        {loading ? (
+          <Card className="border-border/40">
+            <CardContent className="p-4">
+              <Skeleton className="h-64 w-full" />
+            </CardContent>
+          </Card>
+        ) : operationalObjectives.length === 0 ? (
+          <Card className="border-border/40">
+            <CardContent className="p-12 text-center">
+              <Target size={48} className="mx-auto text-muted-foreground mb-4" />
+              <p className="text-muted-foreground">No hay objetivos para este período</p>
+            </CardContent>
+          </Card>
+        ) : (
+          <Card className="border-border/40">
+            <CardHeader className="pb-2 flex flex-row items-center justify-between">
+              <CardTitle className="text-base" style={{ fontFamily: 'Cabinet Grotesk' }}>
+                Listado Compacto
+              </CardTitle>
+              <div className="text-sm text-muted-foreground">
+                {operationalObjectives.length} objetivos
+              </div>
+            </CardHeader>
+            <CardContent>
+              <div className="max-h-[520px] overflow-auto rounded-md border border-border/40">
+                <table className="w-full text-sm">
+                  <thead className="bg-muted/40 sticky top-0">
+                    <tr>
+                      <th className="text-left px-3 py-2 font-semibold">Agencia</th>
+                      <th className="text-left px-3 py-2 font-semibold">Vendedor</th>
+                      <th className="text-left px-3 py-2 font-semibold">Objetivo</th>
+                      <th className="text-left px-3 py-2 font-semibold">Estatus</th>
+                      <th className="text-right px-3 py-2 font-semibold">Unidades</th>
+                      <th className="text-right px-3 py-2 font-semibold">Meta Ingresos</th>
+                      <th className="text-right px-3 py-2 font-semibold">Ingresos</th>
+                      <th className="text-right px-3 py-2 font-semibold">Acciones</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {operationalObjectives.map((objective) => {
+                      const objectiveStatus = getObjectiveStatus(objective);
+                      const objectiveLabel = String(objective?.vehicle_line || '').trim() || 'TOTAL';
+                      return (
+                        <tr key={objective.id} className="border-t border-border/40" data-testid={`objective-row-${objective.id}`}>
+                          <td className="px-3 py-2">
+                            <div className="font-medium">{objective.agency_name}</div>
+                            <div className="text-xs text-muted-foreground">{objective.brand_name}</div>
+                          </td>
+                          <td className="px-3 py-2">{objective.seller_name || 'Equipo agencia'}</td>
+                          <td className="px-3 py-2">{objectiveLabel}</td>
+                          <td className="px-3 py-2">
+                            <Badge variant="outline" className={getObjectiveStatusBadgeClass(objectiveStatus)}>
+                              {OBJECTIVE_STATUS_LABELS[objectiveStatus]}
+                            </Badge>
+                            {objectiveStatus === OBJECTIVE_REJECTED && objective.approval_comment && (
+                              <div className="text-xs text-[#E63946] mt-1">{objective.approval_comment}</div>
+                            )}
+                          </td>
+                          <td className="px-3 py-2 text-right font-medium">
+                            {formatUnits(objective.units_sold)} / {formatUnits(objective.units_target)}
+                          </td>
+                          <td className="px-3 py-2 text-right">{formatCurrency(objective.revenue_target)}</td>
+                          <td className="px-3 py-2 text-right">{formatCurrency(objective.revenue_achieved)}</td>
+                          <td className="px-3 py-2 text-right">
+                            {objectiveStatus === OBJECTIVE_PENDING && canApproveObjectives ? (
+                              <div className="flex justify-end gap-2">
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => handleApprovalDecision(objective, OBJECTIVE_REJECTED)}
+                                  data-testid={`reject-objective-${objective.id}`}
+                                >
+                                  Rechazar
+                                </Button>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  className="bg-[#2A9D8F] hover:bg-[#2A9D8F]/90"
+                                  onClick={() => handleApprovalDecision(objective, OBJECTIVE_APPROVED)}
+                                  data-testid={`approve-objective-${objective.id}`}
+                                >
+                                  Aprobar
+                                </Button>
+                              </div>
+                            ) : objectiveStatus === OBJECTIVE_APPROVED && objective.approved_by_name ? (
+                              <span className="text-xs text-[#2A9D8F]">Aprobado: {objective.approved_by_name}</span>
+                            ) : (
+                              <span className="text-xs text-muted-foreground">-</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </CardContent>
+          </Card>
+        )}
       </div>
 
       {/* Seller Performance */}
@@ -494,7 +1133,12 @@ export default function ObjectivesPage() {
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={sellerChartData} layout="vertical">
                     <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                    <XAxis type="number" tick={{ fontSize: 12 }} stroke="hsl(var(--muted-foreground))" />
+                    <XAxis
+                      type="number"
+                      allowDecimals={false}
+                      tick={{ fontSize: 12 }}
+                      stroke="hsl(var(--muted-foreground))"
+                    />
                     <YAxis dataKey="name" type="category" tick={{ fontSize: 12 }} stroke="hsl(var(--muted-foreground))" width={80} />
                     <Tooltip
                       contentStyle={{
@@ -560,117 +1204,6 @@ export default function ObjectivesPage() {
         </Card>
       </div>
 
-      {/* Dialog */}
-      <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Nuevo Objetivo de Ventas</DialogTitle>
-          </DialogHeader>
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="agency_id">Agencia</Label>
-              <Select
-                value={formData.agency_id}
-                onValueChange={(value) => setFormData({ ...formData, agency_id: value })}
-                disabled={shouldLockAgencySelector}
-              >
-                <SelectTrigger data-testid="objective-agency-select">
-                  <SelectValue placeholder="Seleccionar agencia" />
-                </SelectTrigger>
-                <SelectContent>
-                  {filters.filteredAgencies.map((agency) => (
-                    <SelectItem key={agency.id} value={agency.id}>
-                      {agency.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="month">Mes</Label>
-                <Select
-                  value={formData.month.toString()}
-                  onValueChange={(value) => setFormData({ ...formData, month: parseInt(value) })}
-                >
-                  <SelectTrigger data-testid="objective-month-select">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {MONTHS.map((m) => (
-                      <SelectItem key={m.value} value={m.value.toString()}>
-                        {m.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="year">Año</Label>
-                <Select
-                  value={formData.year.toString()}
-                  onValueChange={(value) => setFormData({ ...formData, year: parseInt(value) })}
-                >
-                  <SelectTrigger data-testid="objective-year-select">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {[2024, 2025, 2026].map((y) => (
-                      <SelectItem key={y} value={y.toString()}>
-                        {y}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="units_target">Meta Unidades</Label>
-                <Input
-                  id="units_target"
-                  type="number"
-                  value={formData.units_target}
-                  onChange={(e) => setFormData({ ...formData, units_target: e.target.value })}
-                  placeholder="50"
-                  required
-                  data-testid="objective-units-input"
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="revenue_target">Meta Ingresos</Label>
-                <Input
-                  id="revenue_target"
-                  type="number"
-                  value={formData.revenue_target}
-                  onChange={(e) => setFormData({ ...formData, revenue_target: e.target.value })}
-                  placeholder="5000000"
-                  required
-                  data-testid="objective-revenue-input"
-                />
-              </div>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="vehicle_line">Línea de Vehículo (opcional)</Label>
-              <Input
-                id="vehicle_line"
-                value={formData.vehicle_line}
-                onChange={(e) => setFormData({ ...formData, vehicle_line: e.target.value })}
-                placeholder="Ej: SUV, Sedán, Pickup"
-                data-testid="objective-line-input"
-              />
-            </div>
-            <div className="flex justify-end gap-2">
-              <Button type="button" variant="outline" onClick={() => setIsDialogOpen(false)}>
-                Cancelar
-              </Button>
-              <Button type="submit" className="bg-[#002FA7] hover:bg-[#002FA7]/90" data-testid="save-objective-btn">
-                {objectiveSubmitLabel}
-              </Button>
-            </div>
-          </form>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

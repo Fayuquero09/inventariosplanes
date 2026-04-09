@@ -89,13 +89,19 @@ export const vehiclesApi = {
 // Vehicle Catalog (Strapi/JATO, model year constrained by backend)
 export const vehicleCatalogApi = {
   getMakes: () => api.get('/catalog/makes'),
-  getModels: (make) => api.get('/catalog/models', { params: { make } }),
+  getModels: (make, options = {}) => api.get('/catalog/models', {
+    params: {
+      make,
+      ...(options?.allYears ? { all_years: true } : {}),
+    }
+  }),
   getVersions: (make, model) => api.get('/catalog/versions', { params: { make, model } })
 };
 
 // Sales Objectives
 export const salesObjectivesApi = {
   getAll: (params) => api.get('/sales-objectives', { params }),
+  suggest: (params) => api.get('/sales-objectives/suggestion', { params }),
   create: (data) => api.post('/sales-objectives', data),
   update: (id, data) => api.put(`/sales-objectives/${id}`, data),
   approve: (id, data) => api.post(`/sales-objectives/${id}/approval`, data)
