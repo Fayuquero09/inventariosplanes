@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { salesObjectivesApi, dashboardApi } from '../lib/api';
 import { useHierarchicalFilters, HierarchicalFilters } from '../components/HierarchicalFilters';
+import { useAuth } from '../contexts/AuthContext';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -48,7 +49,21 @@ const MONTHS = [
   { value: 12, label: 'Diciembre' }
 ];
 
+const OBJECTIVE_PENDING = 'pending';
+const OBJECTIVE_APPROVED = 'approved';
+const OBJECTIVE_REJECTED = 'rejected';
+
+const OBJECTIVE_EDITOR_ROLES = ['agency_sales_manager'];
+const OBJECTIVE_APPROVER_ROLES = ['agency_general_manager', 'agency_admin', 'agency_commercial_manager'];
+
+const OBJECTIVE_STATUS_LABELS = {
+  [OBJECTIVE_PENDING]: 'Pendiente',
+  [OBJECTIVE_APPROVED]: 'Aprobado',
+  [OBJECTIVE_REJECTED]: 'Rechazado'
+};
+
 export default function ObjectivesPage() {
+  const { user } = useAuth();
   const filters = useHierarchicalFilters({ includeSellers: true });
   const { getFilterParams } = filters;
   const [objectives, setObjectives] = useState([]);
@@ -66,6 +81,10 @@ export default function ObjectivesPage() {
     revenue_target: '',
     vehicle_line: ''
   });
+
+  const canCreateObjectives = OBJECTIVE_EDITOR_ROLES.includes(user?.role);
+  const canApproveObjectives = OBJECTIVE_APPROVER_ROLES.includes(user?.role);
+  const objectiveSubmitLabel = canApproveObjectives ? 'Crear y Aprobar' : 'Enviar a Aprobación';
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -97,14 +116,19 @@ export default function ObjectivesPage() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     try {
-      await salesObjectivesApi.create({
+      const response = await salesObjectivesApi.create({
         ...formData,
         seller_id: formData.seller_id || null,
         units_target: parseInt(formData.units_target),
         revenue_target: parseFloat(formData.revenue_target),
         vehicle_line: formData.vehicle_line || null
       });
-      toast.success('Objetivo creado correctamente');
+      const createdStatus = String(response?.data?.approval_status || '').toLowerCase();
+      if (createdStatus === OBJECTIVE_PENDING) {
+        toast.success('Objetivo enviado a aprobación');
+      } else {
+        toast.success('Objetivo creado y aprobado');
+      }
       setIsDialogOpen(false);
       setFormData({
         seller_id: '',
@@ -121,12 +145,49 @@ export default function ObjectivesPage() {
     }
   };
 
+  const handleApprovalDecision = async (objective, decision) => {
+    if (!objective?.id) return;
+    const normalizedDecision = String(decision || '').toLowerCase();
+    if (![OBJECTIVE_APPROVED, OBJECTIVE_REJECTED].includes(normalizedDecision)) return;
+
+    let comment = null;
+    if (normalizedDecision === OBJECTIVE_REJECTED) {
+      const reason = window.prompt('Motivo de rechazo (obligatorio):', '');
+      if (reason === null) return;
+      const trimmed = String(reason || '').trim();
+      if (!trimmed) {
+        toast.error('El rechazo requiere un motivo');
+        return;
+      }
+      comment = trimmed;
+    }
+
+    try {
+      await salesObjectivesApi.approve(objective.id, {
+        decision: normalizedDecision,
+        comment
+      });
+      toast.success(normalizedDecision === OBJECTIVE_APPROVED ? 'Objetivo aprobado' : 'Objetivo rechazado');
+      fetchData();
+    } catch (error) {
+      const detail = error.response?.data?.detail;
+      toast.error(typeof detail === 'string' ? detail : 'No se pudo procesar la aprobación');
+    }
+  };
+
   const formatCurrency = (value) => {
     return new Intl.NumberFormat('es-MX', {
       style: 'currency',
       currency: 'MXN',
       minimumFractionDigits: 0
     }).format(value);
+  };
+
+  const formatUnits = (value) => {
+    return new Intl.NumberFormat('es-MX', {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0
+    }).format(Number(value || 0));
   };
 
   const getProgressColor = (progress) => {
@@ -136,9 +197,24 @@ export default function ObjectivesPage() {
     return '#E63946';
   };
 
+  const getObjectiveStatus = (objective) => {
+    const status = String(objective?.approval_status || '').toLowerCase();
+    if (status === OBJECTIVE_PENDING || status === OBJECTIVE_REJECTED || status === OBJECTIVE_APPROVED) {
+      return status;
+    }
+    // Backward compatibility for existing records created before approval flow.
+    return OBJECTIVE_APPROVED;
+  };
+
+  const getObjectiveStatusBadgeClass = (status) => {
+    if (status === OBJECTIVE_APPROVED) return 'border-[#2A9D8F] text-[#2A9D8F]';
+    if (status === OBJECTIVE_REJECTED) return 'border-[#E63946] text-[#E63946]';
+    return 'border-[#E9C46A] text-[#8A6D1A]';
+  };
+
   const sellerChartData = sellerPerformance.map((s) => ({
     name: s.seller_name?.split(' ')[0] || 'Unknown',
-    units: s.units,
+    units: Math.round(Number(s.units || 0)),
     commission: s.commission
   }));
 
@@ -189,14 +265,16 @@ export default function ObjectivesPage() {
               ))}
             </SelectContent>
           </Select>
-          <Button 
-            onClick={() => setIsDialogOpen(true)}
-            className="bg-[#002FA7] hover:bg-[#002FA7]/90" 
-            data-testid="add-objective-btn"
-          >
-            <Plus size={18} className="mr-2" />
-            Nuevo Objetivo
-          </Button>
+          {canCreateObjectives && (
+            <Button
+              onClick={() => setIsDialogOpen(true)}
+              className="bg-[#002FA7] hover:bg-[#002FA7]/90"
+              data-testid="add-objective-btn"
+            >
+              <Plus size={18} className="mr-2" />
+              Nuevo Objetivo
+            </Button>
+          )}
         </div>
       </div>
 
@@ -210,13 +288,13 @@ export default function ObjectivesPage() {
             <div className="text-xs font-semibold tracking-widest uppercase text-muted-foreground mb-1">
               Meta Unidades
             </div>
-            <div className="text-2xl font-bold">{totalUnitsTarget}</div>
+            <div className="text-2xl font-bold">{formatUnits(totalUnitsTarget)}</div>
             <Progress 
               value={totalUnitsTarget > 0 ? (totalUnitsSold / totalUnitsTarget * 100) : 0} 
               className="h-2 mt-2" 
             />
             <div className="text-sm text-muted-foreground mt-1">
-              {totalUnitsSold} vendidas ({totalUnitsTarget > 0 ? ((totalUnitsSold / totalUnitsTarget) * 100).toFixed(1) : 0}%)
+              {formatUnits(totalUnitsSold)} vendidas ({totalUnitsTarget > 0 ? ((totalUnitsSold / totalUnitsTarget) * 100).toFixed(1) : 0}%)
             </div>
           </CardContent>
         </Card>
@@ -282,52 +360,91 @@ export default function ObjectivesPage() {
               </CardContent>
             </Card>
           ) : (
-            agencyObjectives.map((objective) => (
-              <Card key={objective.id} className="border-border/40" data-testid={`objective-card-${objective.id}`}>
-                <CardHeader className="pb-2">
-                  <div className="flex items-center justify-between">
-                    <CardTitle className="text-base">{objective.agency_name}</CardTitle>
-                    {objective.vehicle_line && (
-                      <Badge variant="outline">{objective.vehicle_line}</Badge>
+            agencyObjectives.map((objective) => {
+              const objectiveStatus = getObjectiveStatus(objective);
+              return (
+                <Card key={objective.id} className="border-border/40" data-testid={`objective-card-${objective.id}`}>
+                  <CardHeader className="pb-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <CardTitle className="text-base">{objective.agency_name}</CardTitle>
+                      <div className="flex items-center gap-2">
+                        {objective.vehicle_line && (
+                          <Badge variant="outline">{objective.vehicle_line}</Badge>
+                        )}
+                        <Badge variant="outline" className={getObjectiveStatusBadgeClass(objectiveStatus)}>
+                          {OBJECTIVE_STATUS_LABELS[objectiveStatus]}
+                        </Badge>
+                      </div>
+                    </div>
+                    <div className="text-sm text-muted-foreground">
+                      {objective.brand_name} • {objective.group_name}
+                    </div>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div>
+                      <div className="flex justify-between text-sm mb-1">
+                        <span className="text-muted-foreground">Unidades</span>
+                        <span className="font-medium">{formatUnits(objective.units_sold)} / {formatUnits(objective.units_target)}</span>
+                      </div>
+                      <Progress
+                        value={Math.min(objective.progress_units, 100)}
+                        className="h-2"
+                        style={{ '--progress-background': getProgressColor(objective.progress_units) }}
+                      />
+                      <div className="text-right text-xs text-muted-foreground mt-1">
+                        {objective.progress_units.toFixed(1)}%
+                      </div>
+                    </div>
+                    <div>
+                      <div className="flex justify-between text-sm mb-1">
+                        <span className="text-muted-foreground">Ingresos</span>
+                        <span className="font-medium">{formatCurrency(objective.revenue_achieved)}</span>
+                      </div>
+                      <Progress
+                        value={Math.min(objective.progress_revenue, 100)}
+                        className="h-2"
+                        style={{ '--progress-background': getProgressColor(objective.progress_revenue) }}
+                      />
+                      <div className="flex justify-between text-xs text-muted-foreground mt-1">
+                        <span>Meta: {formatCurrency(objective.revenue_target)}</span>
+                        <span>{objective.progress_revenue.toFixed(1)}%</span>
+                      </div>
+                    </div>
+
+                    {objectiveStatus === OBJECTIVE_PENDING && canApproveObjectives && (
+                      <div className="flex items-center justify-end gap-2 pt-1">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => handleApprovalDecision(objective, OBJECTIVE_REJECTED)}
+                          data-testid={`reject-objective-${objective.id}`}
+                        >
+                          Rechazar
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          className="bg-[#2A9D8F] hover:bg-[#2A9D8F]/90"
+                          onClick={() => handleApprovalDecision(objective, OBJECTIVE_APPROVED)}
+                          data-testid={`approve-objective-${objective.id}`}
+                        >
+                          Aprobar
+                        </Button>
+                      </div>
                     )}
-                  </div>
-                  <div className="text-sm text-muted-foreground">
-                    {objective.brand_name} • {objective.group_name}
-                  </div>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <div>
-                    <div className="flex justify-between text-sm mb-1">
-                      <span className="text-muted-foreground">Unidades</span>
-                      <span className="font-medium">{objective.units_sold} / {objective.units_target}</span>
-                    </div>
-                    <Progress
-                      value={Math.min(objective.progress_units, 100)}
-                      className="h-2"
-                      style={{ '--progress-background': getProgressColor(objective.progress_units) }}
-                    />
-                    <div className="text-right text-xs text-muted-foreground mt-1">
-                      {objective.progress_units.toFixed(1)}%
-                    </div>
-                  </div>
-                  <div>
-                    <div className="flex justify-between text-sm mb-1">
-                      <span className="text-muted-foreground">Ingresos</span>
-                      <span className="font-medium">{formatCurrency(objective.revenue_achieved)}</span>
-                    </div>
-                    <Progress
-                      value={Math.min(objective.progress_revenue, 100)}
-                      className="h-2"
-                      style={{ '--progress-background': getProgressColor(objective.progress_revenue) }}
-                    />
-                    <div className="flex justify-between text-xs text-muted-foreground mt-1">
-                      <span>Meta: {formatCurrency(objective.revenue_target)}</span>
-                      <span>{objective.progress_revenue.toFixed(1)}%</span>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            ))
+
+                    {objectiveStatus === OBJECTIVE_REJECTED && objective.approval_comment && (
+                      <p className="text-xs text-[#E63946]">Motivo rechazo: {objective.approval_comment}</p>
+                    )}
+
+                    {objectiveStatus === OBJECTIVE_APPROVED && objective.approved_by_name && (
+                      <p className="text-xs text-[#2A9D8F]">Aprobado por: {objective.approved_by_name}</p>
+                    )}
+                  </CardContent>
+                </Card>
+              );
+            })
           )}
         </div>
       </div>
@@ -340,31 +457,66 @@ export default function ObjectivesPage() {
             Objetivos por Vendedor
           </h2>
           <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {sellerObjectives.map((objective) => (
-              <Card key={objective.id} className="border-border/40 border-l-4 border-l-[#2A9D8F]">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-base">{objective.seller_name}</CardTitle>
-                  <div className="text-sm text-muted-foreground">
-                    {objective.agency_name}
-                  </div>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <div>
-                    <div className="flex justify-between text-sm mb-1">
-                      <span className="text-muted-foreground">Unidades</span>
-                      <span className="font-medium">{objective.units_sold} / {objective.units_target}</span>
+            {sellerObjectives.map((objective) => {
+              const objectiveStatus = getObjectiveStatus(objective);
+              return (
+                <Card key={objective.id} className="border-border/40 border-l-4 border-l-[#2A9D8F]">
+                  <CardHeader className="pb-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <CardTitle className="text-base">{objective.seller_name}</CardTitle>
+                      <Badge variant="outline" className={getObjectiveStatusBadgeClass(objectiveStatus)}>
+                        {OBJECTIVE_STATUS_LABELS[objectiveStatus]}
+                      </Badge>
                     </div>
-                    <Progress value={Math.min(objective.progress_units, 100)} className="h-2" />
-                  </div>
-                  <div>
-                    <div className="flex justify-between text-sm mb-1">
-                      <span className="text-muted-foreground">Comisiones</span>
-                      <span className="font-medium text-[#2A9D8F]">{formatCurrency(objective.commissions_achieved || 0)}</span>
+                    <div className="text-sm text-muted-foreground">
+                      {objective.agency_name}
                     </div>
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div>
+                      <div className="flex justify-between text-sm mb-1">
+                        <span className="text-muted-foreground">Unidades</span>
+                        <span className="font-medium">{formatUnits(objective.units_sold)} / {formatUnits(objective.units_target)}</span>
+                      </div>
+                      <Progress value={Math.min(objective.progress_units, 100)} className="h-2" />
+                    </div>
+                    <div>
+                      <div className="flex justify-between text-sm mb-1">
+                        <span className="text-muted-foreground">Comisiones</span>
+                        <span className="font-medium text-[#2A9D8F]">{formatCurrency(objective.commissions_achieved || 0)}</span>
+                      </div>
+                    </div>
+
+                    {objectiveStatus === OBJECTIVE_PENDING && canApproveObjectives && (
+                      <div className="flex items-center justify-end gap-2 pt-1">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => handleApprovalDecision(objective, OBJECTIVE_REJECTED)}
+                          data-testid={`reject-seller-objective-${objective.id}`}
+                        >
+                          Rechazar
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          className="bg-[#2A9D8F] hover:bg-[#2A9D8F]/90"
+                          onClick={() => handleApprovalDecision(objective, OBJECTIVE_APPROVED)}
+                          data-testid={`approve-seller-objective-${objective.id}`}
+                        >
+                          Aprobar
+                        </Button>
+                      </div>
+                    )}
+
+                    {objectiveStatus === OBJECTIVE_REJECTED && objective.approval_comment && (
+                      <p className="text-xs text-[#E63946]">Motivo rechazo: {objective.approval_comment}</p>
+                    )}
+                  </CardContent>
+                </Card>
+              );
+            })}
           </div>
         </div>
       )}
@@ -398,6 +550,10 @@ export default function ObjectivesPage() {
                         border: '1px solid hsl(var(--border))',
                         borderRadius: '6px'
                       }}
+                      formatter={(value, name) => [
+                        name === 'Unidades' ? formatUnits(value) : value,
+                        name
+                      ]}
                     />
                     <Bar dataKey="units" fill="#002FA7" name="Unidades" radius={[0, 4, 4, 0]} />
                   </BarChart>
@@ -437,7 +593,7 @@ export default function ObjectivesPage() {
                       </div>
                       <div>
                         <div className="font-medium">{seller.seller_name}</div>
-                        <div className="text-sm text-muted-foreground">{seller.units} unidades</div>
+                        <div className="text-sm text-muted-foreground">{formatUnits(seller.units)} unidades</div>
                       </div>
                     </div>
                     <div className="text-right">
@@ -576,7 +732,7 @@ export default function ObjectivesPage() {
                 Cancelar
               </Button>
               <Button type="submit" className="bg-[#002FA7] hover:bg-[#002FA7]/90" data-testid="save-objective-btn">
-                Crear
+                {objectiveSubmitLabel}
               </Button>
             </div>
           </form>

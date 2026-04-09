@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { vehiclesApi, vehicleCatalogApi } from '../lib/api';
 import { useHierarchicalFilters, HierarchicalFilters } from '../components/HierarchicalFilters';
 import { Card, CardContent } from '../components/ui/card';
@@ -62,6 +62,7 @@ export default function InventoryPage() {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState('all');
   const [filterType, setFilterType] = useState('all');
+  const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
   const [catalogYear, setCatalogYear] = useState(2026);
   const [catalogMakes, setCatalogMakes] = useState([]);
   const [catalogModels, setCatalogModels] = useState([]);
@@ -290,6 +291,75 @@ export default function InventoryPage() {
     }
     return true;
   });
+
+  const getSortValue = useCallback((vehicle, key) => {
+    const grossProfit = vehicle.status === 'sold'
+      ? Number(vehicle.sale_price || 0) - Number(vehicle.financial_cost || 0) - Number(vehicle.sale_commission || 0) - Number(vehicle.purchase_price || 0)
+      : null;
+
+    switch (key) {
+      case 'vehicle':
+        return `${vehicle.model || ''} ${vehicle.trim || ''}`.trim().toLowerCase();
+      case 'vin':
+        return (vehicle.vin || '').toLowerCase();
+      case 'agency':
+        return `${vehicle.agency_name || ''} ${vehicle.brand_name || ''}`.trim().toLowerCase();
+      case 'type':
+        return (vehicle.vehicle_type || '').toLowerCase();
+      case 'price':
+        return Number(vehicle.purchase_price || 0);
+      case 'aging':
+        return Number(vehicle.aging_days || 0);
+      case 'financial_cost':
+        return Number(vehicle.financial_cost || 0);
+      case 'sale_commission':
+        return Number(vehicle.sale_commission || 0);
+      case 'gross_profit':
+        return Number(grossProfit || 0);
+      case 'status':
+        return (vehicle.status || '').toLowerCase();
+      default:
+        return '';
+    }
+  }, []);
+
+  const sortedVehicles = useMemo(() => {
+    if (!sortConfig.key) return filteredVehicles;
+    const items = [...filteredVehicles];
+    items.sort((a, b) => {
+      const left = getSortValue(a, sortConfig.key);
+      const right = getSortValue(b, sortConfig.key);
+
+      let comparison = 0;
+      if (typeof left === 'number' && typeof right === 'number') {
+        comparison = left - right;
+      } else {
+        comparison = String(left).localeCompare(String(right), 'es', { sensitivity: 'base' });
+      }
+
+      return sortConfig.direction === 'asc' ? comparison : -comparison;
+    });
+    return items;
+  }, [filteredVehicles, sortConfig, getSortValue]);
+
+  const toggleSort = (key) => {
+    setSortConfig((prev) => {
+      if (prev.key === key) {
+        return {
+          key,
+          direction: prev.direction === 'asc' ? 'desc' : 'asc'
+        };
+      }
+      return { key, direction: 'asc' };
+    });
+  };
+
+  const renderSortIndicator = (key) => {
+    if (sortConfig.key !== key) {
+      return <span className="text-xs text-muted-foreground">↕</span>;
+    }
+    return <span className="text-xs text-[#002FA7]">{sortConfig.direction === 'asc' ? '↑' : '↓'}</span>;
+  };
 
   // Calculate totals
   const totals = {
@@ -547,14 +617,56 @@ export default function InventoryPage() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Vehículo</TableHead>
-                <TableHead>VIN</TableHead>
-                <TableHead>Agencia</TableHead>
-                <TableHead>Tipo</TableHead>
-                <TableHead className="text-right">Precio</TableHead>
-                <TableHead>Aging</TableHead>
-                <TableHead className="text-right">Costo Fin.</TableHead>
-                <TableHead>Estado</TableHead>
+                <TableHead>
+                  <button type="button" onClick={() => toggleSort('vehicle')} className="flex items-center gap-1">
+                    Vehículo {renderSortIndicator('vehicle')}
+                  </button>
+                </TableHead>
+                <TableHead>
+                  <button type="button" onClick={() => toggleSort('vin')} className="flex items-center gap-1">
+                    VIN {renderSortIndicator('vin')}
+                  </button>
+                </TableHead>
+                <TableHead>
+                  <button type="button" onClick={() => toggleSort('agency')} className="flex items-center gap-1">
+                    Agencia {renderSortIndicator('agency')}
+                  </button>
+                </TableHead>
+                <TableHead>
+                  <button type="button" onClick={() => toggleSort('type')} className="flex items-center gap-1">
+                    Tipo {renderSortIndicator('type')}
+                  </button>
+                </TableHead>
+                <TableHead className="text-right">
+                  <button type="button" onClick={() => toggleSort('price')} className="inline-flex items-center gap-1 justify-end w-full">
+                    Precio {renderSortIndicator('price')}
+                  </button>
+                </TableHead>
+                <TableHead>
+                  <button type="button" onClick={() => toggleSort('aging')} className="flex items-center gap-1">
+                    Aging {renderSortIndicator('aging')}
+                  </button>
+                </TableHead>
+                <TableHead className="text-right">
+                  <button type="button" onClick={() => toggleSort('financial_cost')} className="inline-flex items-center gap-1 justify-end w-full">
+                    Costo Fin. {renderSortIndicator('financial_cost')}
+                  </button>
+                </TableHead>
+                <TableHead className="text-right">
+                  <button type="button" onClick={() => toggleSort('sale_commission')} className="inline-flex items-center gap-1 justify-end w-full">
+                    Comisión pagada {renderSortIndicator('sale_commission')}
+                  </button>
+                </TableHead>
+                <TableHead className="text-right">
+                  <button type="button" onClick={() => toggleSort('gross_profit')} className="inline-flex items-center gap-1 justify-end w-full">
+                    Utilidad bruta {renderSortIndicator('gross_profit')}
+                  </button>
+                </TableHead>
+                <TableHead>
+                  <button type="button" onClick={() => toggleSort('status')} className="flex items-center gap-1">
+                    Estado {renderSortIndicator('status')}
+                  </button>
+                </TableHead>
                 <TableHead className="w-12"></TableHead>
               </TableRow>
             </TableHeader>
@@ -562,22 +674,22 @@ export default function InventoryPage() {
               {loading ? (
                 [...Array(5)].map((_, i) => (
                   <TableRow key={i}>
-                    {[...Array(9)].map((_, j) => (
+                    {[...Array(11)].map((_, j) => (
                       <TableCell key={j}>
                         <Skeleton className="h-5 w-full" />
                       </TableCell>
                     ))}
                   </TableRow>
                 ))
-              ) : filteredVehicles.length === 0 ? (
+              ) : sortedVehicles.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={9} className="text-center py-12">
+                  <TableCell colSpan={11} className="text-center py-12">
                     <Car size={48} className="mx-auto text-muted-foreground mb-4" />
                     <p className="text-muted-foreground">No se encontraron vehículos</p>
                   </TableCell>
                 </TableRow>
               ) : (
-                filteredVehicles.map((vehicle) => (
+                sortedVehicles.map((vehicle) => (
                   <TableRow key={vehicle.id} data-testid={`vehicle-row-${vehicle.id}`}>
                     <TableCell>
                       <div className="font-medium">{vehicle.model} {vehicle.trim}</div>
@@ -601,6 +713,16 @@ export default function InventoryPage() {
                     </TableCell>
                     <TableCell className="text-right tabular-nums text-[#E63946]">
                       {formatCurrency(vehicle.financial_cost)}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {vehicle.status === 'sold' && vehicle.sale_commission !== undefined && vehicle.sale_commission !== null
+                        ? formatCurrency(vehicle.sale_commission)
+                        : '—'}
+                    </TableCell>
+                    <TableCell className={`text-right tabular-nums ${vehicle.status === 'sold' ? (Number(vehicle.sale_price || 0) - Number(vehicle.financial_cost || 0) - Number(vehicle.sale_commission || 0) - Number(vehicle.purchase_price || 0) >= 0 ? 'text-[#2A9D8F]' : 'text-[#E63946]') : ''}`}>
+                      {vehicle.status === 'sold'
+                        ? formatCurrency(Number(vehicle.sale_price || 0) - Number(vehicle.financial_cost || 0) - Number(vehicle.sale_commission || 0) - Number(vehicle.purchase_price || 0))
+                        : '—'}
                     </TableCell>
                     <TableCell>
                       <StatusBadge status={vehicle.status} />

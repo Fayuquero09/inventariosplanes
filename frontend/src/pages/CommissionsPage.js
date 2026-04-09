@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
-import { commissionRulesApi } from '../lib/api';
+import { useAuth } from '../contexts/AuthContext';
+import { commissionRulesApi, commissionClosuresApi, commissionSimulatorApi } from '../lib/api';
 import { useHierarchicalFilters, HierarchicalFilters } from '../components/HierarchicalFilters';
-import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
@@ -28,7 +29,18 @@ import {
   TableHeader,
   TableRow
 } from '../components/ui/table';
-import { Plus, Pencil, Trash, CurrencyDollar, Percent, Package, Coin } from '@phosphor-icons/react';
+import {
+  Plus,
+  Pencil,
+  Trash,
+  CurrencyDollar,
+  Percent,
+  Package,
+  Coin,
+  Check,
+  X,
+  Calculator
+} from '@phosphor-icons/react';
 import { toast } from 'sonner';
 
 const RULE_TYPES = [
@@ -38,14 +50,58 @@ const RULE_TYPES = [
   { value: 'fi_bonus', label: 'Bono F&I', icon: Coin, description: 'Porcentaje sobre ingresos de F&I' }
 ];
 
+const COMMISSION_PENDING = 'pending';
+const COMMISSION_APPROVED = 'approved';
+const COMMISSION_REJECTED = 'rejected';
+
+const COMMISSION_PROPOSER_ROLES = ['agency_sales_manager'];
+const COMMISSION_APPROVER_ROLES = ['agency_general_manager', 'agency_admin', 'agency_commercial_manager'];
+const SIMULATOR_ALLOWED_ROLES = ['seller', ...COMMISSION_PROPOSER_ROLES, ...COMMISSION_APPROVER_ROLES];
+
+const MONTHS = [
+  { value: 1, label: 'Enero' },
+  { value: 2, label: 'Febrero' },
+  { value: 3, label: 'Marzo' },
+  { value: 4, label: 'Abril' },
+  { value: 5, label: 'Mayo' },
+  { value: 6, label: 'Junio' },
+  { value: 7, label: 'Julio' },
+  { value: 8, label: 'Agosto' },
+  { value: 9, label: 'Septiembre' },
+  { value: 10, label: 'Octubre' },
+  { value: 11, label: 'Noviembre' },
+  { value: 12, label: 'Diciembre' }
+];
+
+const STATUS_LABELS = {
+  [COMMISSION_PENDING]: 'Pendiente',
+  [COMMISSION_APPROVED]: 'Aprobado',
+  [COMMISSION_REJECTED]: 'Rechazado'
+};
+
+const getStatusClass = (status) => {
+  if (status === COMMISSION_APPROVED) return 'border-[#2A9D8F] text-[#2A9D8F]';
+  if (status === COMMISSION_REJECTED) return 'border-[#E63946] text-[#E63946]';
+  return 'border-[#E9C46A] text-[#8A6D1A]';
+};
+
+const normalizeStatus = (status) => {
+  const value = String(status || '').toLowerCase();
+  if ([COMMISSION_PENDING, COMMISSION_APPROVED, COMMISSION_REJECTED].includes(value)) return value;
+  return COMMISSION_APPROVED;
+};
+
 export default function CommissionsPage() {
-  const filters = useHierarchicalFilters();
-  const { getFilterParams, selectedAgency } = filters;
+  const { user } = useAuth();
+  const filters = useHierarchicalFilters({ includeSellers: true });
+  const { getFilterParams, selectedAgency, selectedSeller } = filters;
   const [rules, setRules] = useState([]);
+  const [closures, setClosures] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [isDialogOpen, setIsDialogOpen] = useState(false);
+  const [isRuleDialogOpen, setIsRuleDialogOpen] = useState(false);
+  const [isClosureDialogOpen, setIsClosureDialogOpen] = useState(false);
   const [editingRule, setEditingRule] = useState(null);
-  const [formData, setFormData] = useState({
+  const [ruleFormData, setRuleFormData] = useState({
     agency_id: '',
     name: '',
     rule_type: 'per_unit',
@@ -53,13 +109,38 @@ export default function CommissionsPage() {
     min_units: '',
     max_units: ''
   });
+  const [closureFormData, setClosureFormData] = useState({
+    agency_id: '',
+    seller_id: '',
+    month: new Date().getMonth() + 1,
+    year: new Date().getFullYear()
+  });
+  const [simulatorFormData, setSimulatorFormData] = useState({
+    agency_id: '',
+    seller_id: '',
+    target_commission: '',
+    units: '',
+    average_ticket: '',
+    average_fi_revenue: ''
+  });
+  const [simulatorResult, setSimulatorResult] = useState(null);
+  const [simulating, setSimulating] = useState(false);
+
+  const canProposeRules = COMMISSION_PROPOSER_ROLES.includes(user?.role);
+  const canApproveRules = COMMISSION_APPROVER_ROLES.includes(user?.role);
+  const canManageRules = canProposeRules || canApproveRules;
+  const canUseSimulator = SIMULATOR_ALLOWED_ROLES.includes(user?.role);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
       const params = getFilterParams();
-      const res = await commissionRulesApi.getAll(params);
-      setRules(res.data);
+      const [rulesRes, closuresRes] = await Promise.all([
+        commissionRulesApi.getAll(params),
+        commissionClosuresApi.getAll(params)
+      ]);
+      setRules(rulesRes.data || []);
+      setClosures(closuresRes.data || []);
     } catch (error) {
       toast.error('Error al cargar datos');
     } finally {
@@ -71,35 +152,8 @@ export default function CommissionsPage() {
     fetchData();
   }, [fetchData]);
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    try {
-      const data = {
-        ...formData,
-        value: parseFloat(formData.value),
-        min_units: formData.min_units ? parseInt(formData.min_units) : null,
-        max_units: formData.max_units ? parseInt(formData.max_units) : null
-      };
-
-      if (editingRule) {
-        await commissionRulesApi.update(editingRule.id, data);
-        toast.success('Regla actualizada correctamente');
-      } else {
-        await commissionRulesApi.create(data);
-        toast.success('Regla creada correctamente');
-      }
-
-      setIsDialogOpen(false);
-      setEditingRule(null);
-      resetForm();
-      fetchData();
-    } catch (error) {
-      toast.error('Error al guardar regla');
-    }
-  };
-
-  const resetForm = () => {
-    setFormData({
+  const resetRuleForm = useCallback(() => {
+    setRuleFormData({
       agency_id: selectedAgency !== 'all' ? selectedAgency : '',
       name: '',
       rule_type: 'per_unit',
@@ -107,52 +161,210 @@ export default function CommissionsPage() {
       min_units: '',
       max_units: ''
     });
+  }, [selectedAgency]);
+
+  const openNewRuleDialog = () => {
+    setEditingRule(null);
+    resetRuleForm();
+    setIsRuleDialogOpen(true);
   };
 
-  const handleEdit = (rule) => {
+  const handleRuleSubmit = async (e) => {
+    e.preventDefault();
+    if (!canProposeRules) {
+      toast.error('Solo Gerencia de Ventas puede proponer reglas');
+      return;
+    }
+
+    try {
+      const data = {
+        ...ruleFormData,
+        value: parseFloat(ruleFormData.value),
+        min_units: ruleFormData.min_units ? parseInt(ruleFormData.min_units, 10) : null,
+        max_units: ruleFormData.max_units ? parseInt(ruleFormData.max_units, 10) : null
+      };
+
+      if (editingRule) {
+        await commissionRulesApi.update(editingRule.id, data);
+        toast.success('Regla actualizada y enviada a aprobación');
+      } else {
+        await commissionRulesApi.create(data);
+        toast.success('Regla creada y enviada a aprobación');
+      }
+
+      setIsRuleDialogOpen(false);
+      setEditingRule(null);
+      resetRuleForm();
+      fetchData();
+    } catch (error) {
+      const detail = error.response?.data?.detail;
+      toast.error(typeof detail === 'string' ? detail : 'Error al guardar regla');
+    }
+  };
+
+  const handleEditRule = (rule) => {
     setEditingRule(rule);
-    setFormData({
+    setRuleFormData({
       agency_id: rule.agency_id,
       name: rule.name,
       rule_type: rule.rule_type,
-      value: rule.value.toString(),
-      min_units: rule.min_units?.toString() || '',
-      max_units: rule.max_units?.toString() || ''
+      value: String(rule.value ?? ''),
+      min_units: rule.min_units != null ? String(rule.min_units) : '',
+      max_units: rule.max_units != null ? String(rule.max_units) : ''
     });
-    setIsDialogOpen(true);
+    setIsRuleDialogOpen(true);
   };
 
-  const handleDelete = async (id) => {
-    if (!window.confirm('¿Estás seguro de eliminar esta regla?')) return;
+  const handleDeleteRule = async (rule) => {
+    if (!rule?.id) return;
+    if (!window.confirm('¿Eliminar esta regla?')) return;
     try {
-      await commissionRulesApi.delete(id);
+      await commissionRulesApi.delete(rule.id);
       toast.success('Regla eliminada');
       fetchData();
     } catch (error) {
-      toast.error('Error al eliminar regla');
+      const detail = error.response?.data?.detail;
+      toast.error(typeof detail === 'string' ? detail : 'Error al eliminar regla');
     }
   };
 
-  const openNewDialog = () => {
-    setEditingRule(null);
-    resetForm();
-    setIsDialogOpen(true);
+  const handleRuleApprovalDecision = async (rule, decision) => {
+    if (!rule?.id) return;
+    const normalizedDecision = String(decision || '').toLowerCase();
+    if (![COMMISSION_APPROVED, COMMISSION_REJECTED].includes(normalizedDecision)) return;
+
+    let comment = null;
+    if (normalizedDecision === COMMISSION_REJECTED) {
+      const reason = window.prompt('Motivo de rechazo (obligatorio):', '');
+      if (reason === null) return;
+      comment = String(reason || '').trim();
+      if (!comment) {
+        toast.error('El rechazo requiere un motivo');
+        return;
+      }
+    }
+
+    try {
+      await commissionRulesApi.approve(rule.id, { decision: normalizedDecision, comment });
+      toast.success(normalizedDecision === COMMISSION_APPROVED ? 'Regla aprobada' : 'Regla rechazada');
+      fetchData();
+    } catch (error) {
+      const detail = error.response?.data?.detail;
+      toast.error(typeof detail === 'string' ? detail : 'No se pudo procesar la aprobación');
+    }
   };
 
-  const getRuleType = (type) => RULE_TYPES.find((t) => t.value === type);
+  const openClosureDialog = () => {
+    setClosureFormData({
+      agency_id: selectedAgency !== 'all' ? selectedAgency : user?.agency_id || '',
+      seller_id: selectedSeller !== 'all' ? selectedSeller : '',
+      month: new Date().getMonth() + 1,
+      year: new Date().getFullYear()
+    });
+    setIsClosureDialogOpen(true);
+  };
 
-  const formatValue = (rule) => {
-    if (rule.rule_type === 'percentage' || rule.rule_type === 'fi_bonus') {
-      return `${rule.value}%`;
+  const handleCreateClosure = async (e) => {
+    e.preventDefault();
+    if (!canProposeRules) {
+      toast.error('Solo Gerencia de Ventas puede proponer cierres');
+      return;
     }
+    try {
+      if (!closureFormData.agency_id || !closureFormData.seller_id) {
+        toast.error('Selecciona dealer y vendedor');
+        return;
+      }
+      await commissionClosuresApi.create({
+        agency_id: closureFormData.agency_id,
+        seller_id: closureFormData.seller_id,
+        month: parseInt(closureFormData.month, 10),
+        year: parseInt(closureFormData.year, 10)
+      });
+      toast.success('Cierre mensual generado y enviado a aprobación');
+      setIsClosureDialogOpen(false);
+      fetchData();
+    } catch (error) {
+      const detail = error.response?.data?.detail;
+      toast.error(typeof detail === 'string' ? detail : 'Error al crear cierre');
+    }
+  };
+
+  const handleClosureApprovalDecision = async (closure, decision) => {
+    if (!closure?.id) return;
+    const normalizedDecision = String(decision || '').toLowerCase();
+    if (![COMMISSION_APPROVED, COMMISSION_REJECTED].includes(normalizedDecision)) return;
+
+    let comment = null;
+    if (normalizedDecision === COMMISSION_REJECTED) {
+      const reason = window.prompt('Motivo de rechazo (obligatorio):', '');
+      if (reason === null) return;
+      comment = String(reason || '').trim();
+      if (!comment) {
+        toast.error('El rechazo requiere un motivo');
+        return;
+      }
+    }
+
+    try {
+      await commissionClosuresApi.approve(closure.id, { decision: normalizedDecision, comment });
+      toast.success(normalizedDecision === COMMISSION_APPROVED ? 'Cierre aprobado' : 'Cierre rechazado');
+      fetchData();
+    } catch (error) {
+      const detail = error.response?.data?.detail;
+      toast.error(typeof detail === 'string' ? detail : 'No se pudo procesar la aprobación');
+    }
+  };
+
+  const handleSimulatorSubmit = async (e) => {
+    e.preventDefault();
+    if (!canUseSimulator) {
+      toast.error('Tu rol no puede usar el simulador');
+      return;
+    }
+
+    const agencyId = simulatorFormData.agency_id || (selectedAgency !== 'all' ? selectedAgency : user?.agency_id || '');
+    if (!agencyId) {
+      toast.error('Selecciona un dealer para simular');
+      return;
+    }
+
+    const payload = {
+      agency_id: agencyId,
+      seller_id: user?.role === 'seller' ? undefined : (simulatorFormData.seller_id || undefined),
+      target_commission: parseFloat(simulatorFormData.target_commission || '0'),
+      units: parseInt(simulatorFormData.units || '0', 10),
+      average_ticket: parseFloat(simulatorFormData.average_ticket || '0'),
+      average_fi_revenue: parseFloat(simulatorFormData.average_fi_revenue || '0')
+    };
+
+    try {
+      setSimulating(true);
+      const res = await commissionSimulatorApi.simulate(payload);
+      setSimulatorResult(res.data);
+    } catch (error) {
+      const detail = error.response?.data?.detail;
+      toast.error(typeof detail === 'string' ? detail : 'No se pudo simular');
+    } finally {
+      setSimulating(false);
+    }
+  };
+
+  const formatCurrency = (value) => {
     return new Intl.NumberFormat('es-MX', {
       style: 'currency',
       currency: 'MXN',
       minimumFractionDigits: 0
-    }).format(rule.value);
+    }).format(value || 0);
   };
 
-  // Group rules by agency
+  const formatRuleValue = (rule) => {
+    if (rule.rule_type === 'percentage' || rule.rule_type === 'fi_bonus') {
+      return `${rule.value}%`;
+    }
+    return formatCurrency(rule.value);
+  };
+
   const rulesByAgency = rules.reduce((acc, rule) => {
     const key = rule.agency_id || 'general';
     if (!acc[key]) {
@@ -169,30 +381,41 @@ export default function CommissionsPage() {
 
   return (
     <div className="space-y-6" data-testid="commissions-page">
-      {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold" style={{ fontFamily: 'Cabinet Grotesk' }}>
-            Reglas de Comisiones
+            Comisiones e Incentivos
           </h1>
           <p className="text-muted-foreground">
-            Configura las reglas de comisión por agencia (aplican a todos los vendedores de la agencia)
+            Ventas propone reglas/cierres y Gerencia General aprueba.
           </p>
         </div>
-        <Button 
-          onClick={openNewDialog}
-          className="bg-[#002FA7] hover:bg-[#002FA7]/90" 
-          data-testid="add-rule-btn"
-        >
-          <Plus size={18} className="mr-2" />
-          Nueva Regla
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          {canProposeRules && (
+            <Button onClick={openNewRuleDialog} className="bg-[#002FA7] hover:bg-[#002FA7]/90" data-testid="add-rule-btn">
+              <Plus size={18} className="mr-2" />
+              Nueva Regla
+            </Button>
+          )}
+          {canProposeRules && (
+            <Button variant="outline" onClick={openClosureDialog} data-testid="create-closure-btn">
+              <Plus size={18} className="mr-2" />
+              Cierre Mensual
+            </Button>
+          )}
+        </div>
       </div>
 
-      {/* Hierarchical Filters */}
-      <HierarchicalFilters filters={filters} />
+      <HierarchicalFilters filters={filters} includeSellers={true} />
 
-      {/* Rule Type Info */}
+      {!canManageRules && (
+        <Card className="border-border/40">
+          <CardContent className="py-4 text-sm text-muted-foreground">
+            Este rol tiene acceso de consulta en reglas y cierres de comisiones.
+          </CardContent>
+        </Card>
+      )}
+
       <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {RULE_TYPES.map((type) => {
           const Icon = type.icon;
@@ -212,7 +435,6 @@ export default function CommissionsPage() {
         })}
       </div>
 
-      {/* Rules by Agency */}
       {loading ? (
         <Card className="border-border/40">
           <CardContent className="p-4">
@@ -224,7 +446,6 @@ export default function CommissionsPage() {
           <CardContent className="text-center py-12">
             <CurrencyDollar size={48} className="mx-auto text-muted-foreground mb-4" />
             <p className="text-muted-foreground">No hay reglas de comisión configuradas</p>
-            <p className="text-sm text-muted-foreground">Crea una regla para calcular comisiones automáticamente</p>
           </CardContent>
         </Card>
       ) : (
@@ -233,9 +454,7 @@ export default function CommissionsPage() {
             <CardHeader className="pb-2">
               <div className="flex items-center justify-between">
                 <CardTitle className="text-lg">{data.agency_name}</CardTitle>
-                <div className="text-sm text-muted-foreground">
-                  {data.brand_name} • {data.group_name}
-                </div>
+                <div className="text-sm text-muted-foreground">{data.brand_name} • {data.group_name}</div>
               </div>
             </CardHeader>
             <div className="table-wrapper">
@@ -245,54 +464,62 @@ export default function CommissionsPage() {
                     <TableHead>Nombre</TableHead>
                     <TableHead>Tipo</TableHead>
                     <TableHead className="text-right">Valor</TableHead>
-                    <TableHead>Rango Unidades</TableHead>
-                    <TableHead className="w-24"></TableHead>
+                    <TableHead>Rango</TableHead>
+                    <TableHead>Estatus</TableHead>
+                    <TableHead className="w-[260px]"></TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {data.rules.map((rule) => {
-                    const ruleType = getRuleType(rule.rule_type);
+                    const status = normalizeStatus(rule.approval_status);
+                    const ruleType = RULE_TYPES.find((t) => t.value === rule.rule_type);
                     const Icon = ruleType?.icon || CurrencyDollar;
                     return (
                       <TableRow key={rule.id} data-testid={`rule-row-${rule.id}`}>
                         <TableCell className="font-medium">{rule.name}</TableCell>
                         <TableCell>
                           <Badge variant="outline" className="gap-1">
-                            <Icon size={14} />
-                            {ruleType?.label}
+                            <Icon size={12} />
+                            {ruleType?.label || rule.rule_type}
                           </Badge>
                         </TableCell>
-                        <TableCell className="text-right tabular-nums font-medium">
-                          {formatValue(rule)}
+                        <TableCell className="text-right">{formatRuleValue(rule)}</TableCell>
+                        <TableCell>
+                          {rule.rule_type === 'volume_bonus'
+                            ? `${rule.min_units || 0} - ${rule.max_units || '∞'} unidades`
+                            : '-'}
                         </TableCell>
                         <TableCell>
-                          {rule.min_units || rule.max_units ? (
-                            <span className="text-sm">
-                              {rule.min_units || 0} - {rule.max_units || '∞'}
-                            </span>
-                          ) : (
-                            '-'
-                          )}
+                          <Badge variant="outline" className={getStatusClass(status)}>
+                            {STATUS_LABELS[status]}
+                          </Badge>
                         </TableCell>
                         <TableCell>
-                          <div className="flex justify-end gap-1">
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => handleEdit(rule)}
-                              data-testid={`edit-rule-${rule.id}`}
-                            >
-                              <Pencil size={16} />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => handleDelete(rule.id)}
-                              className="text-destructive hover:text-destructive"
-                              data-testid={`delete-rule-${rule.id}`}
-                            >
-                              <Trash size={16} />
-                            </Button>
+                          <div className="flex flex-wrap justify-end gap-2">
+                            {canProposeRules && (
+                              <>
+                                <Button size="sm" variant="outline" onClick={() => handleEditRule(rule)} data-testid={`edit-rule-${rule.id}`}>
+                                  <Pencil size={14} className="mr-1" />
+                                  Editar
+                                </Button>
+                                <Button size="sm" variant="destructive" onClick={() => handleDeleteRule(rule)} data-testid={`delete-rule-${rule.id}`}>
+                                  <Trash size={14} className="mr-1" />
+                                  Borrar
+                                </Button>
+                              </>
+                            )}
+                            {canApproveRules && status === COMMISSION_PENDING && (
+                              <>
+                                <Button size="sm" variant="outline" onClick={() => handleRuleApprovalDecision(rule, COMMISSION_REJECTED)}>
+                                  <X size={14} className="mr-1" />
+                                  Rechazar
+                                </Button>
+                                <Button size="sm" className="bg-[#2A9D8F] hover:bg-[#2A9D8F]/90" onClick={() => handleRuleApprovalDecision(rule, COMMISSION_APPROVED)}>
+                                  <Check size={14} className="mr-1" />
+                                  Aprobar
+                                </Button>
+                              </>
+                            )}
                           </div>
                         </TableCell>
                       </TableRow>
@@ -305,31 +532,212 @@ export default function CommissionsPage() {
         ))
       )}
 
-      {/* Dialog */}
-      <Dialog open={isDialogOpen} onOpenChange={(open) => {
-        setIsDialogOpen(open);
-        if (!open) {
-          setEditingRule(null);
-          resetForm();
-        }
-      }}>
+      <Card className="border-border/40">
+        <CardHeader>
+          <CardTitle>Cierres Mensuales por Vendedor</CardTitle>
+          <CardDescription>Snapshot mensual de comisiones con aprobación operativa.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {loading ? (
+            <Skeleton className="h-48 w-full" />
+          ) : closures.length === 0 ? (
+            <p className="text-sm text-muted-foreground">Sin cierres registrados.</p>
+          ) : (
+            <div className="table-wrapper">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Vendedor</TableHead>
+                    <TableHead>Dealer</TableHead>
+                    <TableHead>Periodo</TableHead>
+                    <TableHead className="text-right">Comisión</TableHead>
+                    <TableHead>Estatus</TableHead>
+                    <TableHead className="w-[220px]"></TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {closures.map((closure) => {
+                    const status = normalizeStatus(closure.approval_status);
+                    const snapshot = closure.snapshot || {};
+                    return (
+                      <TableRow key={closure.id}>
+                        <TableCell>{closure.seller_name || closure.seller_id}</TableCell>
+                        <TableCell>{closure.agency_name || closure.agency_id}</TableCell>
+                        <TableCell>{MONTHS.find((m) => m.value === closure.month)?.label || closure.month} {closure.year}</TableCell>
+                        <TableCell className="text-right">{formatCurrency(snapshot.commission_total || 0)}</TableCell>
+                        <TableCell>
+                          <Badge variant="outline" className={getStatusClass(status)}>
+                            {STATUS_LABELS[status]}
+                          </Badge>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex justify-end gap-2">
+                            {canApproveRules && status === COMMISSION_PENDING && (
+                              <>
+                                <Button size="sm" variant="outline" onClick={() => handleClosureApprovalDecision(closure, COMMISSION_REJECTED)}>
+                                  <X size={14} className="mr-1" />
+                                  Rechazar
+                                </Button>
+                                <Button size="sm" className="bg-[#2A9D8F] hover:bg-[#2A9D8F]/90" onClick={() => handleClosureApprovalDecision(closure, COMMISSION_APPROVED)}>
+                                  <Check size={14} className="mr-1" />
+                                  Aprobar
+                                </Button>
+                              </>
+                            )}
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {canUseSimulator && (
+        <Card className="border-border/40" data-testid="commission-simulator-card">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Calculator size={20} />
+              Simulador de Comisiones (What-if)
+            </CardTitle>
+            <CardDescription>
+              Ajusta números para estimar qué necesitas vender para alcanzar tu meta, sin tocar objetivos reales.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form onSubmit={handleSimulatorSubmit} className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+              <div className="space-y-2">
+                <Label>Meta de comisión (MXN)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  value={simulatorFormData.target_commission}
+                  onChange={(e) => setSimulatorFormData((prev) => ({ ...prev, target_commission: e.target.value }))}
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Unidades simuladas</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  value={simulatorFormData.units}
+                  onChange={(e) => setSimulatorFormData((prev) => ({ ...prev, units: e.target.value }))}
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Ticket promedio (MXN)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  value={simulatorFormData.average_ticket}
+                  onChange={(e) => setSimulatorFormData((prev) => ({ ...prev, average_ticket: e.target.value }))}
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Ingreso F&I promedio (MXN)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  value={simulatorFormData.average_fi_revenue}
+                  onChange={(e) => setSimulatorFormData((prev) => ({ ...prev, average_fi_revenue: e.target.value }))}
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Dealer</Label>
+                <Select
+                  value={simulatorFormData.agency_id || (selectedAgency !== 'all' ? selectedAgency : user?.agency_id || '')}
+                  onValueChange={(value) => setSimulatorFormData((prev) => ({ ...prev, agency_id: value }))}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Selecciona dealer" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(filters.filteredAgencies || []).map((agency) => (
+                      <SelectItem key={agency.id} value={agency.id}>
+                        {agency.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              {user?.role !== 'seller' && (
+                <div className="space-y-2">
+                  <Label>Vendedor (opcional)</Label>
+                  <Select
+                    value={simulatorFormData.seller_id || 'none'}
+                    onValueChange={(value) => setSimulatorFormData((prev) => ({ ...prev, seller_id: value === 'none' ? '' : value }))}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Selecciona vendedor" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">Sin vendedor específico</SelectItem>
+                      {(filters.sellers || []).map((seller) => (
+                        <SelectItem key={seller.id} value={seller.id}>
+                          {seller.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+              <div className="md:col-span-2 lg:col-span-3 flex justify-end">
+                <Button type="submit" className="bg-[#002FA7] hover:bg-[#002FA7]/90" disabled={simulating}>
+                  {simulating ? 'Simulando...' : 'Calcular Escenario'}
+                </Button>
+              </div>
+            </form>
+
+            {simulatorResult && (
+              <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                <Card className="border-border/40">
+                  <CardContent className="p-4">
+                    <div className="text-xs uppercase tracking-wider text-muted-foreground">Comisión estimada</div>
+                    <div className="text-xl font-bold">{formatCurrency(simulatorResult.estimated_commission)}</div>
+                  </CardContent>
+                </Card>
+                <Card className="border-border/40">
+                  <CardContent className="p-4">
+                    <div className="text-xs uppercase tracking-wider text-muted-foreground">Diferencia vs meta</div>
+                    <div className="text-xl font-bold">{formatCurrency(simulatorResult.difference_vs_target)}</div>
+                  </CardContent>
+                </Card>
+                <Card className="border-border/40">
+                  <CardContent className="p-4">
+                    <div className="text-xs uppercase tracking-wider text-muted-foreground">Unidades sugeridas</div>
+                    <div className="text-xl font-bold">{simulatorResult.suggested_units_to_target ?? 'N/A'}</div>
+                  </CardContent>
+                </Card>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      <Dialog open={isRuleDialogOpen} onOpenChange={setIsRuleDialogOpen}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{editingRule ? 'Editar Regla' : 'Nueva Regla de Comisión'}</DialogTitle>
           </DialogHeader>
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={handleRuleSubmit} className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="agency_id">Agencia</Label>
+              <Label>Dealer (Agencia)</Label>
               <Select
-                value={formData.agency_id}
-                onValueChange={(value) => setFormData({ ...formData, agency_id: value })}
-                required
+                value={ruleFormData.agency_id}
+                onValueChange={(value) => setRuleFormData((prev) => ({ ...prev, agency_id: value }))}
               >
-                <SelectTrigger data-testid="rule-agency-select">
-                  <SelectValue placeholder="Seleccionar agencia" />
+                <SelectTrigger>
+                  <SelectValue placeholder="Selecciona dealer" />
                 </SelectTrigger>
                 <SelectContent>
-                  {filters.filteredAgencies.map((agency) => (
+                  {(filters.filteredAgencies || []).map((agency) => (
                     <SelectItem key={agency.id} value={agency.id}>
                       {agency.name}
                     </SelectItem>
@@ -338,88 +746,156 @@ export default function CommissionsPage() {
               </Select>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="name">Nombre de la Regla</Label>
+              <Label>Nombre</Label>
               <Input
-                id="name"
-                value={formData.name}
-                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                placeholder="Ej: Comisión base por unidad"
+                value={ruleFormData.name}
+                onChange={(e) => setRuleFormData((prev) => ({ ...prev, name: e.target.value }))}
                 required
-                data-testid="rule-name-input"
               />
             </div>
             <div className="space-y-2">
-              <Label>Tipo de Regla</Label>
-              <div className="grid grid-cols-2 gap-2">
-                {RULE_TYPES.map((type) => {
-                  const Icon = type.icon;
-                  return (
-                    <button
-                      key={type.value}
-                      type="button"
-                      onClick={() => setFormData({ ...formData, rule_type: type.value })}
-                      className={`p-3 rounded-md border text-left transition-fast ${
-                        formData.rule_type === type.value
-                          ? 'border-[#002FA7] bg-[#002FA7]/5'
-                          : 'border-border hover:border-[#002FA7]/50'
-                      }`}
-                      data-testid={`rule-type-${type.value}`}
-                    >
-                      <Icon size={20} weight="duotone" className={formData.rule_type === type.value ? 'text-[#002FA7]' : 'text-muted-foreground'} />
-                      <div className="font-medium text-sm mt-1">{type.label}</div>
-                      <div className="text-xs text-muted-foreground">{type.description}</div>
-                    </button>
-                  );
-                })}
-              </div>
+              <Label>Tipo</Label>
+              <Select
+                value={ruleFormData.rule_type}
+                onValueChange={(value) => setRuleFormData((prev) => ({ ...prev, rule_type: value }))}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {RULE_TYPES.map((type) => (
+                    <SelectItem key={type.value} value={type.value}>
+                      {type.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="value">
-                {formData.rule_type === 'percentage' || formData.rule_type === 'fi_bonus' ? 'Porcentaje (%)' : 'Monto ($)'}
-              </Label>
+              <Label>Valor</Label>
               <Input
-                id="value"
                 type="number"
                 step="0.01"
-                value={formData.value}
-                onChange={(e) => setFormData({ ...formData, value: e.target.value })}
-                placeholder={formData.rule_type === 'percentage' || formData.rule_type === 'fi_bonus' ? '2.5' : '5000'}
+                min="0"
+                value={ruleFormData.value}
+                onChange={(e) => setRuleFormData((prev) => ({ ...prev, value: e.target.value }))}
                 required
-                data-testid="rule-value-input"
               />
             </div>
-            {formData.rule_type === 'volume_bonus' && (
-              <div className="grid grid-cols-2 gap-4">
+            {ruleFormData.rule_type === 'volume_bonus' && (
+              <div className="grid grid-cols-2 gap-2">
                 <div className="space-y-2">
-                  <Label htmlFor="min_units">Mínimo Unidades</Label>
+                  <Label>Min unidades</Label>
                   <Input
-                    id="min_units"
                     type="number"
-                    value={formData.min_units}
-                    onChange={(e) => setFormData({ ...formData, min_units: e.target.value })}
-                    placeholder="5"
-                    data-testid="rule-min-units-input"
+                    min="0"
+                    value={ruleFormData.min_units}
+                    onChange={(e) => setRuleFormData((prev) => ({ ...prev, min_units: e.target.value }))}
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="max_units">Máximo Unidades</Label>
+                  <Label>Max unidades</Label>
                   <Input
-                    id="max_units"
                     type="number"
-                    value={formData.max_units}
-                    onChange={(e) => setFormData({ ...formData, max_units: e.target.value })}
-                    placeholder="10"
-                    data-testid="rule-max-units-input"
+                    min="0"
+                    value={ruleFormData.max_units}
+                    onChange={(e) => setRuleFormData((prev) => ({ ...prev, max_units: e.target.value }))}
                   />
                 </div>
               </div>
             )}
             <div className="flex justify-end gap-2">
-              <Button type="button" variant="outline" onClick={() => setIsDialogOpen(false)}>
+              <Button type="button" variant="outline" onClick={() => setIsRuleDialogOpen(false)}>
                 Cancelar
               </Button>
-              <Button type="submit" className="bg-[#002FA7] hover:bg-[#002FA7]/90" data-testid="save-rule-btn">
-                {editingRule ? 'Actualizar' : 'Crear'}
+              <Button type="submit" className="bg-[#002FA7] hover:bg-[#002FA7]/90">
+                {editingRule ? 'Guardar Cambios' : 'Enviar a Aprobación'}
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isClosureDialogOpen} onOpenChange={setIsClosureDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Generar Cierre Mensual</DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleCreateClosure} className="space-y-4">
+            <div className="space-y-2">
+              <Label>Dealer (Agencia)</Label>
+              <Select
+                value={closureFormData.agency_id}
+                onValueChange={(value) => setClosureFormData((prev) => ({ ...prev, agency_id: value }))}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Selecciona dealer" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(filters.filteredAgencies || []).map((agency) => (
+                    <SelectItem key={agency.id} value={agency.id}>
+                      {agency.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Vendedor</Label>
+              <Select
+                value={closureFormData.seller_id || 'none'}
+                onValueChange={(value) => setClosureFormData((prev) => ({ ...prev, seller_id: value === 'none' ? '' : value }))}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Selecciona vendedor" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">Selecciona vendedor</SelectItem>
+                  {(filters.sellers || []).map((seller) => (
+                    <SelectItem key={seller.id} value={seller.id}>
+                      {seller.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-2">
+                <Label>Mes</Label>
+                <Select
+                  value={String(closureFormData.month)}
+                  onValueChange={(value) => setClosureFormData((prev) => ({ ...prev, month: parseInt(value, 10) }))}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {MONTHS.map((month) => (
+                      <SelectItem key={month.value} value={String(month.value)}>
+                        {month.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label>Año</Label>
+                <Input
+                  type="number"
+                  min="2024"
+                  max="2100"
+                  value={closureFormData.year}
+                  onChange={(e) => setClosureFormData((prev) => ({ ...prev, year: parseInt(e.target.value || '0', 10) || new Date().getFullYear() }))}
+                  required
+                />
+              </div>
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="outline" onClick={() => setIsClosureDialogOpen(false)}>
+                Cancelar
+              </Button>
+              <Button type="submit" className="bg-[#002FA7] hover:bg-[#002FA7]/90">
+                Generar y Enviar
               </Button>
             </div>
           </form>

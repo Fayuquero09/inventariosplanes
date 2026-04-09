@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { groupsApi, brandsApi, agenciesApi, sellersApi } from '../lib/api';
 import { Card, CardContent } from '../components/ui/card';
+import { Button } from '../components/ui/button';
 import {
   Select,
   SelectContent,
@@ -9,7 +10,12 @@ import {
   SelectTrigger,
   SelectValue
 } from '../components/ui/select';
-import { Buildings, Factory, Storefront, User, CaretRight } from '@phosphor-icons/react';
+import { Buildings, Factory, Storefront, User, CaretRight, ArrowsLeftRight } from '@phosphor-icons/react';
+
+const FILTER_MODES = {
+  GROUP_BRAND: 'group_brand',
+  BRAND_AGENCY: 'brand_agency'
+};
 
 export function useHierarchicalFilters(options = {}) {
   const { user } = useAuth();
@@ -24,9 +30,12 @@ export function useHierarchicalFilters(options = {}) {
   const [selectedBrand, setSelectedBrand] = useState('all');
   const [selectedAgency, setSelectedAgency] = useState('all');
   const [selectedSeller, setSelectedSeller] = useState('all');
+  const [filterMode, setFilterMode] = useState(FILTER_MODES.GROUP_BRAND);
 
   const isSuperUser = user?.role === 'app_admin' || user?.role === 'app_user';
   const canSelectGroup = isSuperUser && groups.length > 1;
+  const canSwitchHierarchy = isSuperUser;
+  const isBrandAgencyMode = canSwitchHierarchy && filterMode === FILTER_MODES.BRAND_AGENCY;
 
   // Load filter options
   useEffect(() => {
@@ -74,10 +83,11 @@ export function useHierarchicalFilters(options = {}) {
 
   // Reset cascading filters
   useEffect(() => {
+    if (isBrandAgencyMode) return;
     setSelectedBrand('all');
     setSelectedAgency('all');
     setSelectedSeller('all');
-  }, [selectedGroup]);
+  }, [selectedGroup, isBrandAgencyMode]);
 
   useEffect(() => {
     setSelectedAgency('all');
@@ -88,15 +98,33 @@ export function useHierarchicalFilters(options = {}) {
     setSelectedSeller('all');
   }, [selectedAgency]);
 
+  // Keep hierarchy mode scoped to super users and reset dependent filters when mode changes
+  useEffect(() => {
+    if (!canSwitchHierarchy && filterMode !== FILTER_MODES.GROUP_BRAND) {
+      setFilterMode(FILTER_MODES.GROUP_BRAND);
+      return;
+    }
+    if (!canSwitchHierarchy) return;
+
+    setSelectedAgency('all');
+    setSelectedSeller('all');
+
+    if (filterMode === FILTER_MODES.BRAND_AGENCY) {
+      setSelectedGroup('all');
+    } else {
+      setSelectedBrand('all');
+    }
+  }, [canSwitchHierarchy, filterMode]);
+
   // Get filter params for API calls
   const getFilterParams = useCallback(() => {
     const params = {};
-    if (selectedGroup !== 'all') params.group_id = selectedGroup;
+    if (!isBrandAgencyMode && selectedGroup !== 'all') params.group_id = selectedGroup;
     if (selectedBrand !== 'all') params.brand_id = selectedBrand;
     if (selectedAgency !== 'all') params.agency_id = selectedAgency;
     if (selectedSeller !== 'all') params.seller_id = selectedSeller;
     return params;
-  }, [selectedGroup, selectedBrand, selectedAgency, selectedSeller]);
+  }, [selectedGroup, selectedBrand, selectedAgency, selectedSeller, isBrandAgencyMode]);
 
   // Notify parent of filter changes
   useEffect(() => {
@@ -106,15 +134,15 @@ export function useHierarchicalFilters(options = {}) {
   }, [onFilterChange, getFilterParams]);
 
   // Filter brands by selected group
-  const filteredBrands = selectedGroup !== 'all'
-    ? brands.filter(b => b.group_id === selectedGroup)
+  const filteredBrands = !isBrandAgencyMode && selectedGroup !== 'all'
+    ? brands.filter((b) => b.group_id === selectedGroup)
     : brands;
 
   // Filter agencies by selected brand (or group)
   const filteredAgencies = selectedBrand !== 'all'
-    ? agencies.filter(a => a.brand_id === selectedBrand)
-    : selectedGroup !== 'all'
-      ? agencies.filter(a => a.group_id === selectedGroup)
+    ? agencies.filter((a) => a.brand_id === selectedBrand)
+    : !isBrandAgencyMode && selectedGroup !== 'all'
+      ? agencies.filter((a) => a.group_id === selectedGroup)
       : agencies;
 
   // Get selected entities for breadcrumb
@@ -129,11 +157,11 @@ export function useHierarchicalFilters(options = {}) {
     selectedGroup, selectedBrand, selectedAgency, selectedSeller,
     setSelectedGroup, setSelectedBrand, setSelectedAgency, setSelectedSeller,
     // Computed
-    isSuperUser, canSelectGroup,
+    isSuperUser, canSelectGroup, canSwitchHierarchy, filterMode, isBrandAgencyMode,
     filteredBrands, filteredAgencies,
     selectedGroupObj, selectedBrandObj, selectedAgencyObj, selectedSellerObj,
     // Helpers
-    getFilterParams
+    setFilterMode, getFilterParams
   };
 }
 
@@ -146,7 +174,7 @@ export function HierarchicalFilters({
     groups, filteredBrands, filteredAgencies, sellers,
     selectedGroup, selectedBrand, selectedAgency, selectedSeller,
     setSelectedGroup, setSelectedBrand, setSelectedAgency, setSelectedSeller,
-    canSelectGroup,
+    canSelectGroup, canSwitchHierarchy, filterMode, setFilterMode, isBrandAgencyMode,
     selectedGroupObj, selectedBrandObj, selectedAgencyObj, selectedSellerObj
   } = filters;
 
@@ -155,8 +183,38 @@ export function HierarchicalFilters({
       <Card className="border-border/40">
         <CardContent className="p-4">
           <div className="flex flex-wrap gap-3">
+            {canSwitchHierarchy && (
+              <div className="flex flex-col gap-1">
+                <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
+                  <ArrowsLeftRight size={12} /> Vista
+                </label>
+                <div className="flex gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={filterMode === FILTER_MODES.GROUP_BRAND ? 'default' : 'outline'}
+                    className={filterMode === FILTER_MODES.GROUP_BRAND ? 'bg-[#002FA7] hover:bg-[#002FA7]/90' : ''}
+                    onClick={() => setFilterMode(FILTER_MODES.GROUP_BRAND)}
+                    data-testid="filter-mode-group-brand"
+                  >
+                    Grupo - Marca
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={filterMode === FILTER_MODES.BRAND_AGENCY ? 'default' : 'outline'}
+                    className={filterMode === FILTER_MODES.BRAND_AGENCY ? 'bg-[#2A9D8F] hover:bg-[#2A9D8F]/90' : ''}
+                    onClick={() => setFilterMode(FILTER_MODES.BRAND_AGENCY)}
+                    data-testid="filter-mode-brand-agency"
+                  >
+                    Marca - Agencia
+                  </Button>
+                </div>
+              </div>
+            )}
+
             {/* Group Filter */}
-            {canSelectGroup ? (
+            {canSelectGroup && !isBrandAgencyMode ? (
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
                   <Buildings size={12} /> Grupo
@@ -175,7 +233,7 @@ export function HierarchicalFilters({
                   </SelectContent>
                 </Select>
               </div>
-            ) : groups.length === 1 && (
+            ) : !isBrandAgencyMode && groups.length === 1 && (
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
                   <Buildings size={12} /> Grupo
@@ -194,7 +252,7 @@ export function HierarchicalFilters({
               <Select
                 value={selectedBrand}
                 onValueChange={setSelectedBrand}
-                disabled={canSelectGroup && selectedGroup === 'all'}
+                disabled={!isBrandAgencyMode && canSelectGroup && selectedGroup === 'all'}
               >
                 <SelectTrigger className="w-[180px]" data-testid="filter-brand">
                   <SelectValue placeholder="Todas las marcas" />

@@ -34,6 +34,7 @@ export const authApi = {
   register: (data) => api.post('/auth/register', data),
   logout: () => api.post('/auth/logout'),
   me: () => api.get('/auth/me'),
+  resetPassword: (email, newPassword) => api.post('/auth/reset-password', { email, new_password: newPassword }),
   googleAuth: (credential) => api.post('/auth/google', { credential })
 };
 
@@ -50,7 +51,8 @@ export const groupsApi = {
 export const brandsApi = {
   getAll: (groupId) => api.get('/brands', { params: { group_id: groupId } }),
   create: (data) => api.post('/brands', data),
-  update: (id, data) => api.put(`/brands/${id}`, data)
+  update: (id, data) => api.put(`/brands/${id}`, data),
+  delete: (id, params = {}) => api.delete(`/brands/${id}`, { params })
 };
 
 // Agencies
@@ -65,7 +67,8 @@ export const financialRatesApi = {
   getAll: (params) => api.get('/financial-rates', { params }),
   create: (data) => api.post('/financial-rates', data),
   update: (id, data) => api.put(`/financial-rates/${id}`, data),
-  delete: (id) => api.delete(`/financial-rates/${id}`)
+  delete: (id) => api.delete(`/financial-rates/${id}`),
+  applyGroupDefault: (data) => api.post('/financial-rates/apply-group-default', data)
 };
 
 // Vehicles
@@ -94,7 +97,8 @@ export const vehicleCatalogApi = {
 export const salesObjectivesApi = {
   getAll: (params) => api.get('/sales-objectives', { params }),
   create: (data) => api.post('/sales-objectives', data),
-  update: (id, data) => api.put(`/sales-objectives/${id}`, data)
+  update: (id, data) => api.put(`/sales-objectives/${id}`, data),
+  approve: (id, data) => api.post(`/sales-objectives/${id}/approval`, data)
 };
 
 // Commission Rules
@@ -102,7 +106,18 @@ export const commissionRulesApi = {
   getAll: (params) => api.get('/commission-rules', { params }),
   create: (data) => api.post('/commission-rules', data),
   update: (id, data) => api.put(`/commission-rules/${id}`, data),
+  approve: (id, data) => api.post(`/commission-rules/${id}/approval`, data),
   delete: (id) => api.delete(`/commission-rules/${id}`)
+};
+
+export const commissionClosuresApi = {
+  getAll: (params) => api.get('/commission-closures', { params }),
+  create: (data) => api.post('/commission-closures', data),
+  approve: (id, data) => api.post(`/commission-closures/${id}/approval`, data)
+};
+
+export const commissionSimulatorApi = {
+  simulate: (data) => api.post('/commission-simulator', data)
 };
 
 // Sales
@@ -121,7 +136,13 @@ export const salesApi = {
 // Users
 export const usersApi = {
   getAll: () => api.get('/users'),
-  update: (id, data) => api.put(`/users/${id}`, data)
+  update: (id, data) => api.put(`/users/${id}`, data),
+  delete: (id) => api.delete(`/users/${id}`)
+};
+
+// Audit Logs
+export const auditLogsApi = {
+  getAll: (params) => api.get('/audit-logs', { params })
 };
 
 // Sellers
@@ -145,7 +166,10 @@ export const dashboardApi = {
   getKpis: (params) => api.get('/dashboard/kpis', { params }),
   getTrends: (params) => api.get('/dashboard/trends', { params }),
   getSellerPerformance: (params) => api.get('/dashboard/seller-performance', { params }),
-  getSuggestions: (groupId) => api.get('/dashboard/suggestions', { params: { group_id: groupId } })
+  getSuggestions: (params) => api.get('/dashboard/suggestions', { params }),
+  getMonthlyClose: (params) => api.get('/dashboard/monthly-close', { params }),
+  getMonthlyCloseCalendar: (params) => api.get('/dashboard/monthly-close-calendar', { params }),
+  upsertMonthlyClose: (data) => api.put('/dashboard/monthly-close', data)
 };
 
 export default api;

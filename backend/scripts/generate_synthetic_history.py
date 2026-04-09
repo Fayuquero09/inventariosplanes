@@ -490,6 +490,35 @@ def create_seller_docs_for_agency(agency: Dict[str, Any], seed_id: str, start_in
     return docs
 
 
+def build_seller_model_focus_map(
+    seller_ids: Sequence[str],
+    model_pool: Sequence[str],
+    rng: np.random.Generator,
+) -> Dict[str, set[str]]:
+    models = sorted({str(model).strip() for model in model_pool if str(model).strip()})
+    focus_map: Dict[str, set[str]] = {}
+    if not seller_ids:
+        return focus_map
+    if not models:
+        for seller_id in seller_ids:
+            focus_map[str(seller_id)] = set()
+        return focus_map
+
+    for idx, seller_id in enumerate(seller_ids):
+        seller_id_str = str(seller_id)
+        if len(models) <= 2:
+            focus_map[seller_id_str] = set(models)
+            continue
+
+        # 2-3 modelos foco por vendedor para inducir especialización.
+        focus_size = 2 if (idx % 3) else 3
+        focus_size = min(focus_size, len(models))
+        chosen = rng.choice(models, size=focus_size, replace=False).tolist()
+        focus_map[seller_id_str] = set(chosen)
+
+    return focus_map
+
+
 def parse_brand_plan(raw_value: str) -> List[Tuple[str, int]]:
     out: List[Tuple[str, int]] = []
     for token in str(raw_value or "").split(","):
@@ -748,6 +777,7 @@ def main() -> int:
             agencies_by_make[make_key] += 1
 
     target_months = target_months_window(args.months)
+    generation_now_utc = datetime.now(timezone.utc)
     sold_vehicle_docs: List[Dict[str, Any]] = []
     sold_meta: List[Dict[str, Any]] = []
     stock_vehicle_docs: List[Dict[str, Any]] = []
@@ -761,13 +791,14 @@ def main() -> int:
         make_key = make_key_by_brand_id.get(agency["brand_id"])
         variants = catalog_by_make.get(make_key or "", all_variants)
 
-        if not sellers_by_agency.get(agency_id):
-            create_count = int(rng.integers(1, 3))
+        existing_seller_count = len(sellers_by_agency.get(agency_id) or [])
+        if existing_seller_count < 3:
+            create_count = max(0, 3 - existing_seller_count)
             seller_docs = create_seller_docs_for_agency(agency, seed_id, seller_counter, create_count)
             seller_counter += create_count
             new_seller_docs.extend(seller_docs)
-            # Use placeholder IDs after insert; for now keep empty and resolve later.
-            sellers_by_agency[agency_id] = []
+            if not sellers_by_agency.get(agency_id):
+                sellers_by_agency[agency_id] = []
 
         avg_units_for_make = demand.make_avg_units.get(make_key or "", demand.fallback_avg_units)
         agency_count_for_make = max(agencies_by_make.get(make_key or "", 1), 1)
@@ -801,9 +832,22 @@ def main() -> int:
                     2,
                 )
 
-                sale_day = int(rng.integers(1, 28))
-                sale_hour = int(rng.integers(9, 20))
-                sale_date = datetime(year, month, sale_day, sale_hour, int(rng.integers(0, 60)), tzinfo=timezone.utc)
+                month_start_date = datetime(year, month, 1, 9, 0, tzinfo=timezone.utc)
+                if month == 12:
+                    month_end_date = datetime(year + 1, 1, 1, 0, 0, tzinfo=timezone.utc) - timedelta(minutes=1)
+                else:
+                    month_end_date = datetime(year, month + 1, 1, 0, 0, tzinfo=timezone.utc) - timedelta(minutes=1)
+
+                if year == generation_now_utc.year and month == generation_now_utc.month:
+                    sale_window_end = min(month_end_date, generation_now_utc)
+                else:
+                    sale_window_end = month_end_date
+
+                if sale_window_end <= month_start_date:
+                    sale_date = month_start_date
+                else:
+                    random_seconds = int(rng.integers(0, int((sale_window_end - month_start_date).total_seconds()) + 1))
+                    sale_date = month_start_date + timedelta(seconds=random_seconds)
                 in_stock_days = int(rng.integers(7, 120))
                 entry_date = sale_date - timedelta(days=in_stock_days)
 
@@ -839,6 +883,7 @@ def main() -> int:
                         "agency_id": agency_id,
                         "brand_id": agency["brand_id"],
                         "group_id": agency["group_id"],
+                        "model": variant["model"],
                         "sale_price": sale_price,
                         "sale_date": sale_date,
                         "fi_revenue": fi_revenue,
@@ -853,7 +898,7 @@ def main() -> int:
                 min(args.stock_max, round(base_lambda * agency_bias * float(rng.uniform(0.8, 1.6)))),
             )
         )
-        now_utc = datetime.now(timezone.utc)
+        now_utc = generation_now_utc
         for _ in range(stock_units):
             variant = variants[int(rng.integers(0, len(variants)))]
             msrp = float(variant["msrp"])
@@ -911,6 +956,21 @@ def main() -> int:
         agency_id = agency["id"]
         sellers_by_agency[agency_id].extend(inserted_seller_ids.get(agency_id, []))
 
+    model_pool_by_agency: Dict[str, set[str]] = defaultdict(set)
+    for meta in sold_meta:
+        model_name = str(meta.get("model") or "").strip()
+        if model_name:
+            model_pool_by_agency[str(meta["agency_id"])].add(model_name)
+
+    seller_focus_by_agency: Dict[str, Dict[str, set[str]]] = {}
+    for agency in agencies:
+        agency_id = agency["id"]
+        seller_focus_by_agency[agency_id] = build_seller_model_focus_map(
+            seller_ids=sellers_by_agency.get(agency_id, []),
+            model_pool=sorted(model_pool_by_agency.get(agency_id, set())),
+            rng=rng,
+        )
+
     # Insert sold vehicles and matching sales.
     sales_docs: List[Dict[str, Any]] = []
     chunk_size = 2000
@@ -923,7 +983,24 @@ def main() -> int:
             seller_candidates = sellers_by_agency.get(meta["agency_id"]) or []
             if not seller_candidates:
                 continue
-            seller_id = seller_candidates[int(rng.integers(0, len(seller_candidates)))]
+            seller_focus_map = seller_focus_by_agency.get(meta["agency_id"], {})
+            model_name = str(meta.get("model") or "").strip()
+            weights: List[float] = []
+            for candidate in seller_candidates:
+                focus_models = seller_focus_map.get(str(candidate), set())
+                if model_name and model_name in focus_models:
+                    weights.append(3.2)
+                elif focus_models:
+                    weights.append(0.9)
+                else:
+                    weights.append(1.0)
+
+            total_weight = float(sum(weights))
+            if total_weight > 0:
+                probs = [w / total_weight for w in weights]
+                seller_id = str(rng.choice(np.array(seller_candidates, dtype=object), p=probs))
+            else:
+                seller_id = str(seller_candidates[int(rng.integers(0, len(seller_candidates)))])
             sales_docs.append(
                 {
                     "vehicle_id": str(vehicle_id),
@@ -931,6 +1008,7 @@ def main() -> int:
                     "agency_id": meta["agency_id"],
                     "brand_id": meta["brand_id"],
                     "group_id": meta["group_id"],
+                    "model": meta.get("model"),
                     "sale_price": meta["sale_price"],
                     "sale_date": meta["sale_date"],
                     "fi_revenue": meta["fi_revenue"],

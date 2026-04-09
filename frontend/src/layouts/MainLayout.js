@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Link, useLocation, Outlet } from 'react-router-dom';
+import { useState, useEffect, useMemo } from 'react';
+import { Link, useLocation, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { Button } from '../components/ui/button';
 import { ScrollArea } from '../components/ui/scroll-area';
@@ -35,10 +35,25 @@ const NAV_ITEMS = [
   { path: '/settings', label: 'Configuración', icon: Gear }
 ];
 
+const GROUP_FINANCE_ALLOWED_PATHS = new Set(['/', '/inventory', '/financial-rates']);
+
 export default function MainLayout() {
   const { user, logout } = useAuth();
   const location = useLocation();
+  const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const isGroupFinanceManager = user?.role === 'group_finance_manager';
+  const visibleNavItems = useMemo(() => {
+    if (!isGroupFinanceManager) return NAV_ITEMS;
+    return NAV_ITEMS.filter((item) => GROUP_FINANCE_ALLOWED_PATHS.has(item.path));
+  }, [isGroupFinanceManager]);
+
+  useEffect(() => {
+    if (!isGroupFinanceManager) return;
+    if (!GROUP_FINANCE_ALLOWED_PATHS.has(location.pathname)) {
+      navigate('/financial-rates', { replace: true });
+    }
+  }, [isGroupFinanceManager, location.pathname, navigate]);
 
   const handleLogout = async () => {
     await logout();
@@ -85,7 +100,7 @@ export default function MainLayout() {
           {/* Navigation */}
           <ScrollArea className="flex-1 py-4">
             <nav className="px-3 space-y-1">
-              {NAV_ITEMS.map((item) => {
+              {visibleNavItems.map((item) => {
                 const Icon = item.icon;
                 const isActive = location.pathname === item.path;
                 return (
@@ -138,7 +153,7 @@ export default function MainLayout() {
               <List size={24} />
             </Button>
             <h1 className="text-lg font-semibold hidden sm:block" style={{ fontFamily: 'Cabinet Grotesk' }}>
-              {NAV_ITEMS.find((item) => item.path === location.pathname)?.label || 'Dashboard'}
+              {visibleNavItems.find((item) => item.path === location.pathname)?.label || 'Dashboard'}
             </h1>
           </div>
 
@@ -158,13 +173,17 @@ export default function MainLayout() {
                 <div className="text-xs font-normal text-muted-foreground">{user?.email}</div>
               </DropdownMenuLabel>
               <DropdownMenuSeparator />
-              <DropdownMenuItem asChild>
-                <Link to="/settings" className="cursor-pointer">
-                  <Gear size={16} className="mr-2" />
-                  Configuración
-                </Link>
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
+              {!isGroupFinanceManager && (
+                <>
+                  <DropdownMenuItem asChild>
+                    <Link to="/settings" className="cursor-pointer">
+                      <Gear size={16} className="mr-2" />
+                      Configuración
+                    </Link>
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                </>
+              )}
               <DropdownMenuItem onClick={handleLogout} className="text-destructive cursor-pointer" data-testid="logout-btn">
                 <SignOut size={16} className="mr-2" />
                 Cerrar Sesión
