@@ -3,13 +3,6 @@ import { useAuth } from '../contexts/AuthContext';
 import { groupsApi, brandsApi, agenciesApi, sellersApi } from '../lib/api';
 import { Card, CardContent } from '../components/ui/card';
 import { Button } from '../components/ui/button';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from '../components/ui/select';
 import { Buildings, Factory, Storefront, User, CaretRight, ArrowsLeftRight } from '@phosphor-icons/react';
 
 const FILTER_MODES = {
@@ -84,18 +77,18 @@ export function useHierarchicalFilters(options = {}) {
   // Reset cascading filters
   useEffect(() => {
     if (isBrandAgencyMode) return;
-    setSelectedBrand('all');
-    setSelectedAgency('all');
-    setSelectedSeller('all');
+    setSelectedBrand((prev) => (prev === 'all' ? prev : 'all'));
+    setSelectedAgency((prev) => (prev === 'all' ? prev : 'all'));
+    setSelectedSeller((prev) => (prev === 'all' ? prev : 'all'));
   }, [selectedGroup, isBrandAgencyMode]);
 
   useEffect(() => {
-    setSelectedAgency('all');
-    setSelectedSeller('all');
+    setSelectedAgency((prev) => (prev === 'all' ? prev : 'all'));
+    setSelectedSeller((prev) => (prev === 'all' ? prev : 'all'));
   }, [selectedBrand]);
 
   useEffect(() => {
-    setSelectedSeller('all');
+    setSelectedSeller((prev) => (prev === 'all' ? prev : 'all'));
   }, [selectedAgency]);
 
   // Keep hierarchy mode scoped to super users and reset dependent filters when mode changes
@@ -106,13 +99,13 @@ export function useHierarchicalFilters(options = {}) {
     }
     if (!canSwitchHierarchy) return;
 
-    setSelectedAgency('all');
-    setSelectedSeller('all');
+    setSelectedAgency((prev) => (prev === 'all' ? prev : 'all'));
+    setSelectedSeller((prev) => (prev === 'all' ? prev : 'all'));
 
     if (filterMode === FILTER_MODES.BRAND_AGENCY) {
-      setSelectedGroup('all');
+      setSelectedGroup((prev) => (prev === 'all' ? prev : 'all'));
     } else {
-      setSelectedBrand('all');
+      setSelectedBrand((prev) => (prev === 'all' ? prev : 'all'));
     }
   }, [canSwitchHierarchy, filterMode]);
 
@@ -219,19 +212,19 @@ export function HierarchicalFilters({
                 <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
                   <Buildings size={12} /> Grupo
                 </label>
-                <Select value={selectedGroup} onValueChange={setSelectedGroup}>
-                  <SelectTrigger className="w-[180px]" data-testid="filter-group">
-                    <SelectValue placeholder="Todos los grupos" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">Todos los grupos</SelectItem>
-                    {groups.map((group) => (
-                      <SelectItem key={group.id} value={group.id}>
-                        {group.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <select
+                  value={selectedGroup}
+                  onChange={(e) => setSelectedGroup(e.target.value)}
+                  className="h-10 w-[180px] rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  data-testid="filter-group"
+                >
+                  <option value="all">Todos los grupos</option>
+                  {groups.map((group) => (
+                    <option key={group.id} value={group.id}>
+                      {group.name}
+                    </option>
+                  ))}
+                </select>
               </div>
             ) : !isBrandAgencyMode && groups.length === 1 && (
               <div className="flex flex-col gap-1">
@@ -249,23 +242,20 @@ export function HierarchicalFilters({
               <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
                 <Factory size={12} /> Marca
               </label>
-              <Select
+              <select
                 value={selectedBrand}
-                onValueChange={setSelectedBrand}
+                onChange={(e) => setSelectedBrand(e.target.value)}
                 disabled={!isBrandAgencyMode && canSelectGroup && selectedGroup === 'all'}
+                className="h-10 w-[180px] rounded-md border border-input bg-background px-3 py-2 text-sm disabled:opacity-50"
+                data-testid="filter-brand"
               >
-                <SelectTrigger className="w-[180px]" data-testid="filter-brand">
-                  <SelectValue placeholder="Todas las marcas" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">Todas las marcas</SelectItem>
-                  {filteredBrands.map((brand) => (
-                    <SelectItem key={brand.id} value={brand.id}>
-                      {brand.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                <option value="all">Todas las marcas</option>
+                {filteredBrands.map((brand) => (
+                  <option key={brand.id} value={brand.id}>
+                    {brand.name}
+                  </option>
+                ))}
+              </select>
             </div>
 
             {/* Agency Filter */}
@@ -273,23 +263,20 @@ export function HierarchicalFilters({
               <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
                 <Storefront size={12} /> Agencia
               </label>
-              <Select
+              <select
                 value={selectedAgency}
-                onValueChange={setSelectedAgency}
+                onChange={(e) => setSelectedAgency(e.target.value)}
                 disabled={selectedBrand === 'all'}
+                className="h-10 w-[180px] rounded-md border border-input bg-background px-3 py-2 text-sm disabled:opacity-50"
+                data-testid="filter-agency"
               >
-                <SelectTrigger className="w-[180px]" data-testid="filter-agency">
-                  <SelectValue placeholder="Todas las agencias" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">Todas las agencias</SelectItem>
-                  {filteredAgencies.map((agency) => (
-                    <SelectItem key={agency.id} value={agency.id}>
-                      {agency.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                <option value="all">Todas las agencias</option>
+                {filteredAgencies.map((agency) => (
+                  <option key={agency.id} value={agency.id}>
+                    {agency.name}
+                  </option>
+                ))}
+              </select>
             </div>
 
             {/* Seller Filter */}
@@ -298,23 +285,20 @@ export function HierarchicalFilters({
                 <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
                   <User size={12} /> Vendedor
                 </label>
-                <Select
+                <select
                   value={selectedSeller}
-                  onValueChange={setSelectedSeller}
+                  onChange={(e) => setSelectedSeller(e.target.value)}
                   disabled={selectedAgency === 'all'}
+                  className="h-10 w-[180px] rounded-md border border-input bg-background px-3 py-2 text-sm disabled:opacity-50"
+                  data-testid="filter-seller"
                 >
-                  <SelectTrigger className="w-[180px]" data-testid="filter-seller">
-                    <SelectValue placeholder="Todos los vendedores" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">Todos los vendedores</SelectItem>
-                    {sellers.map((seller) => (
-                      <SelectItem key={seller.id} value={seller.id}>
-                        {seller.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                  <option value="all">Todos los vendedores</option>
+                  {sellers.map((seller) => (
+                    <option key={seller.id} value={seller.id}>
+                      {seller.name}
+                    </option>
+                  ))}
+                </select>
               </div>
             )}
           </div>
