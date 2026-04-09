@@ -3,6 +3,7 @@ import { salesObjectivesApi, dashboardApi, vehicleCatalogApi, sellersApi } from 
 import { useHierarchicalFilters, HierarchicalFilters } from '../components/HierarchicalFilters';
 import { useAuth } from '../contexts/AuthContext';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
+import SafeChart from '../components/SafeChart';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
@@ -1130,30 +1131,32 @@ export default function ObjectivesPage() {
               </div>
             ) : (
               <div className="h-64">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={sellerChartData} layout="vertical">
-                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                    <XAxis
-                      type="number"
-                      allowDecimals={false}
-                      tick={{ fontSize: 12 }}
-                      stroke="hsl(var(--muted-foreground))"
-                    />
-                    <YAxis dataKey="name" type="category" tick={{ fontSize: 12 }} stroke="hsl(var(--muted-foreground))" width={80} />
-                    <Tooltip
-                      contentStyle={{
-                        backgroundColor: 'hsl(var(--card))',
-                        border: '1px solid hsl(var(--border))',
-                        borderRadius: '6px'
-                      }}
-                      formatter={(value, name) => [
-                        name === 'Unidades' ? formatUnits(value) : value,
-                        name
-                      ]}
-                    />
-                    <Bar dataKey="units" fill="#002FA7" name="Unidades" radius={[0, 4, 4, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
+                <SafeChart resetKey={`${selectedMonth}-${selectedYear}-${sellerChartData.length}`}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={sellerChartData} layout="vertical">
+                      <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                      <XAxis
+                        type="number"
+                        allowDecimals={false}
+                        tick={{ fontSize: 12 }}
+                        stroke="hsl(var(--muted-foreground))"
+                      />
+                      <YAxis dataKey="name" type="category" tick={{ fontSize: 12 }} stroke="hsl(var(--muted-foreground))" width={80} />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: 'hsl(var(--card))',
+                          border: '1px solid hsl(var(--border))',
+                          borderRadius: '6px'
+                        }}
+                        formatter={(value, name) => [
+                          name === 'Unidades' ? formatUnits(value) : value,
+                          name
+                        ]}
+                      />
+                      <Bar dataKey="units" fill="#002FA7" name="Unidades" radius={[0, 4, 4, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </SafeChart>
               </div>
             )}
           </CardContent>

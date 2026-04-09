@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { dashboardApi, vehiclesApi, groupsApi, brandsApi, agenciesApi, sellersApi } from '../lib/api';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
+import SafeChart from '../components/SafeChart';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Skeleton } from '../components/ui/skeleton';
@@ -980,108 +981,110 @@ export default function DashboardPage() {
             ) : (
               <>
                 <div className="h-64">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={currentMonthTrendData}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                      <XAxis
-                        dataKey={salesTrendXAxisKey}
-                        tick={salesXAxisTick}
-                        stroke="hsl(var(--muted-foreground))"
-                        minTickGap={16}
-                      />
-                      <YAxis tick={{ fontSize: 12 }} stroke="hsl(var(--muted-foreground))" />
-                      <Tooltip
-                        contentStyle={{
-                          backgroundColor: 'hsl(var(--card))',
-                          border: '1px solid hsl(var(--border))',
-                          borderRadius: '6px'
-                        }}
-                        formatter={(value, name) => [
-                          formatUnits(value),
-                          name
-                        ]}
-                      />
-                      <Legend
-                        payload={[
-                          {
-                            value: 'Año pasado (mismo mes)',
-                            type: 'line',
-                            id: 'legend-last-year',
-                            color: '#6B7280'
-                          },
-                          {
-                            value: objectiveLegendName,
-                            type: 'line',
-                            id: 'legend-weighted-objective',
-                            color: '#E9C46A'
-                          },
-                          {
-                            value: 'Pronóstico tendencia',
-                            type: 'line',
-                            id: 'legend-forecast',
-                            color: '#2A9D8F'
-                          },
-                          {
-                            value: 'Ventas reales',
-                            type: 'line',
-                            id: 'legend-real-sales',
-                            color: '#002FA7'
-                          }
-                        ]}
-                      />
-                      {salesTrendXAxisKey === 'day_label' && fiscalCloseXAxisValue && (
-                        <ReferenceLine
-                          x={fiscalCloseXAxisValue}
-                          stroke="#B45309"
-                          strokeDasharray="4 4"
-                          ifOverflow="extendDomain"
-                          label={{ value: 'Cierre fiscal', position: 'insideTopLeft', fill: '#B45309', fontSize: 10 }}
+                  <SafeChart resetKey={`${selectedMonth}-${selectedYear}-${currentMonthTrendData.length}-sales`}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={currentMonthTrendData}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                        <XAxis
+                          dataKey={salesTrendXAxisKey}
+                          tick={salesXAxisTick}
+                          stroke="hsl(var(--muted-foreground))"
+                          minTickGap={16}
                         />
-                      )}
-                      {salesTrendXAxisKey === 'day_label' && industryCloseXAxisValue && (
-                        <ReferenceLine
-                          x={industryCloseXAxisValue}
-                          stroke="#0F766E"
-                          strokeDasharray="4 4"
-                          ifOverflow="extendDomain"
-                          label={{ value: industryCloseXAxisLabel, position: 'insideTopRight', fill: '#0F766E', fontSize: 10 }}
+                        <YAxis tick={{ fontSize: 12 }} stroke="hsl(var(--muted-foreground))" />
+                        <Tooltip
+                          contentStyle={{
+                            backgroundColor: 'hsl(var(--card))',
+                            border: '1px solid hsl(var(--border))',
+                            borderRadius: '6px'
+                          }}
+                          formatter={(value, name) => [
+                            formatUnits(value),
+                            name
+                          ]}
                         />
-                      )}
-                      <Line
-                        type="monotone"
-                        dataKey="last_year_units"
-                        stroke="#6B7280"
-                        strokeWidth={2}
-                        dot={{ fill: '#6B7280' }}
-                        name="Año pasado (mismo mes)"
-                      />
-                      <Line
-                        type="monotone"
-                        dataKey="weighted_objective_units"
-                        stroke="#E9C46A"
-                        strokeWidth={2}
-                        dot={{ fill: '#E9C46A' }}
-                        name={objectiveLegendName}
-                      />
-                      <Line
-                        type="monotone"
-                        dataKey="units"
-                        stroke="#002FA7"
-                        strokeWidth={2}
-                        dot={{ fill: '#002FA7' }}
-                        name="Ventas reales"
-                      />
-                      <Line
-                        type="monotone"
-                        dataKey="forecast_units"
-                        stroke="#2A9D8F"
-                        strokeWidth={2}
-                        strokeDasharray="6 4"
-                        dot={{ fill: '#2A9D8F' }}
-                        name="Pronóstico tendencia"
-                      />
-                    </LineChart>
-                  </ResponsiveContainer>
+                        <Legend
+                          payload={[
+                            {
+                              value: 'Año pasado (mismo mes)',
+                              type: 'line',
+                              id: 'legend-last-year',
+                              color: '#6B7280'
+                            },
+                            {
+                              value: objectiveLegendName,
+                              type: 'line',
+                              id: 'legend-weighted-objective',
+                              color: '#E9C46A'
+                            },
+                            {
+                              value: 'Pronóstico tendencia',
+                              type: 'line',
+                              id: 'legend-forecast',
+                              color: '#2A9D8F'
+                            },
+                            {
+                              value: 'Ventas reales',
+                              type: 'line',
+                              id: 'legend-real-sales',
+                              color: '#002FA7'
+                            }
+                          ]}
+                        />
+                        {salesTrendXAxisKey === 'day_label' && fiscalCloseXAxisValue && (
+                          <ReferenceLine
+                            x={fiscalCloseXAxisValue}
+                            stroke="#B45309"
+                            strokeDasharray="4 4"
+                            ifOverflow="extendDomain"
+                            label={{ value: 'Cierre fiscal', position: 'insideTopLeft', fill: '#B45309', fontSize: 10 }}
+                          />
+                        )}
+                        {salesTrendXAxisKey === 'day_label' && industryCloseXAxisValue && (
+                          <ReferenceLine
+                            x={industryCloseXAxisValue}
+                            stroke="#0F766E"
+                            strokeDasharray="4 4"
+                            ifOverflow="extendDomain"
+                            label={{ value: industryCloseXAxisLabel, position: 'insideTopRight', fill: '#0F766E', fontSize: 10 }}
+                          />
+                        )}
+                        <Line
+                          type="monotone"
+                          dataKey="last_year_units"
+                          stroke="#6B7280"
+                          strokeWidth={2}
+                          dot={{ fill: '#6B7280' }}
+                          name="Año pasado (mismo mes)"
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="weighted_objective_units"
+                          stroke="#E9C46A"
+                          strokeWidth={2}
+                          dot={{ fill: '#E9C46A' }}
+                          name={objectiveLegendName}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="units"
+                          stroke="#002FA7"
+                          strokeWidth={2}
+                          dot={{ fill: '#002FA7' }}
+                          name="Ventas reales"
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="forecast_units"
+                          stroke="#2A9D8F"
+                          strokeWidth={2}
+                          strokeDasharray="6 4"
+                          dot={{ fill: '#2A9D8F' }}
+                          name="Pronóstico tendencia"
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </SafeChart>
                 </div>
                 {!hasObjectiveData && (
                   <p className="text-xs text-muted-foreground mt-3">
@@ -1133,39 +1136,41 @@ export default function DashboardPage() {
                 <Skeleton className="h-64 w-full" />
               ) : hasAgingData ? (
                 <div className="h-64 flex items-center">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={agingGaussianData}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                      <XAxis
-                        type="number"
-                        dataKey="aging_days"
-                        tick={{ fontSize: 12 }}
-                        stroke="hsl(var(--muted-foreground))"
-                      />
-                      <YAxis
-                        tick={{ fontSize: 12 }}
-                        stroke="hsl(var(--muted-foreground))"
-                        allowDecimals={false}
-                      />
-                      <Tooltip
-                        contentStyle={{
-                          backgroundColor: 'hsl(var(--card))',
-                          border: '1px solid hsl(var(--border))',
-                          borderRadius: '6px'
-                        }}
-                        formatter={(value) => [Number(value || 0).toFixed(1), 'Campana Gauss (estimada)']}
-                        labelFormatter={(label) => `${Number(label || 0).toFixed(0)} días`}
-                      />
-                      <Line
-                        type="monotone"
-                        dataKey="gauss_value"
-                        stroke="#002FA7"
-                        strokeWidth={3}
-                        dot={false}
-                        name="Campana de Aging"
-                      />
-                    </LineChart>
-                  </ResponsiveContainer>
+                  <SafeChart resetKey={`${selectedMonth}-${selectedYear}-${agingGaussianData.length}-aging`}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={agingGaussianData}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                        <XAxis
+                          type="number"
+                          dataKey="aging_days"
+                          tick={{ fontSize: 12 }}
+                          stroke="hsl(var(--muted-foreground))"
+                        />
+                        <YAxis
+                          tick={{ fontSize: 12 }}
+                          stroke="hsl(var(--muted-foreground))"
+                          allowDecimals={false}
+                        />
+                        <Tooltip
+                          contentStyle={{
+                            backgroundColor: 'hsl(var(--card))',
+                            border: '1px solid hsl(var(--border))',
+                            borderRadius: '6px'
+                          }}
+                          formatter={(value) => [Number(value || 0).toFixed(1), 'Campana Gauss (estimada)']}
+                          labelFormatter={(label) => `${Number(label || 0).toFixed(0)} días`}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="gauss_value"
+                          stroke="#002FA7"
+                          strokeWidth={3}
+                          dot={false}
+                          name="Campana de Aging"
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </SafeChart>
                   <div className="space-y-2 ml-4">
                     {agingData.map((item, index) => (
                       <div key={index} className="flex items-center gap-2 text-sm">
@@ -1196,22 +1201,24 @@ export default function DashboardPage() {
                 <Skeleton className="h-64 w-full" />
               ) : (
                 <div className="h-64">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={trends}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                      <XAxis dataKey="month" tick={{ fontSize: 12 }} stroke="hsl(var(--muted-foreground))" />
-                      <YAxis tick={{ fontSize: 12 }} stroke="hsl(var(--muted-foreground))" />
-                      <Tooltip
-                        contentStyle={{
-                          backgroundColor: 'hsl(var(--card))',
-                          border: '1px solid hsl(var(--border))',
-                          borderRadius: '6px'
-                        }}
-                        formatter={(value) => formatCurrency(value)}
-                      />
-                      <Bar dataKey="revenue" fill="#002FA7" radius={[4, 4, 0, 0]} name="Ingresos" />
-                    </BarChart>
-                  </ResponsiveContainer>
+                  <SafeChart resetKey={`${selectedMonth}-${selectedYear}-${trends.length}-revenue`}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={trends}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                        <XAxis dataKey="month" tick={{ fontSize: 12 }} stroke="hsl(var(--muted-foreground))" />
+                        <YAxis tick={{ fontSize: 12 }} stroke="hsl(var(--muted-foreground))" />
+                        <Tooltip
+                          contentStyle={{
+                            backgroundColor: 'hsl(var(--card))',
+                            border: '1px solid hsl(var(--border))',
+                            borderRadius: '6px'
+                          }}
+                          formatter={(value) => formatCurrency(value)}
+                        />
+                        <Bar dataKey="revenue" fill="#002FA7" radius={[4, 4, 0, 0]} name="Ingresos" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </SafeChart>
                 </div>
               )}
             </CardContent>
