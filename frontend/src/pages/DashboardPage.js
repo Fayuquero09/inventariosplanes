@@ -1,11 +1,13 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { dashboardApi, vehiclesApi, groupsApi, brandsApi, agenciesApi, sellersApi } from '../lib/api';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
+import { Input } from '../components/ui/input';
 import { Skeleton } from '../components/ui/skeleton';
+import { toast } from 'sonner';
 import {
   Select,
   SelectContent,
@@ -18,7 +20,6 @@ import {
   CurrencyDollar,
   Clock,
   TrendUp,
-  ChartBar,
   Lightning,
   CaretRight,
   ArrowUp,
@@ -35,17 +36,130 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
+  Legend,
   ResponsiveContainer,
   LineChart,
   Line,
-  PieChart,
-  Pie,
-  Cell
+  ReferenceLine,
 } from 'recharts';
 
-const COLORS = ['#002FA7', '#2A9D8F', '#E9C46A', '#E63946', '#8ECAE6'];
+function pad2(value) {
+  return String(value).padStart(2, '0');
+}
 
-function KPICard({ title, value, icon: Icon, trend, trendUp, loading, subtitle }) {
+function getNthWeekdayOfMonth(year, month, weekday, occurrence) {
+  const first = new Date(year, month - 1, 1);
+  const firstWeekday = first.getDay();
+  return 1 + ((weekday - firstWeekday + 7) % 7) + ((occurrence - 1) * 7);
+}
+
+function getMexicoHolidaySet(year) {
+  const holidays = new Set();
+  const addHoliday = (month, day) => holidays.add(`${year}-${pad2(month)}-${pad2(day)}`);
+
+  // LFT (Art. 74): feriados federales base para operación comercial.
+  addHoliday(1, 1);   // 1 enero
+  addHoliday(2, getNthWeekdayOfMonth(year, 2, 1, 1));   // 1er lunes febrero
+  addHoliday(3, getNthWeekdayOfMonth(year, 3, 1, 3));   // 3er lunes marzo
+  addHoliday(5, 1);   // 1 mayo
+  addHoliday(9, 16);  // 16 septiembre
+  addHoliday(11, getNthWeekdayOfMonth(year, 11, 1, 3)); // 3er lunes noviembre
+  addHoliday(12, 25); // 25 diciembre
+
+  // Transmisión del Poder Ejecutivo Federal: 1/oct cada 6 años (2024, 2030, ...).
+  if (year >= 2024 && ((year - 2024) % 6 === 0)) {
+    addHoliday(10, 1);
+  }
+
+  return holidays;
+}
+
+function buildMonthCalendarCells(year, month, holidaysSet) {
+  const daysInMonth = new Date(year, month, 0).getDate();
+  const firstDay = new Date(year, month - 1, 1).getDay(); // 0=domingo
+  const mondayAligned = (firstDay + 6) % 7; // 0=lunes ... 6=domingo
+
+  const cells = [];
+  for (let i = 0; i < mondayAligned; i += 1) {
+    cells.push(null);
+  }
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    const dateKey = `${year}-${pad2(month)}-${pad2(day)}`;
+    const weekDay = new Date(year, month - 1, day).getDay();
+    const isSunday = weekDay === 0;
+    const isSaturday = weekDay === 6;
+    const isHoliday = holidaysSet.has(dateKey);
+    cells.push({
+      day,
+      isSunday,
+      isSaturday,
+      isHoliday,
+    });
+  }
+  while (cells.length % 7 !== 0) {
+    cells.push(null);
+  }
+  return cells;
+}
+
+function computeIndustryEffectiveDate(year, month, closeDay, monthOffset = 0) {
+  const dayNumber = Number(closeDay);
+  const normalizedOffset = Number(monthOffset);
+  if (!Number.isFinite(dayNumber) || !Number.isInteger(dayNumber) || dayNumber < 1) {
+    return null;
+  }
+  if (!Number.isFinite(normalizedOffset) || !Number.isInteger(normalizedOffset) || normalizedOffset < 0 || normalizedOffset > 1) {
+    return null;
+  }
+
+  const baseMonthDate = new Date(Date.UTC(year, (month - 1) + normalizedOffset, 1, 12, 0, 0));
+  const baseYear = baseMonthDate.getUTCFullYear();
+  const baseMonth = baseMonthDate.getUTCMonth() + 1;
+  const maxDay = new Date(baseYear, baseMonth, 0).getDate();
+  if (dayNumber > maxDay) {
+    return null;
+  }
+
+  const initial = new Date(Date.UTC(baseYear, baseMonth - 1, dayNumber, 12, 0, 0));
+  const date = new Date(initial);
+
+  while (true) {
+    const y = date.getUTCFullYear();
+    const m = date.getUTCMonth() + 1;
+    const d = date.getUTCDate();
+    const weekday = date.getUTCDay(); // 0 domingo
+    const holidaysSet = getMexicoHolidaySet(y);
+    const dateKey = `${y}-${pad2(m)}-${pad2(d)}`;
+    const isSunday = weekday === 0;
+    const isHoliday = holidaysSet.has(dateKey);
+    if (!isSunday && !isHoliday) {
+      const shifted = y !== baseYear || m !== baseMonth || d !== dayNumber;
+      return {
+        year: y,
+        month: m,
+        day: d,
+        baseYear,
+        baseMonth,
+        shifted,
+      };
+    }
+    date.setUTCDate(date.getUTCDate() + 1);
+  }
+}
+
+function KPICard({
+  title,
+  value,
+  icon: Icon,
+  trend,
+  trendUp,
+  loading,
+  subtitle,
+  secondarySubtitle,
+  badge,
+  statusLabel,
+  statusColor
+}) {
   return (
     <Card className="border-border/40" data-testid={`kpi-${title.toLowerCase().replace(/\s/g, '-')}`}>
       <CardContent className="p-4 sm:p-6">
@@ -69,6 +183,22 @@ function KPICard({ title, value, icon: Icon, trend, trendUp, loading, subtitle }
             </div>
             {subtitle && (
               <div className="text-sm text-muted-foreground mt-1">{subtitle}</div>
+            )}
+            {secondarySubtitle && (
+              <div className="text-sm text-muted-foreground">{secondarySubtitle}</div>
+            )}
+            {badge && (
+              <div className="mt-2">
+                <Badge className="bg-[#002FA7]/10 text-[#002FA7] border-[#002FA7]/20">
+                  {badge}
+                </Badge>
+              </div>
+            )}
+            {statusLabel && (
+              <div className="mt-2 inline-flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: statusColor || '#9CA3AF' }} />
+                <span>{statusLabel}</span>
+              </div>
             )}
             {trend && (
               <div className={`flex items-center gap-1 mt-2 text-sm ${trendUp ? 'text-[#2A9D8F]' : 'text-[#E63946]'}`}>
@@ -121,7 +251,9 @@ export default function DashboardPage() {
   const [trends, setTrends] = useState([]);
   const [suggestions, setSuggestions] = useState([]);
   const [topVehicles, setTopVehicles] = useState([]);
+  const [brandVehicles, setBrandVehicles] = useState([]);
   const [loading, setLoading] = useState(true);
+  const latestRequestRef = useRef(0);
 
   // Filter data
   const [groups, setGroups] = useState([]);
@@ -134,10 +266,16 @@ export default function DashboardPage() {
   const [selectedBrand, setSelectedBrand] = useState('all');
   const [selectedAgency, setSelectedAgency] = useState('all');
   const [selectedSeller, setSelectedSeller] = useState('all');
+  const [monthlyCloseCalendar, setMonthlyCloseCalendar] = useState([]);
+  const [monthlyCloseDrafts, setMonthlyCloseDrafts] = useState({});
+  const [monthlyCloseLoading, setMonthlyCloseLoading] = useState(false);
+  const [monthlyCloseSavingMonth, setMonthlyCloseSavingMonth] = useState(null);
 
   // Check if user is super admin/user (can see all groups)
   const isSuperUser = user?.role === 'app_admin' || user?.role === 'app_user';
   const canSelectGroup = isSuperUser && groups.length > 1;
+  const isAppAdmin = user?.role === 'app_admin';
+  const calendarYear = 2026;
 
   // Load filter options
   useEffect(() => {
@@ -182,63 +320,132 @@ export default function DashboardPage() {
     loadSellers();
   }, [selectedAgency]);
 
-  // Reset cascading filters
-  useEffect(() => {
+  const handleGroupChange = useCallback((value) => {
+    setSelectedGroup(value);
     setSelectedBrand('all');
     setSelectedAgency('all');
     setSelectedSeller('all');
-  }, [selectedGroup]);
+  }, []);
 
-  useEffect(() => {
+  const handleBrandChange = useCallback((value) => {
+    setSelectedBrand(value);
     setSelectedAgency('all');
     setSelectedSeller('all');
-  }, [selectedBrand]);
+  }, []);
 
-  useEffect(() => {
+  const handleAgencyChange = useCallback((value) => {
+    setSelectedAgency(value);
     setSelectedSeller('all');
-  }, [selectedAgency]);
+  }, []);
+
+  const scopeParams = useMemo(() => {
+    const params = {};
+    if (selectedGroup !== 'all') params.group_id = selectedGroup;
+    if (selectedBrand !== 'all') params.brand_id = selectedBrand;
+    if (selectedAgency !== 'all') params.agency_id = selectedAgency;
+    if (selectedSeller !== 'all') params.seller_id = selectedSeller;
+    return params;
+  }, [selectedGroup, selectedBrand, selectedAgency, selectedSeller]);
 
   // Fetch dashboard data
   const fetchData = useCallback(async () => {
+    const requestId = latestRequestRef.current + 1;
+    latestRequestRef.current = requestId;
     setLoading(true);
     try {
-      const params = {};
-      if (selectedGroup !== 'all') params.group_id = selectedGroup;
-      if (selectedBrand !== 'all') params.brand_id = selectedBrand;
-      if (selectedAgency !== 'all') params.agency_id = selectedAgency;
-      if (selectedSeller !== 'all') params.seller_id = selectedSeller;
+      const params = { ...scopeParams };
 
-      const [kpisRes, trendsRes, suggestionsRes, vehiclesRes] = await Promise.all([
+      const hasSpecificBrand = selectedBrand !== 'all';
+      const isSellerScope = selectedSeller !== 'all';
+      const trendParams = isSellerScope
+        ? { ...params, months: 6 }
+        : { ...params, months: 1, granularity: 'day' };
+
+      const [kpisRes, trendsRes] = await Promise.all([
         dashboardApi.getKpis(params),
-        dashboardApi.getTrends({ ...params, months: 6 }),
-        dashboardApi.getSuggestions(selectedGroup !== 'all' ? selectedGroup : undefined),
-        vehiclesApi.getAll({ 
-          status: 'in_stock',
-          group_id: selectedGroup !== 'all' ? selectedGroup : undefined,
-          brand_id: selectedBrand !== 'all' ? selectedBrand : undefined,
-          agency_id: selectedAgency !== 'all' ? selectedAgency : undefined
-        })
+        dashboardApi.getTrends(trendParams),
       ]);
 
+      if (requestId !== latestRequestRef.current) return;
       setKpis(kpisRes.data);
-      setTrends(trendsRes.data);
-      setSuggestions(suggestionsRes.data.slice(0, 5));
-      
-      // Get top vehicles by aging
-      const sortedVehicles = vehiclesRes.data
-        .sort((a, b) => b.aging_days - a.aging_days)
-        .slice(0, 5);
-      setTopVehicles(sortedVehicles);
+      setTrends(trendsRes.data || []);
+
+      if (hasSpecificBrand) {
+        const [suggestionsRes, vehiclesRes] = await Promise.all([
+          dashboardApi.getSuggestions({
+            group_id: params.group_id,
+            brand_id: params.brand_id,
+            agency_id: params.agency_id,
+          }),
+          vehiclesApi.getAll({
+            status: 'in_stock',
+            group_id: params.group_id,
+            brand_id: params.brand_id,
+            agency_id: params.agency_id,
+          }),
+        ]);
+
+        if (requestId !== latestRequestRef.current) return;
+        setSuggestions(suggestionsRes.data.slice(0, 5));
+
+        // Get top vehicles by aging
+        const sortedVehicles = vehiclesRes.data
+          .sort((a, b) => b.aging_days - a.aging_days)
+        setBrandVehicles(sortedVehicles);
+        setTopVehicles(sortedVehicles.slice(0, 5));
+      } else {
+        setSuggestions([]);
+        setTopVehicles([]);
+        setBrandVehicles([]);
+      }
     } catch (error) {
       console.error('Error fetching dashboard data:', error);
+      setSuggestions([]);
+      setTopVehicles([]);
+      setBrandVehicles([]);
     } finally {
-      setLoading(false);
+      if (requestId === latestRequestRef.current) {
+        setLoading(false);
+      }
     }
-  }, [selectedGroup, selectedBrand, selectedAgency, selectedSeller]);
+  }, [scopeParams, selectedBrand, selectedSeller]);
 
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  const fetchMonthlyCloseCalendar = useCallback(async () => {
+    setMonthlyCloseLoading(true);
+    try {
+      const res = await dashboardApi.getMonthlyCloseCalendar({
+        year: calendarYear,
+        from_current_month: true,
+      });
+      const items = Array.isArray(res?.data?.items) ? res.data.items : [];
+      setMonthlyCloseCalendar(items);
+      setMonthlyCloseDrafts(
+        items.reduce((acc, item) => {
+          const key = String(item.month);
+          acc[key] = {
+            fiscal_close_day: item?.fiscal_close_day ?? '',
+            industry_close_day: item?.industry_close_day ?? '',
+            industry_close_month_offset: Number(item?.industry_close_month_offset ?? 0),
+          };
+          return acc;
+        }, {})
+      );
+    } catch (error) {
+      console.error('Error loading monthly close calendar:', error);
+      setMonthlyCloseCalendar([]);
+      setMonthlyCloseDrafts({});
+    } finally {
+      setMonthlyCloseLoading(false);
+    }
+  }, [calendarYear]);
+
+  useEffect(() => {
+    fetchMonthlyCloseCalendar();
+  }, [fetchMonthlyCloseCalendar]);
 
   const formatCurrency = (value) => {
     return new Intl.NumberFormat('es-MX', {
@@ -247,6 +454,22 @@ export default function DashboardPage() {
       minimumFractionDigits: 0,
       maximumFractionDigits: 0
     }).format(value);
+  };
+
+  const formatUnits = (value) => {
+    return new Intl.NumberFormat('es-MX', {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0
+    }).format(Number(value || 0));
+  };
+
+  const formatPercent = (value) => {
+    if (value === null || value === undefined || Number.isNaN(Number(value))) {
+      return 'N/D';
+    }
+    const numeric = Number(value);
+    const sign = numeric > 0 ? '+' : '';
+    return `${sign}${numeric.toFixed(1)}%`;
   };
 
   // Filter brands by selected group
@@ -276,6 +499,355 @@ export default function DashboardPage() {
 
   // Check if viewing seller level
   const isSellerView = selectedSeller !== 'all';
+  const hasSpecificBrand = selectedBrand !== 'all';
+  const currentMonthKey = useMemo(() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  }, []);
+
+  const currentMonthTrendData = useMemo(() => {
+    const exactMonth = trends.filter((point) => point?.month === currentMonthKey);
+    if (exactMonth.length > 0) return exactMonth;
+    if (trends.length > 0) return [trends[trends.length - 1]];
+    return [];
+  }, [trends, currentMonthKey]);
+
+  const latestElapsedTrendPoint = useMemo(() => {
+    if (!currentMonthTrendData.length) return null;
+    const reversed = [...currentMonthTrendData].reverse();
+    return (
+      reversed.find((point) => point?.is_elapsed_day !== false && point?.units !== null && point?.units !== undefined)
+      || reversed.find((point) => point?.units !== null && point?.units !== undefined)
+      || currentMonthTrendData[currentMonthTrendData.length - 1]
+    );
+  }, [currentMonthTrendData]);
+
+  const hasObjectiveData = currentMonthTrendData.some((point) => Number(point?.objective_units || 0) > 0);
+  const hasAgingData = agingData.some((item) => Number(item.value || 0) > 0);
+  const salesTrendXAxisKey = currentMonthTrendData.some((point) => point?.day_label) ? 'day_label' : 'month';
+  const salesCalendarLabel = useMemo(() => {
+    let year = Number(currentMonthKey.split('-')[0]);
+    let month = Number(currentMonthKey.split('-')[1]);
+    if (currentMonthTrendData.length > 0 && currentMonthTrendData[0]?.month) {
+      const [trendYear, trendMonth] = String(currentMonthTrendData[0].month).split('-').map(Number);
+      if (Number.isFinite(trendYear) && Number.isFinite(trendMonth)) {
+        year = trendYear;
+        month = trendMonth;
+      }
+    }
+    const monthEndDay = new Date(year, month, 0).getDate();
+    const monthName = new Date(year, month - 1, 1).toLocaleDateString('es-MX', { month: 'long' });
+    return `Calendario: 1 al ${monthEndDay} de ${monthName} ${year}`;
+  }, [currentMonthKey, currentMonthTrendData]);
+
+  const salesCalendarScope = useMemo(() => {
+    let year = Number(currentMonthKey.split('-')[0]);
+    let month = Number(currentMonthKey.split('-')[1]);
+    if (currentMonthTrendData.length > 0 && currentMonthTrendData[0]?.month) {
+      const [trendYear, trendMonth] = String(currentMonthTrendData[0].month).split('-').map(Number);
+      if (Number.isFinite(trendYear) && Number.isFinite(trendMonth)) {
+        year = trendYear;
+        month = trendMonth;
+      }
+    }
+    return {
+      year,
+      month,
+      holidays: getMexicoHolidaySet(year),
+    };
+  }, [currentMonthKey, currentMonthTrendData]);
+
+  const salesXAxisTick = useMemo(() => {
+    if (salesTrendXAxisKey !== 'day_label') {
+      return { fontSize: 12 };
+    }
+
+    return ({ x, y, payload }) => {
+      const label = String(payload?.value ?? '');
+      const day = Number(label);
+      let fillColor = 'hsl(var(--muted-foreground))';
+
+      if (Number.isFinite(day) && day > 0) {
+        const dateKey = `${salesCalendarScope.year}-${pad2(salesCalendarScope.month)}-${pad2(day)}`;
+        const weekDay = new Date(salesCalendarScope.year, salesCalendarScope.month - 1, day).getDay();
+        const isSunday = weekDay === 0;
+        const isSaturday = weekDay === 6;
+        const isHoliday = salesCalendarScope.holidays.has(dateKey);
+
+        if (isSunday || isHoliday) {
+          fillColor = '#E63946'; // rojo
+        } else if (isSaturday) {
+          fillColor = '#C28A00'; // amarillo (tono legible)
+        } else {
+          fillColor = '#2A9D8F'; // verde
+        }
+      }
+
+      return (
+        <text x={x} y={y + 12} textAnchor="middle" fill={fillColor} fontSize={12}>
+          {label}
+        </text>
+      );
+    };
+  }, [salesTrendXAxisKey, salesCalendarScope]);
+
+  const agingGaussianData = useMemo(() => {
+    if (!kpis?.aging_buckets) return [];
+    const b0 = Number(kpis.aging_buckets['0-30'] || 0);
+    const b1 = Number(kpis.aging_buckets['31-60'] || 0);
+    const b2 = Number(kpis.aging_buckets['61-90'] || 0);
+    const b3 = Number(kpis.aging_buckets['90+'] || 0);
+    const total = b0 + b1 + b2 + b3;
+    if (total <= 0) return [];
+
+    const baseKnownSum = (b0 * 15) + (b1 * 45) + (b2 * 75);
+    const estimatedOpenBucketCenter = b3 > 0
+      ? Math.max(95, Math.min(240, ((Number(kpis.avg_aging_days || 0) * total) - baseKnownSum) / b3))
+      : 120;
+
+    const weightedPoints = [
+      { x: 15, w: b0 },
+      { x: 45, w: b1 },
+      { x: 75, w: b2 },
+      { x: estimatedOpenBucketCenter, w: b3 }
+    ].filter((point) => point.w > 0);
+
+    if (!weightedPoints.length) return [];
+
+    const weightedSum = weightedPoints.reduce((acc, point) => acc + (point.x * point.w), 0);
+    const mean = weightedSum / total;
+    const variance = weightedPoints.reduce((acc, point) => acc + (point.w * ((point.x - mean) ** 2)), 0) / total;
+    const sigma = Math.max(Math.sqrt(variance), 8);
+    const maxBucketCount = Math.max(b0, b1, b2, b3, 1);
+    const maxX = Math.ceil(Math.max(180, mean + (sigma * 3), estimatedOpenBucketCenter + 40) / 5) * 5;
+
+    const raw = [];
+    for (let x = 0; x <= maxX; x += 5) {
+      const z = (x - mean) / sigma;
+      const density = Math.exp(-0.5 * z * z) / (sigma * Math.sqrt(2 * Math.PI));
+      raw.push({ aging_days: x, density });
+    }
+    const maxDensity = Math.max(...raw.map((point) => point.density), 0.000001);
+
+    return raw.map((point) => ({
+      aging_days: point.aging_days,
+      gauss_value: Number(((point.density / maxDensity) * maxBucketCount).toFixed(2))
+    }));
+  }, [kpis]);
+
+  const currentMonthSummary = useMemo(() => {
+    if (!latestElapsedTrendPoint) {
+      return {
+        units: 0,
+        objectiveUnits: 0,
+        objectiveGapPct: null,
+      };
+    }
+
+    const point = latestElapsedTrendPoint || {};
+    const units = Number(point?.units || 0);
+    const objectiveUnits = Number(point?.weighted_objective_units || 0);
+    const objectiveGapPct = objectiveUnits > 0
+      ? ((units - objectiveUnits) / objectiveUnits) * 100
+      : null;
+
+    return {
+      units,
+      objectiveUnits,
+      objectiveGapPct,
+    };
+  }, [latestElapsedTrendPoint]);
+
+  const objectiveSource = useMemo(() => {
+    if (!currentMonthTrendData.length) return 'none';
+    const sourcePoint = latestElapsedTrendPoint || currentMonthTrendData[currentMonthTrendData.length - 1];
+    return sourcePoint?.objective_source || 'none';
+  }, [currentMonthTrendData, latestElapsedTrendPoint]);
+
+  const objectiveLegendName = objectiveSource === 'benchmark_last_year'
+    ? 'Objetivo ponderado (benchmark)'
+    : 'Objetivo ponderado';
+
+  const monthlyObjectiveUnits = useMemo(() => {
+    const sourcePoint = latestElapsedTrendPoint || currentMonthTrendData[currentMonthTrendData.length - 1];
+    return Number(sourcePoint?.objective_units || 0);
+  }, [latestElapsedTrendPoint, currentMonthTrendData]);
+
+  const projectedMonthUnits = useMemo(() => {
+    if (!currentMonthTrendData.length) {
+      return Number(kpis?.units_sold_month || 0);
+    }
+    const monthEndForecastPoint = [...currentMonthTrendData]
+      .reverse()
+      .find((point) => point?.forecast_units !== null && point?.forecast_units !== undefined);
+    return Number(monthEndForecastPoint?.forecast_units || 0);
+  }, [currentMonthTrendData, kpis]);
+
+  const salesObjectiveLabel = monthlyObjectiveUnits > 0
+    ? `Objetivo mes: ${formatUnits(monthlyObjectiveUnits)} unidades`
+    : 'Objetivo mes: N/D';
+
+  const salesForecastLabel = `Pronóstico cierre: ${formatUnits(projectedMonthUnits)} unidades`;
+
+  const salesObjectiveSignal = useMemo(() => {
+    if (monthlyObjectiveUnits <= 0) {
+      return { label: 'Semáforo: sin objetivo', color: '#9CA3AF' };
+    }
+    const ratio = projectedMonthUnits / monthlyObjectiveUnits;
+    if (ratio >= 1) {
+      return { label: 'Semáforo: verde (en ruta)', color: '#2A9D8F' };
+    }
+    if (ratio >= 0.9) {
+      return { label: 'Semáforo: amarillo (cerca)', color: '#E9C46A' };
+    }
+    return { label: 'Semáforo: rojo (riesgo)', color: '#E63946' };
+  }, [monthlyObjectiveUnits, projectedMonthUnits]);
+
+  const sellerBenchmarkAverageLabel = useMemo(() => {
+    const benchmark = Number(kpis?.benchmark_avg_units_per_seller_month || 0);
+    if (!benchmark) {
+      return 'Benchmark prom. ventas/vendedor: N/D';
+    }
+    return `Benchmark prom. ventas/vendedor: ${benchmark.toFixed(1)}`;
+  }, [kpis]);
+
+  const sellerBenchmarkDeltaLabel = useMemo(() => {
+    const deltaPct = kpis?.avg_units_per_seller_vs_benchmark_pct;
+    if (deltaPct === null || deltaPct === undefined) {
+      return null;
+    }
+    return `Brecha vs benchmark: ${formatPercent(deltaPct)}`;
+  }, [kpis]);
+
+  const sellerChallengeBadge = useMemo(() => {
+    if (!kpis?.seller_challenge_tier || kpis.seller_challenge_tier === 'Sin benchmark') {
+      return 'Desafío: Define benchmark';
+    }
+    return `Desafío ${kpis.seller_challenge_tier}`;
+  }, [kpis]);
+
+  const currentMonthCloseConfig = useMemo(() => {
+    return monthlyCloseCalendar.find(
+      (item) => Number(item?.year) === Number(salesCalendarScope.year)
+        && Number(item?.month) === Number(salesCalendarScope.month)
+    ) || null;
+  }, [monthlyCloseCalendar, salesCalendarScope]);
+
+  const currentFiscalCloseDay = useMemo(() => {
+    const day = Number(currentMonthCloseConfig?.fiscal_close_day);
+    return Number.isFinite(day) && day > 0 ? day : null;
+  }, [currentMonthCloseConfig]);
+
+  const currentIndustryOperationalMarker = useMemo(() => {
+    const currentYear = Number(salesCalendarScope.year);
+    const currentMonth = Number(salesCalendarScope.month);
+    const candidates = monthlyCloseCalendar
+      .map((item) => {
+        const scheduledDay = Number(item?.industry_close_day);
+        const monthOffset = Number(item?.industry_close_month_offset ?? 0);
+        const effective = computeIndustryEffectiveDate(
+          Number(item?.year),
+          Number(item?.month),
+          scheduledDay,
+          monthOffset
+        );
+        if (!effective) return null;
+        return {
+          sourceYear: Number(item?.year),
+          sourceMonth: Number(item?.month),
+          scheduledDay,
+          monthOffset,
+          effective,
+        };
+      })
+      .filter(Boolean)
+      .filter((row) => row.effective.year === currentYear && row.effective.month === currentMonth);
+
+    if (!candidates.length) return null;
+    const shiftedFromPrevious = candidates.find(
+      (row) => row.sourceYear !== currentYear || row.sourceMonth !== currentMonth
+    );
+    return shiftedFromPrevious || candidates[0];
+  }, [monthlyCloseCalendar, salesCalendarScope]);
+
+  const handleMonthlyCloseDraftChange = useCallback((month, field, value) => {
+    const key = String(month);
+    setMonthlyCloseDrafts((prev) => ({
+      ...prev,
+      [key]: {
+        ...(prev[key] || {}),
+        [field]: value,
+      },
+    }));
+  }, []);
+
+  const handleMonthlyCloseSaveMonth = useCallback(async (month, daysInMonth) => {
+    if (!isAppAdmin) return;
+
+    const key = String(month);
+    const draft = monthlyCloseDrafts[key] || {};
+    const monthLabel = new Date(calendarYear, Number(month) - 1, 1).toLocaleDateString('es-MX', {
+      month: 'long',
+      year: 'numeric',
+    });
+
+    try {
+      const parseCloseDay = (rawValue, maxDay, label) => {
+        const cleaned = String(rawValue ?? '').trim();
+        if (!cleaned) return null;
+        const parsed = Number(cleaned);
+        if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 1) {
+          throw new Error(`${label}: captura un día válido.`);
+        }
+        if (parsed > maxDay) {
+          throw new Error(`${label}: no puede ser mayor a ${maxDay}.`);
+        }
+        return parsed;
+      };
+
+      setMonthlyCloseSavingMonth(Number(month));
+      const industryMonthOffsetRaw = Number(draft?.industry_close_month_offset ?? 0);
+      const industryMonthOffset = [0, 1].includes(industryMonthOffsetRaw) ? industryMonthOffsetRaw : 0;
+      const industryBaseDate = new Date(Date.UTC(calendarYear, (Number(month) - 1) + industryMonthOffset, 1));
+      const industryTargetYear = industryBaseDate.getUTCFullYear();
+      const industryTargetMonth = industryBaseDate.getUTCMonth() + 1;
+      const industryDaysInTargetMonth = new Date(industryTargetYear, industryTargetMonth, 0).getDate();
+
+      const fiscalDay = parseCloseDay(draft?.fiscal_close_day, daysInMonth, 'Cierre fiscal');
+      const industryDay = parseCloseDay(
+        draft?.industry_close_day,
+        industryDaysInTargetMonth,
+        `Cierre industria (${industryMonthOffset === 1 ? 'mes siguiente' : 'mismo mes'})`
+      );
+
+      await dashboardApi.upsertMonthlyClose({
+        year: calendarYear,
+        month: Number(month),
+        fiscal_close_day: fiscalDay,
+        industry_close_day: industryDay,
+        industry_close_month_offset: industryMonthOffset,
+      });
+
+      toast.success(`Cierres guardados para ${monthLabel}.`);
+      await Promise.all([fetchMonthlyCloseCalendar(), fetchData()]);
+    } catch (error) {
+      console.error('Error saving monthly close month:', error);
+      toast.error(error?.message || 'No se pudo guardar el cierre mensual.');
+    } finally {
+      setMonthlyCloseSavingMonth(null);
+    }
+  }, [isAppAdmin, monthlyCloseDrafts, calendarYear, fetchMonthlyCloseCalendar, fetchData]);
+
+  const fiscalCloseXAxisValue = currentFiscalCloseDay ? pad2(currentFiscalCloseDay) : null;
+  const industryCloseXAxisValue = currentIndustryOperationalMarker?.effective?.day
+    ? pad2(currentIndustryOperationalMarker.effective.day)
+    : null;
+  const industryCloseXAxisLabel = currentIndustryOperationalMarker?.effective?.shifted
+    ? 'Cierre industria (traslado)'
+    : 'Cierre industria';
+  const industryCloseDisplayLabel = currentIndustryOperationalMarker?.effective
+    ? `${pad2(currentIndustryOperationalMarker.effective.day)}/${pad2(currentIndustryOperationalMarker.effective.month)}`
+    : 'Sin captura';
 
   return (
     <div className="space-y-6" data-testid="dashboard-page">
@@ -289,7 +861,7 @@ export default function DashboardPage() {
                 <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
                   <Buildings size={12} /> Grupo
                 </label>
-                <Select value={selectedGroup} onValueChange={setSelectedGroup}>
+                <Select value={selectedGroup} onValueChange={handleGroupChange}>
                   <SelectTrigger className="w-[180px]" data-testid="filter-group">
                     <SelectValue placeholder="Todos los grupos" />
                   </SelectTrigger>
@@ -324,7 +896,7 @@ export default function DashboardPage() {
               </label>
               <Select 
                 value={selectedBrand} 
-                onValueChange={setSelectedBrand}
+                onValueChange={handleBrandChange}
                 disabled={canSelectGroup && selectedGroup === 'all'}
               >
                 <SelectTrigger className="w-[180px]" data-testid="filter-brand">
@@ -348,7 +920,7 @@ export default function DashboardPage() {
               </label>
               <Select 
                 value={selectedAgency} 
-                onValueChange={setSelectedAgency}
+                onValueChange={handleAgencyChange}
                 disabled={selectedBrand === 'all'}
               >
                 <SelectTrigger className="w-[180px]" data-testid="filter-agency">
@@ -415,28 +987,34 @@ export default function DashboardPage() {
             icon={CurrencyDollar}
             loading={loading}
           />
+        <KPICard
+          title="Costo Financiero Mes"
+          value={kpis ? formatCurrency(kpis.total_financial_cost) : '$0'}
+          icon={Clock}
+          loading={loading}
+        />
           <KPICard
-            title="Costo Financiero"
-            value={kpis ? formatCurrency(kpis.total_financial_cost) : '$0'}
-            icon={Clock}
-            loading={loading}
-          />
-          <KPICard
-            title="Promedio Aging"
-            value={`${kpis?.avg_aging_days || 0} días`}
-            icon={ChartBar}
+            title="Vendedores Totales"
+            value={kpis?.seller_count || 0}
+            icon={User}
+            subtitle={`Promedio ventas/vendedor: ${Number(kpis?.avg_units_per_seller_month || 0).toFixed(1)}`}
+            secondarySubtitle={sellerBenchmarkAverageLabel}
+            badge={sellerChallengeBadge}
             loading={loading}
           />
         </div>
       )}
 
       {/* KPI Grid - Sales Performance */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         <KPICard
           title="Ventas del Mes"
           value={kpis?.units_sold_month || 0}
           icon={TrendUp}
-          subtitle="unidades"
+          subtitle={salesObjectiveLabel}
+          secondarySubtitle={salesForecastLabel}
+          statusLabel={salesObjectiveSignal.label}
+          statusColor={salesObjectiveSignal.color}
           loading={loading}
         />
         <KPICard
@@ -449,6 +1027,13 @@ export default function DashboardPage() {
           title="Comisiones del Mes"
           value={kpis ? formatCurrency(kpis.commissions_month || 0) : '$0'}
           icon={CurrencyDollar}
+          loading={loading}
+        />
+        <KPICard
+          title="Utilidad Bruta Mes"
+          value={kpis ? formatCurrency(kpis.gross_profit_month || 0) : '$0'}
+          icon={CurrencyDollar}
+          subtitle={kpis ? `Margen: ${formatPercent(kpis.gross_margin_pct_month || 0)}` : ''}
           loading={loading}
         />
         {!isSellerView ? (
@@ -470,57 +1055,393 @@ export default function DashboardPage() {
         )}
       </div>
 
+      <Card className="border-border/40" data-testid="monthly-close-card">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-lg" style={{ fontFamily: 'Cabinet Grotesk' }}>
+            Calendario Operativo 2026: Cierre Fiscal e Industria
+          </CardTitle>
+          <p className="text-xs text-muted-foreground">
+            Resto del año 2026. Domingos y feriados LFT en rojo. Este calendario aplica para todas las marcas y grupos.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <Badge className="bg-[#B45309]/10 text-[#B45309] border-[#B45309]/30">F cierre fiscal</Badge>
+            <Badge className="bg-[#0F766E]/10 text-[#0F766E] border-[#0F766E]/30">I cierre industria</Badge>
+            <Badge className="bg-[#C28A00]/10 text-[#A16207] border-[#C28A00]/30">Sábado (medio día hábil)</Badge>
+            <Badge className="bg-[#E63946]/10 text-[#B91C1C] border-[#E63946]/30">Domingo / Feriado LFT</Badge>
+          </div>
+
+          <div className="rounded-md border border-border/50 bg-muted/20 p-3 text-sm">
+            <span className="font-medium">Mes actual en lienzo:</span>{' '}
+            {new Date(salesCalendarScope.year, salesCalendarScope.month - 1, 1).toLocaleDateString('es-MX', { month: 'long', year: 'numeric' })}{' '}
+            · Cierre fiscal: {currentFiscalCloseDay || 'Sin captura'} · Cierre industria:{' '}
+            {industryCloseDisplayLabel}
+            {currentIndustryOperationalMarker?.effective?.shifted && (
+              <>
+                {' '}(
+                traslado desde{' '}
+                {new Date(
+                  currentIndustryOperationalMarker.sourceYear,
+                  currentIndustryOperationalMarker.sourceMonth - 1,
+                  1
+                ).toLocaleDateString('es-MX', { month: 'long' })}
+                )
+              </>
+            )}
+          </div>
+
+          {monthlyCloseLoading ? (
+            <Skeleton className="h-64 w-full" />
+          ) : monthlyCloseCalendar.length === 0 ? (
+            <div className="rounded-md border border-border/50 bg-muted/20 p-4 flex items-center justify-between gap-3">
+              <p className="text-sm text-muted-foreground">
+                No se pudo cargar el calendario operativo en este momento.
+              </p>
+              <Button variant="outline" onClick={fetchMonthlyCloseCalendar}>
+                Reintentar
+              </Button>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+              {monthlyCloseCalendar.map((item) => {
+                const month = Number(item?.month || 0);
+                const daysInMonth = Number(item?.days_in_month || new Date(calendarYear, month, 0).getDate());
+                const monthName = new Date(calendarYear, month - 1, 1).toLocaleDateString('es-MX', {
+                  month: 'long',
+                  year: 'numeric',
+                });
+                const key = String(month);
+                const draft = monthlyCloseDrafts[key] || {};
+                const fiscalDraft = draft?.fiscal_close_day ?? '';
+                const industryDraft = draft?.industry_close_day ?? '';
+                const industryMonthOffsetDraft = Number(draft?.industry_close_month_offset ?? 0);
+                const industryTargetBaseDate = new Date(
+                  Date.UTC(calendarYear, (month - 1) + industryMonthOffsetDraft, 1)
+                );
+                const industryTargetYear = industryTargetBaseDate.getUTCFullYear();
+                const industryTargetMonth = industryTargetBaseDate.getUTCMonth() + 1;
+                const industryTargetDaysInMonth = new Date(industryTargetYear, industryTargetMonth, 0).getDate();
+                const industryTargetLabel = new Date(
+                  industryTargetYear,
+                  industryTargetMonth - 1,
+                  1
+                ).toLocaleDateString('es-MX', { month: 'long', year: 'numeric' });
+                const holidaysSet = new Set(
+                  (item?.holidays || []).map((day) => `${calendarYear}-${pad2(month)}-${pad2(day)}`)
+                );
+                const cells = buildMonthCalendarCells(calendarYear, month, holidaysSet);
+
+                return (
+                  <div key={`month-card-${month}`} className="rounded-md border border-border/50 p-3 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="font-semibold capitalize">{monthName}</div>
+                      <Badge className="bg-muted text-foreground border-border/60">{daysInMonth} días</Badge>
+                    </div>
+
+                    <div className="grid grid-cols-7 gap-1 text-[11px] font-medium text-muted-foreground">
+                      {['L', 'M', 'M', 'J', 'V', 'S', 'D'].map((label, idx) => (
+                        <div key={`hdr-${month}-${idx}`} className={`text-center ${label === 'D' ? 'text-[#B91C1C]' : ''}`}>
+                          {label}
+                        </div>
+                      ))}
+                    </div>
+                    <div className="grid grid-cols-7 gap-1">
+                      {cells.map((cell, index) => {
+                        if (!cell) {
+                          return <div key={`empty-${month}-${index}`} className="h-7 rounded-sm bg-transparent" />;
+                        }
+                        const isFiscal = Number(fiscalDraft) === Number(cell.day);
+                        const isIndustry = industryMonthOffsetDraft === 0 && Number(industryDraft) === Number(cell.day);
+                        const emergencyDay = cell.isSunday || cell.isHoliday;
+                        const semiBusinessDay = cell.isSaturday && !emergencyDay;
+
+                        return (
+                          <div
+                            key={`day-${month}-${cell.day}`}
+                            className={[
+                              'h-7 rounded-sm border text-[11px] flex items-center justify-center font-medium',
+                              emergencyDay
+                                ? 'bg-[#E63946]/10 text-[#B91C1C] border-[#E63946]/30'
+                                : semiBusinessDay
+                                  ? 'bg-[#C28A00]/10 text-[#A16207] border-[#C28A00]/30'
+                                  : 'bg-muted/30 border-border/40',
+                              isFiscal ? 'ring-1 ring-[#B45309]' : '',
+                              isIndustry ? 'ring-1 ring-[#0F766E]' : '',
+                              (isFiscal && isIndustry) ? 'ring-2 ring-[#002FA7]' : '',
+                            ].filter(Boolean).join(' ')}
+                          >
+                            {cell.day}
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {(() => {
+                      const effective = computeIndustryEffectiveDate(
+                        calendarYear,
+                        month,
+                        industryDraft,
+                        industryMonthOffsetDraft
+                      );
+                      if (!effective) return null;
+                      const effectiveLabel = new Date(
+                        effective.year,
+                        effective.month - 1,
+                        1
+                      ).toLocaleDateString('es-MX', { month: 'long' });
+                      const targetLabel = new Date(
+                        effective.baseYear,
+                        effective.baseMonth - 1,
+                        1
+                      ).toLocaleDateString('es-MX', { month: 'long' });
+                      if (!effective.shifted && industryMonthOffsetDraft === 0) return null;
+                      return (
+                        <p className="text-[11px] text-muted-foreground">
+                          Cierre industria programado: día {industryDraft || 'N/D'} de {targetLabel}
+                          {effective.shifted
+                            ? ` · Operativo: día ${effective.day} de ${effectiveLabel} (traslado automático por domingo/feriado).`
+                            : ` · Operativo: día ${effective.day} de ${effectiveLabel}.`}
+                        </p>
+                      );
+                    })()}
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium text-muted-foreground">Cierre fiscal (día)</label>
+                        <Input
+                          type="number"
+                          min="1"
+                          max={daysInMonth}
+                          step="1"
+                          value={fiscalDraft}
+                          onChange={(e) => handleMonthlyCloseDraftChange(month, 'fiscal_close_day', e.target.value)}
+                          placeholder="Ej. 26"
+                          disabled={!isAppAdmin}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium text-muted-foreground">Mes cierre industria</label>
+                        <Select
+                          value={String(industryMonthOffsetDraft)}
+                          onValueChange={(value) => handleMonthlyCloseDraftChange(month, 'industry_close_month_offset', Number(value))}
+                          disabled={!isAppAdmin}
+                        >
+                          <SelectTrigger className="h-10">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="0">Mismo mes</SelectItem>
+                            <SelectItem value="1">Mes siguiente</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium text-muted-foreground">Cierre industria (día)</label>
+                        <Input
+                          type="number"
+                          min="1"
+                          max={industryTargetDaysInMonth}
+                          step="1"
+                          value={industryDraft}
+                          onChange={(e) => handleMonthlyCloseDraftChange(month, 'industry_close_day', e.target.value)}
+                          placeholder={`Ej. ${Math.min(30, industryTargetDaysInMonth)}`}
+                          disabled={!isAppAdmin}
+                        />
+                        <p className="text-[11px] text-muted-foreground">
+                          Mes objetivo: {industryTargetLabel}
+                        </p>
+                      </div>
+                    </div>
+                    <Button
+                      className="w-full"
+                      onClick={() => handleMonthlyCloseSaveMonth(month, daysInMonth)}
+                      disabled={!isAppAdmin || monthlyCloseSavingMonth === month}
+                    >
+                      {monthlyCloseSavingMonth === month ? 'Guardando...' : 'Guardar Mes'}
+                    </Button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {!isAppAdmin && (
+            <p className="text-xs text-muted-foreground">
+              Solo App Admin puede editar los días de cierre fiscal e industria.
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
+      {!isSellerView && (
+        <Card className="border-border/40">
+          <CardContent className="p-4 flex flex-wrap items-center gap-2">
+            <Badge className="bg-[#E9C46A]/15 text-[#9b7a1b] border-[#E9C46A]/40">
+              {sellerChallengeBadge}
+            </Badge>
+            <Badge className="bg-[#002FA7]/10 text-[#002FA7] border-[#002FA7]/20">
+              Promedio actual: {Number(kpis?.avg_units_per_seller_month || 0).toFixed(1)} unidades/vendedor
+            </Badge>
+            <Badge className="bg-[#2A9D8F]/10 text-[#2A9D8F] border-[#2A9D8F]/30">
+              {sellerBenchmarkAverageLabel}
+            </Badge>
+            {sellerBenchmarkDeltaLabel && (
+              <Badge className="bg-muted text-foreground border-border/60">
+                {sellerBenchmarkDeltaLabel}
+              </Badge>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
       {/* Charts Row */}
       <div className="grid lg:grid-cols-2 gap-6">
         {/* Sales Trend Chart */}
         <Card className="border-border/40" data-testid="sales-trend-chart">
           <CardHeader className="pb-2">
             <CardTitle className="text-lg" style={{ fontFamily: 'Cabinet Grotesk' }}>
-              Tendencia de Ventas {isSellerView && '(Personal)'}
+              Ventas del Mes Actual: Objetivo, Real y Pronóstico {isSellerView && '(Personal)'}
             </CardTitle>
+            <p className="text-xs text-muted-foreground">{salesCalendarLabel}</p>
           </CardHeader>
           <CardContent>
             {loading ? (
               <Skeleton className="h-64 w-full" />
             ) : (
-              <div className="h-64">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={trends}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                    <XAxis dataKey="month" tick={{ fontSize: 12 }} stroke="hsl(var(--muted-foreground))" />
-                    <YAxis tick={{ fontSize: 12 }} stroke="hsl(var(--muted-foreground))" />
-                    <Tooltip
-                      contentStyle={{
-                        backgroundColor: 'hsl(var(--card))',
-                        border: '1px solid hsl(var(--border))',
-                        borderRadius: '6px'
-                      }}
-                      formatter={(value, name) => [
-                        name === 'units' ? value : formatCurrency(value),
-                        name === 'units' ? 'Unidades' : name === 'revenue' ? 'Ingresos' : 'Comisión'
-                      ]}
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey="units"
-                      stroke="#002FA7"
-                      strokeWidth={2}
-                      dot={{ fill: '#002FA7' }}
-                      name="units"
-                    />
-                    {isSellerView && (
+              <>
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={currentMonthTrendData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                      <XAxis
+                        dataKey={salesTrendXAxisKey}
+                        tick={salesXAxisTick}
+                        stroke="hsl(var(--muted-foreground))"
+                        minTickGap={16}
+                      />
+                      <YAxis tick={{ fontSize: 12 }} stroke="hsl(var(--muted-foreground))" />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: 'hsl(var(--card))',
+                          border: '1px solid hsl(var(--border))',
+                          borderRadius: '6px'
+                        }}
+                        formatter={(value, name) => [
+                          formatUnits(value),
+                          name
+                        ]}
+                      />
+                      <Legend
+                        payload={[
+                          {
+                            value: 'Año pasado (mismo mes)',
+                            type: 'line',
+                            id: 'legend-last-year',
+                            color: '#6B7280'
+                          },
+                          {
+                            value: objectiveLegendName,
+                            type: 'line',
+                            id: 'legend-weighted-objective',
+                            color: '#E9C46A'
+                          },
+                          {
+                            value: 'Pronóstico tendencia',
+                            type: 'line',
+                            id: 'legend-forecast',
+                            color: '#2A9D8F'
+                          },
+                          {
+                            value: 'Ventas reales',
+                            type: 'line',
+                            id: 'legend-real-sales',
+                            color: '#002FA7'
+                          }
+                        ]}
+                      />
+                      {salesTrendXAxisKey === 'day_label' && fiscalCloseXAxisValue && (
+                        <ReferenceLine
+                          x={fiscalCloseXAxisValue}
+                          stroke="#B45309"
+                          strokeDasharray="4 4"
+                          ifOverflow="extendDomain"
+                          label={{ value: 'Cierre fiscal', position: 'insideTopLeft', fill: '#B45309', fontSize: 10 }}
+                        />
+                      )}
+                      {salesTrendXAxisKey === 'day_label' && industryCloseXAxisValue && (
+                        <ReferenceLine
+                          x={industryCloseXAxisValue}
+                          stroke="#0F766E"
+                          strokeDasharray="4 4"
+                          ifOverflow="extendDomain"
+                          label={{ value: industryCloseXAxisLabel, position: 'insideTopRight', fill: '#0F766E', fontSize: 10 }}
+                        />
+                      )}
                       <Line
                         type="monotone"
-                        dataKey="commission"
+                        dataKey="last_year_units"
+                        stroke="#6B7280"
+                        strokeWidth={2}
+                        dot={{ fill: '#6B7280' }}
+                        name="Año pasado (mismo mes)"
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="weighted_objective_units"
+                        stroke="#E9C46A"
+                        strokeWidth={2}
+                        dot={{ fill: '#E9C46A' }}
+                        name={objectiveLegendName}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="units"
+                        stroke="#002FA7"
+                        strokeWidth={2}
+                        dot={{ fill: '#002FA7' }}
+                        name="Ventas reales"
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="forecast_units"
                         stroke="#2A9D8F"
                         strokeWidth={2}
+                        strokeDasharray="6 4"
                         dot={{ fill: '#2A9D8F' }}
-                        name="commission"
+                        name="Pronóstico tendencia"
                       />
-                    )}
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+                {!hasObjectiveData && (
+                  <p className="text-xs text-muted-foreground mt-3">
+                    No hay objetivos aprobados cargados en este alcance. La línea de objetivo ponderado se mostrará al registrar objetivos por agencia o vendedor.
+                  </p>
+                )}
+                {hasObjectiveData && objectiveSource === 'benchmark_last_year' && (
+                  <p className="text-xs text-muted-foreground mt-3">
+                    Objetivo ponderado estimado con benchmark del mismo mes del año pasado (no hay objetivo aprobado vigente).
+                  </p>
+                )}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4">
+                  <div className="rounded-md border border-border/50 bg-muted/20 p-3">
+                    <div className="text-xs uppercase tracking-wide text-muted-foreground">Mes actual</div>
+                    <div className="text-lg font-semibold">{formatUnits(currentMonthSummary.units)}</div>
+                    <div className="text-xs text-muted-foreground">ventas reales</div>
+                  </div>
+                  <div className="rounded-md border border-border/50 bg-muted/20 p-3">
+                    <div className="text-xs uppercase tracking-wide text-muted-foreground">Objetivo mes actual</div>
+                    <div className="text-lg font-semibold">{formatUnits(currentMonthSummary.objectiveUnits)}</div>
+                    <div className="text-xs text-muted-foreground">objetivo ponderado</div>
+                  </div>
+                  <div className="rounded-md border border-border/50 bg-muted/20 p-3">
+                    <div className="text-xs uppercase tracking-wide text-muted-foreground">Brecha vs objetivo</div>
+                    <div className="text-lg font-semibold">{formatPercent(currentMonthSummary.objectiveGapPct)}</div>
+                    <div className="text-xs text-muted-foreground">real contra objetivo</div>
+                  </div>
+                </div>
+              </>
             )}
           </CardContent>
         </Card>
@@ -534,33 +1455,47 @@ export default function DashboardPage() {
               </CardTitle>
             </CardHeader>
             <CardContent>
+              {!hasSpecificBrand && (
+                <p className="text-xs text-muted-foreground mb-3">
+                  Mostrando todas las marcas del alcance seleccionado.
+                </p>
+              )}
               {loading ? (
                 <Skeleton className="h-64 w-full" />
-              ) : (
+              ) : hasAgingData ? (
                 <div className="h-64 flex items-center">
                   <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie
-                        data={agingData}
-                        cx="50%"
-                        cy="50%"
-                        innerRadius={60}
-                        outerRadius={90}
-                        paddingAngle={2}
-                        dataKey="value"
-                      >
-                        {agingData.map((entry, index) => (
-                          <Cell key={`cell-${index}`} fill={entry.fill} />
-                        ))}
-                      </Pie>
+                    <LineChart data={agingGaussianData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                      <XAxis
+                        type="number"
+                        dataKey="aging_days"
+                        tick={{ fontSize: 12 }}
+                        stroke="hsl(var(--muted-foreground))"
+                      />
+                      <YAxis
+                        tick={{ fontSize: 12 }}
+                        stroke="hsl(var(--muted-foreground))"
+                        allowDecimals={false}
+                      />
                       <Tooltip
                         contentStyle={{
                           backgroundColor: 'hsl(var(--card))',
                           border: '1px solid hsl(var(--border))',
                           borderRadius: '6px'
                         }}
+                        formatter={(value) => [Number(value || 0).toFixed(1), 'Campana Gauss (estimada)']}
+                        labelFormatter={(label) => `${Number(label || 0).toFixed(0)} días`}
                       />
-                    </PieChart>
+                      <Line
+                        type="monotone"
+                        dataKey="gauss_value"
+                        stroke="#002FA7"
+                        strokeWidth={3}
+                        dot={false}
+                        name="Campana de Aging"
+                      />
+                    </LineChart>
                   </ResponsiveContainer>
                   <div className="space-y-2 ml-4">
                     {agingData.map((item, index) => (
@@ -571,6 +1506,10 @@ export default function DashboardPage() {
                       </div>
                     ))}
                   </div>
+                </div>
+              ) : (
+                <div className="h-64 flex items-center justify-center text-center text-muted-foreground">
+                  No hay inventario en stock para mostrar aging en este alcance.
                 </div>
               )}
             </CardContent>
@@ -613,12 +1552,12 @@ export default function DashboardPage() {
 
       {/* Bottom Row */}
       <div className="grid lg:grid-cols-2 gap-6">
-        {/* Top Aging Vehicles (only for non-seller view) */}
-        {!isSellerView && (
+        {/* Vehicle Detail (only for non-seller view when brand selected) */}
+        {!isSellerView && hasSpecificBrand && (
           <Card className="border-border/40" data-testid="top-aging-vehicles">
             <CardHeader className="pb-2 flex flex-row items-center justify-between">
               <CardTitle className="text-lg" style={{ fontFamily: 'Cabinet Grotesk' }}>
-                Vehículos con Mayor Aging
+                Detalle Por Vehículo
               </CardTitle>
               <Link to="/inventory">
                 <Button variant="ghost" size="sm" className="text-[#002FA7]">
@@ -634,30 +1573,77 @@ export default function DashboardPage() {
                   ))}
                 </div>
               ) : (
-                <div className="space-y-2">
-                  {topVehicles.map((vehicle) => (
-                    <div
-                      key={vehicle.id}
-                      className="flex items-center justify-between p-3 rounded-md bg-muted/30 hover:bg-muted/50 transition-fast"
-                    >
-                      <div>
-                        <div className="font-medium">{vehicle.model} {vehicle.trim}</div>
-                        <div className="text-sm text-muted-foreground">
-                          {vehicle.year} • {vehicle.color} • {vehicle.agency_name}
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    {topVehicles.map((vehicle) => (
+                      <div
+                        key={vehicle.id}
+                        className="flex items-center justify-between p-3 rounded-md bg-muted/30 hover:bg-muted/50 transition-fast"
+                      >
+                        <div>
+                          <div className="font-medium">{vehicle.model} {vehicle.trim}</div>
+                          <div className="text-sm text-muted-foreground">
+                            {vehicle.year} • {vehicle.color} • {vehicle.agency_name}
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <AgingBadge days={vehicle.aging_days} />
+                          <div className="text-sm text-muted-foreground mt-1">
+                            {formatCurrency(vehicle.financial_cost)}
+                          </div>
                         </div>
                       </div>
-                      <div className="text-right">
-                        <AgingBadge days={vehicle.aging_days} />
-                        <div className="text-sm text-muted-foreground mt-1">
-                          {formatCurrency(vehicle.financial_cost)}
-                        </div>
-                      </div>
+                    ))}
+                  </div>
+                  <div className="rounded-md border border-border/40 overflow-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-muted/30">
+                        <tr>
+                          <th className="text-left font-semibold px-3 py-2">Vehículo</th>
+                          <th className="text-left font-semibold px-3 py-2">Agencia</th>
+                          <th className="text-right font-semibold px-3 py-2">Aging</th>
+                          <th className="text-right font-semibold px-3 py-2">Costo Fin.</th>
+                          <th className="text-right font-semibold px-3 py-2">Costo Vehículo</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {brandVehicles.slice(0, 15).map((vehicle) => (
+                          <tr key={`detail-${vehicle.id}`} className="border-t border-border/40">
+                            <td className="px-3 py-2">
+                              <div className="font-medium">{vehicle.model} {vehicle.trim}</div>
+                              <div className="text-xs text-muted-foreground">{vehicle.year} • {vehicle.color}</div>
+                            </td>
+                            <td className="px-3 py-2 text-muted-foreground">{vehicle.agency_name}</td>
+                            <td className="px-3 py-2 text-right">{vehicle.aging_days} días</td>
+                            <td className="px-3 py-2 text-right">{formatCurrency(vehicle.financial_cost || 0)}</td>
+                            <td className="px-3 py-2 text-right">{formatCurrency(vehicle.purchase_price || 0)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {brandVehicles.length > 15 && (
+                    <div className="text-xs text-muted-foreground">
+                      Mostrando 15 de {brandVehicles.length} vehículos. Usa “Ver todos” para ver el inventario completo.
                     </div>
-                  ))}
-                  {topVehicles.length === 0 && (
+                  )}
+                  {brandVehicles.length === 0 && (
                     <p className="text-center text-muted-foreground py-8">
-                      No hay vehículos en inventario
+                      No hay vehículos en inventario para esta marca.
                     </p>
+                  )}
+                  {topVehicles.length === 0 && brandVehicles.length > 0 && (
+                    <div className="text-sm text-muted-foreground">
+                      No hay vehículos con aging destacado.
+                    </div>
+                  )}
+                  {topVehicles.length > 0 && (
+                    <div className="text-xs text-muted-foreground">
+                      Arriba: top por aging. Abajo: detalle por vehículo en la marca seleccionada.
+                    </div>
+                  )}
+                  {topVehicles.length === 0 && brandVehicles.length === 0 && (
+                    <div className="hidden" />
                   )}
                 </div>
               )}
@@ -666,7 +1652,10 @@ export default function DashboardPage() {
         )}
 
         {/* Smart Suggestions */}
-        <Card className={`border-border/40 ${isSellerView ? 'lg:col-span-2' : ''}`} data-testid="smart-suggestions">
+        <Card
+          className={`border-border/40 ${isSellerView || !hasSpecificBrand ? 'lg:col-span-2' : ''}`}
+          data-testid="smart-suggestions"
+        >
           <CardHeader className="pb-2 flex flex-row items-center justify-between">
             <CardTitle className="text-lg flex items-center gap-2" style={{ fontFamily: 'Cabinet Grotesk' }}>
               <Lightning size={20} weight="duotone" className="text-[#E9C46A]" />
@@ -680,6 +1669,10 @@ export default function DashboardPage() {
                   <Skeleton key={i} className="h-20 w-full" />
                 ))}
               </div>
+            ) : !hasSpecificBrand ? (
+              <p className="text-center text-muted-foreground py-8">
+                Selecciona una marca para activar Aging y sugerencias.
+              </p>
             ) : (
               <div className="space-y-3">
                 {suggestions.map((suggestion) => (
