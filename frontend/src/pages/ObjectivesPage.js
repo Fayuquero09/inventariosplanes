@@ -55,6 +55,7 @@ const OBJECTIVE_REJECTED = 'rejected';
 
 const OBJECTIVE_EDITOR_ROLES = ['agency_sales_manager'];
 const OBJECTIVE_APPROVER_ROLES = ['agency_general_manager', 'agency_admin', 'agency_commercial_manager'];
+const AGENCY_SCOPED_ROLES = ['agency_sales_manager', 'agency_general_manager', 'agency_admin', 'agency_commercial_manager', 'agency_user', 'seller'];
 
 const OBJECTIVE_STATUS_LABELS = {
   [OBJECTIVE_PENDING]: 'Pendiente',
@@ -84,6 +85,14 @@ export default function ObjectivesPage() {
   const canCreateObjectives = OBJECTIVE_EDITOR_ROLES.includes(user?.role);
   const canApproveObjectives = OBJECTIVE_APPROVER_ROLES.includes(user?.role);
   const objectiveSubmitLabel = canApproveObjectives ? 'Crear y Aprobar' : 'Enviar a Aprobación';
+  const isAgencyScopedUser = AGENCY_SCOPED_ROLES.includes(user?.role);
+  const singleAgencyId = filters.filteredAgencies.length === 1 ? filters.filteredAgencies[0]?.id : '';
+  const shouldLockAgencySelector = isAgencyScopedUser && Boolean(singleAgencyId);
+
+  useEffect(() => {
+    if (!isDialogOpen || !shouldLockAgencySelector || !singleAgencyId) return;
+    setFormData((prev) => ({ ...prev, agency_id: singleAgencyId }));
+  }, [isDialogOpen, shouldLockAgencySelector, singleAgencyId]);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -114,6 +123,10 @@ export default function ObjectivesPage() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (!formData.agency_id) {
+      toast.error('Selecciona una agencia para capturar el objetivo');
+      return;
+    }
     try {
       const response = await salesObjectivesApi.create({
         ...formData,
@@ -139,7 +152,8 @@ export default function ObjectivesPage() {
       });
       fetchData();
     } catch (error) {
-      toast.error('Error al crear objetivo');
+      const detail = error.response?.data?.detail;
+      toast.error(typeof detail === 'string' ? detail : 'Error al crear objetivo');
     }
   };
 
@@ -269,7 +283,15 @@ export default function ObjectivesPage() {
           </Select>
           {canCreateObjectives && (
             <Button
-              onClick={() => setIsDialogOpen(true)}
+              onClick={() => {
+                setFormData((prev) => ({
+                  ...prev,
+                  month: selectedMonth,
+                  year: selectedYear,
+                  agency_id: prev.agency_id || (shouldLockAgencySelector ? singleAgencyId : prev.agency_id)
+                }));
+                setIsDialogOpen(true);
+              }}
               className="bg-[#002FA7] hover:bg-[#002FA7]/90"
               data-testid="add-objective-btn"
             >
@@ -550,7 +572,7 @@ export default function ObjectivesPage() {
               <Select
                 value={formData.agency_id}
                 onValueChange={(value) => setFormData({ ...formData, agency_id: value })}
-                required
+                disabled={shouldLockAgencySelector}
               >
                 <SelectTrigger data-testid="objective-agency-select">
                   <SelectValue placeholder="Seleccionar agencia" />
