@@ -6,6 +6,8 @@ Goals:
 - Use real MSRP prices from Strapi/JATO catalog JSON.
 - Create a 24-month synthetic history for trends/KPIs.
 - Use sales files from ~/Downloads as demand/seasonality hints when available.
+- Calibrate synthetic volume with per-brand agency share assumptions (sum 100%).
+- Use catalog fallback years when a model is missing in the main model year.
 - Keep data traceable via synthetic_source + synthetic_seed_id markers.
 """
 
@@ -63,6 +65,7 @@ MONTH_ALIASES = {
 }
 
 BRAND_ALIASES = {
+    "fordmotor": "ford",
     "buickgmc": "gmc",
     "bmwmotorrad": "bmw",
     "omodajaecoo": "omoda",
@@ -168,6 +171,9 @@ VEHICLE_COLORS = [
 class DemandSignals:
     make_avg_units: Dict[str, float]
     seasonality_by_month: Dict[int, float]
+    make_month_units: Dict[Tuple[str, int, int], float]
+    model_share_by_make_month: Dict[Tuple[str, int, int], Dict[str, float]]
+    model_share_by_make: Dict[str, Dict[str, float]]
     source_files: List[str]
     fallback_avg_units: float
 
@@ -179,6 +185,16 @@ def normalize_key(value: Any) -> str:
     text = unicodedata.normalize("NFKD", text)
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
     return re.sub(r"[^a-z0-9]", "", text)
+
+
+def canonical_make_key(raw_make: Any) -> str:
+    normalized = normalize_key(raw_make)
+    if not normalized:
+        return ""
+    alias = BRAND_ALIASES.get(normalized)
+    if alias:
+        return normalize_key(alias)
+    return normalized
 
 
 def parse_month_col(column_name: str) -> Optional[Tuple[int, int]]:
@@ -212,7 +228,33 @@ def target_months_window(months: int) -> List[Tuple[int, int]]:
     return out
 
 
-def load_catalog_variants(catalog_path: Path, model_year: int) -> Tuple[Dict[str, List[Dict[str, Any]]], List[Dict[str, Any]]]:
+def _parse_year_list(raw_value: Any) -> List[int]:
+    values: List[int] = []
+    for token in str(raw_value or "").split(","):
+        item = token.strip()
+        if not item:
+            continue
+        try:
+            year_value = int(item)
+        except ValueError:
+            continue
+        values.append(year_value)
+    # Keep insertion order and remove duplicates.
+    out: List[int] = []
+    seen: set[int] = set()
+    for year_value in values:
+        if year_value in seen:
+            continue
+        seen.add(year_value)
+        out.append(year_value)
+    return out
+
+
+def load_catalog_variants(
+    catalog_path: Path,
+    model_year: int,
+    fallback_years: Optional[Sequence[int]] = None,
+) -> Tuple[Dict[str, List[Dict[str, Any]]], List[Dict[str, Any]]]:
     if not catalog_path.exists():
         raise FileNotFoundError(f"Catalog not found: {catalog_path}")
 
@@ -223,8 +265,9 @@ def load_catalog_variants(catalog_path: Path, model_year: int) -> Tuple[Dict[str
     if not isinstance(vehicles, list):
         raise ValueError("Catalog JSON does not contain a valid vehicles list")
 
-    by_make: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    all_variants: List[Dict[str, Any]] = []
+    by_make_model_year: Dict[str, Dict[str, Dict[int, List[Dict[str, Any]]]]] = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(list))
+    )
 
     for row in vehicles:
         if not isinstance(row, dict):
@@ -250,32 +293,58 @@ def load_catalog_variants(catalog_path: Path, model_year: int) -> Tuple[Dict[str
         if price_value <= 0:
             continue
 
-        if row_year is not None:
-            try:
-                if int(row_year) != int(model_year):
-                    continue
-            except (TypeError, ValueError):
-                continue
+        if row_year is None:
+            continue
+        try:
+            row_year_value = int(row_year)
+        except (TypeError, ValueError):
+            continue
 
         variant = {
             "make_name": str(make_name).strip(),
             "model": str(model_name).strip(),
             "version": str(version_name).strip() or "Base",
-            "year": int(model_year),
+            "year": row_year_value,
             "msrp": price_value,
         }
         make_key = normalize_key(variant["make_name"])
-        by_make[make_key].append(variant)
-        all_variants.append(variant)
+        model_key = normalize_key(variant["model"])
+        if not make_key or not model_key:
+            continue
+        by_make_model_year[make_key][model_key][row_year_value].append(variant)
+
+    year_priority = [int(model_year)]
+    for fallback_year in (fallback_years or []):
+        if int(fallback_year) != int(model_year):
+            year_priority.append(int(fallback_year))
+
+    by_make: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    all_variants: List[Dict[str, Any]] = []
+    for make_key, models_by_year in by_make_model_year.items():
+        for _, years_map in models_by_year.items():
+            selected_year: Optional[int] = None
+            for candidate_year in year_priority:
+                if candidate_year in years_map and years_map[candidate_year]:
+                    selected_year = candidate_year
+                    break
+            if selected_year is None:
+                continue
+            variants = years_map[selected_year]
+            by_make[make_key].extend(variants)
+            all_variants.extend(variants)
 
     if not all_variants:
-        raise ValueError("No valid 2026-priced variants found in catalog")
+        requested = [model_year] + [year for year in (fallback_years or []) if year != model_year]
+        raise ValueError(f"No valid priced variants found in catalog for years: {requested}")
 
     return dict(by_make), all_variants
 
 
 def detect_reference_sales_files(downloads_dir: Path) -> List[Path]:
     candidates: List[Path] = []
+
+    if downloads_dir.is_file():
+        return [downloads_dir]
 
     preferred = [
         downloads_dir / "ventas_mensuales_2324_enriquecido.csv",
@@ -291,6 +360,14 @@ def detect_reference_sales_files(downloads_dir: Path) -> List[Path]:
             if matches:
                 candidates.append(matches[0])
 
+    # INEGI RAIAVL monthly files (one file per year, long format).
+    raiavl_matches = sorted(downloads_dir.glob("raiavl_venta_mensual_tr_cifra_*.csv"))
+    if not raiavl_matches:
+        raiavl_matches = sorted(downloads_dir.glob("**/raiavl_venta_mensual_tr_cifra_*.csv"))
+    for path in raiavl_matches:
+        if path not in candidates:
+            candidates.append(path)
+
     return candidates
 
 
@@ -302,9 +379,14 @@ def read_sales_reference(path: Path) -> pd.DataFrame:
     raise ValueError(f"Unsupported file type: {path}")
 
 
-def build_demand_signals(downloads_dir: Path) -> DemandSignals:
+def build_demand_signals(
+    downloads_dir: Path,
+    year_min: Optional[int] = None,
+    year_max: Optional[int] = None,
+) -> DemandSignals:
     files = detect_reference_sales_files(downloads_dir)
     make_month_units: Dict[Tuple[str, int, int], float] = defaultdict(float)
+    model_month_units: Dict[Tuple[str, str, int, int], float] = defaultdict(float)
     month_totals: Dict[Tuple[int, int], float] = defaultdict(float)
     source_files: List[str] = []
 
@@ -315,34 +397,85 @@ def build_demand_signals(downloads_dir: Path) -> DemandSignals:
             continue
 
         make_col = None
-        for candidate in ["Make", "make", "Marca", "marca"]:
+        for candidate in ["Make", "make", "Marca", "marca", "MARCA", "FABRICANTE", "fabricante"]:
             if candidate in df.columns:
                 make_col = candidate
                 break
         if not make_col:
             continue
 
-        month_columns: Dict[str, Tuple[int, int]] = {}
-        for column in df.columns:
-            parsed = parse_month_col(str(column))
-            if parsed:
-                month_columns[str(column)] = parsed
-        if not month_columns:
-            continue
+        model_col = None
+        for candidate in ["MODELO", "Modelo", "modelo", "Model", "model"]:
+            if candidate in df.columns:
+                model_col = candidate
+                break
 
-        source_files.append(str(file_path))
+        long_year_col = next((c for c in ["ANIO", "AÑO", "year", "YEAR"] if c in df.columns), None)
+        long_month_col = next((c for c in ["ID_MES", "MES", "month", "MONTH"] if c in df.columns), None)
+        long_units_col = next((c for c in ["UNI_VEH", "UNIDADES", "units", "UNITS"] if c in df.columns), None)
+
+        month_columns: Dict[str, Tuple[int, int]] = {}
+        is_long_format = bool(long_year_col and long_month_col and long_units_col)
+        if not is_long_format:
+            for column in df.columns:
+                parsed = parse_month_col(str(column))
+                if parsed:
+                    month_columns[str(column)] = parsed
+            if not month_columns:
+                continue
+
+        file_used = False
 
         for _, row in df.iterrows():
-            make_key = normalize_key(row.get(make_col))
+            make_key = canonical_make_key(row.get(make_col))
             if not make_key:
                 continue
+
+            if is_long_format:
+                year_value = pd.to_numeric(row.get(long_year_col), errors="coerce")
+                month_value = pd.to_numeric(row.get(long_month_col), errors="coerce")
+                if pd.isna(year_value) or pd.isna(month_value):
+                    continue
+                year = int(year_value)
+                month = int(month_value)
+                if month < 1 or month > 12:
+                    continue
+                if year_min is not None and year < year_min:
+                    continue
+                if year_max is not None and year > year_max:
+                    continue
+                value = pd.to_numeric(row.get(long_units_col), errors="coerce")
+                if pd.isna(value):
+                    continue
+                units = max(float(value), 0.0)
+                make_month_units[(make_key, year, month)] += units
+                month_totals[(year, month)] += units
+                file_used = True
+                if model_col:
+                    model_key = normalize_key(row.get(model_col))
+                    if model_key:
+                        model_month_units[(make_key, model_key, year, month)] += units
+                continue
+
             for col, (year, month) in month_columns.items():
+                if year_min is not None and year < year_min:
+                    continue
+                if year_max is not None and year > year_max:
+                    continue
                 value = pd.to_numeric(row.get(col), errors="coerce")
                 if pd.isna(value):
                     continue
                 units = max(float(value), 0.0)
                 make_month_units[(make_key, year, month)] += units
                 month_totals[(year, month)] += units
+                file_used = True
+                if model_col:
+                    model_key = normalize_key(row.get(model_col))
+                    if model_key:
+                        model_month_units[(make_key, model_key, year, month)] += units
+
+        if file_used:
+            source_files.append(str(file_path))
 
     make_to_values: Dict[str, List[float]] = defaultdict(list)
     for (make_key, _, _), units in make_month_units.items():
@@ -375,9 +508,46 @@ def build_demand_signals(downloads_dir: Path) -> DemandSignals:
     else:
         fallback_avg_units = 80.0
 
+    model_share_by_make_month: Dict[Tuple[str, int, int], Dict[str, float]] = {}
+    model_totals_by_make: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+
+    for (make_key, model_key, year, month), units in model_month_units.items():
+        if units <= 0:
+            continue
+        model_totals_by_make[make_key][model_key] += units
+
+        month_key = (make_key, year, month)
+        if month_key not in model_share_by_make_month:
+            model_share_by_make_month[month_key] = {}
+        model_share_by_make_month[month_key][model_key] = (
+            model_share_by_make_month[month_key].get(model_key, 0.0) + units
+        )
+
+    for month_key, model_weights in model_share_by_make_month.items():
+        total = sum(model_weights.values())
+        if total <= 0:
+            continue
+        model_share_by_make_month[month_key] = {
+            model_key: (weight / total)
+            for model_key, weight in model_weights.items()
+        }
+
+    model_share_by_make: Dict[str, Dict[str, float]] = {}
+    for make_key, model_weights in model_totals_by_make.items():
+        total = sum(model_weights.values())
+        if total <= 0:
+            continue
+        model_share_by_make[make_key] = {
+            model_key: (weight / total)
+            for model_key, weight in model_weights.items()
+        }
+
     return DemandSignals(
         make_avg_units=make_avg_units,
         seasonality_by_month=seasonality_by_month,
+        make_month_units=dict(make_month_units),
+        model_share_by_make_month=model_share_by_make_month,
+        model_share_by_make=model_share_by_make,
         source_files=source_files,
         fallback_avg_units=fallback_avg_units,
     )
@@ -519,6 +689,72 @@ def build_seller_model_focus_map(
     return focus_map
 
 
+def build_agency_share_by_make(
+    agencies: Sequence[Dict[str, Any]],
+    make_key_by_brand_id: Dict[str, Optional[str]],
+    rng: np.random.Generator,
+    min_share: float = 0.005,
+    max_share: float = 0.021,
+) -> Dict[str, float]:
+    by_make: Dict[str, List[str]] = defaultdict(list)
+    for agency in agencies:
+        agency_id = str(agency.get("id") or "")
+        if not agency_id:
+            continue
+        make_key = str(make_key_by_brand_id.get(str(agency.get("brand_id") or ""), "") or "")
+        if not make_key:
+            continue
+        by_make[make_key].append(agency_id)
+
+    out: Dict[str, float] = {}
+    safe_min_share = max(0.0, float(min_share))
+    safe_max_share = max(safe_min_share, float(max_share))
+
+    for make_key, agency_ids in by_make.items():
+        for agency_id in agency_ids:
+            out[agency_id] = float(rng.uniform(safe_min_share, safe_max_share))
+
+    return out
+
+
+def variant_weights_from_model_share(
+    variants: Sequence[Dict[str, Any]],
+    model_share: Optional[Dict[str, float]],
+) -> np.ndarray:
+    if not variants:
+        return np.array([], dtype=float)
+
+    if not model_share:
+        return np.ones(len(variants), dtype=float) / float(len(variants))
+
+    variants_by_model: Dict[str, List[int]] = defaultdict(list)
+    for idx, variant in enumerate(variants):
+        model_key = normalize_key(variant.get("model"))
+        variants_by_model[model_key].append(idx)
+
+    weights = np.zeros(len(variants), dtype=float)
+    matched = False
+    for model_key, share in model_share.items():
+        share_value = float(share or 0.0)
+        if share_value <= 0:
+            continue
+        variant_indexes = variants_by_model.get(model_key) or []
+        if not variant_indexes:
+            continue
+        matched = True
+        distributed = share_value / float(len(variant_indexes))
+        for idx in variant_indexes:
+            weights[idx] += distributed
+
+    if not matched or weights.sum() <= 0:
+        return np.ones(len(variants), dtype=float) / float(len(variants))
+
+    # Keep some baseline diversity to avoid overfitting fully to national mix.
+    uniform = np.ones(len(variants), dtype=float) / float(len(variants))
+    blended = (weights / weights.sum()) * 0.85 + uniform * 0.15
+    return blended / blended.sum()
+
+
 def parse_brand_plan(raw_value: str) -> List[Tuple[str, int]]:
     out: List[Tuple[str, int]] = []
     for token in str(raw_value or "").split(","):
@@ -586,8 +822,6 @@ def ensure_group_and_structure(
             db.sales.delete_many({"agency_id": {"$in": existing_agency_ids}})
             db.vehicles.delete_many({"agency_id": {"$in": existing_agency_ids}})
             db.users.delete_many({"role": "seller", "agency_id": {"$in": existing_agency_ids}})
-        db.agencies.delete_many({"group_id": group_id_str})
-        db.brands.delete_many({"group_id": group_id_str})
 
     created_brand_ids: Dict[str, str] = {}
     agency_created_count = 0
@@ -673,11 +907,30 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("STRAPI_JATO_CATALOG_PATH", CATALOG_DEFAULT_SOURCE_PATH),
     )
     parser.add_argument("--catalog-model-year", type=int, default=int(os.environ.get("CATALOG_MODEL_YEAR", CATALOG_DEFAULT_MODEL_YEAR)))
+    parser.add_argument(
+        "--catalog-fallback-years",
+        default=os.environ.get("CATALOG_FALLBACK_YEARS", "2025,2024"),
+        help="Años alternos de catálogo para modelos que no existan en el año principal (CSV).",
+    )
     parser.add_argument("--downloads-dir", default=str(Path.home() / "Downloads"))
+    parser.add_argument("--demand-year-min", type=int, default=2025)
+    parser.add_argument("--demand-year-max", type=int, default=2026)
     parser.add_argument("--months", type=int, default=24)
     parser.add_argument("--seed", type=int, default=20260408)
     parser.add_argument("--seed-id", default="")
     parser.add_argument("--market-share-factor", type=float, default=0.015)
+    parser.add_argument(
+        "--agency-share-min",
+        type=float,
+        default=0.005,
+        help="Participación mínima por agencia sobre el total mensual de la marca (0.005 = 0.5%).",
+    )
+    parser.add_argument(
+        "--agency-share-max",
+        type=float,
+        default=0.021,
+        help="Participación máxima por agencia sobre el total mensual de la marca (0.021 = 2.1%).",
+    )
     parser.add_argument("--max-units-per-month", type=int, default=35)
     parser.add_argument("--stock-min", type=int, default=2)
     parser.add_argument("--stock-max", type=int, default=12)
@@ -704,8 +957,17 @@ def main() -> int:
         db.vehicles.delete_many({"synthetic_source": SYNTHETIC_SOURCE})
         db.users.delete_many({"synthetic_source": SYNTHETIC_SOURCE, "role": "seller"})
 
-    catalog_by_make, all_variants = load_catalog_variants(Path(args.catalog_path), args.catalog_model_year)
-    demand = build_demand_signals(Path(args.downloads_dir))
+    fallback_catalog_years = _parse_year_list(args.catalog_fallback_years)
+    catalog_by_make, all_variants = load_catalog_variants(
+        Path(args.catalog_path),
+        args.catalog_model_year,
+        fallback_years=fallback_catalog_years,
+    )
+    demand = build_demand_signals(
+        Path(args.downloads_dir),
+        year_min=args.demand_year_min,
+        year_max=args.demand_year_max,
+    )
 
     scenario_group_name = args.group_name.strip() if args.group_name else ""
     scenario_brand_plan: List[Tuple[str, int]] = []
@@ -770,11 +1032,28 @@ def main() -> int:
     for brand_id, brand_doc in brands.items():
         make_key_by_brand_id[brand_id] = resolve_make_key(str(brand_doc.get("name", "")), catalog_make_keys)
 
-    agencies_by_make: Dict[str, int] = defaultdict(int)
+    agency_share_by_id = build_agency_share_by_make(
+        agencies=agencies,
+        make_key_by_brand_id=make_key_by_brand_id,
+        rng=rng,
+        min_share=args.agency_share_min,
+        max_share=args.agency_share_max,
+    )
+    agency_share_preview: List[str] = []
+    share_by_make_named: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
     for agency in agencies:
-        make_key = make_key_by_brand_id.get(agency["brand_id"])
-        if make_key:
-            agencies_by_make[make_key] += 1
+        agency_id = agency["id"]
+        make_key = make_key_by_brand_id.get(agency["brand_id"]) or "unknown"
+        share_value = float(agency_share_by_id.get(agency_id, 0.0))
+        share_by_make_named[make_key].append((agency["name"], share_value))
+    for make_key in sorted(share_by_make_named.keys()):
+        ranked = sorted(share_by_make_named[make_key], key=lambda item: item[1], reverse=True)
+        for agency_name, share_value in ranked[:5]:
+            agency_share_preview.append(f"{make_key}: {agency_name} -> {share_value * 100:.1f}%")
+            if len(agency_share_preview) >= 15:
+                break
+        if len(agency_share_preview) >= 15:
+            break
 
     target_months = target_months_window(args.months)
     generation_now_utc = datetime.now(timezone.utc)
@@ -801,27 +1080,33 @@ def main() -> int:
                 sellers_by_agency[agency_id] = []
 
         avg_units_for_make = demand.make_avg_units.get(make_key or "", demand.fallback_avg_units)
-        agency_count_for_make = max(agencies_by_make.get(make_key or "", 1), 1)
-        base_lambda = max(
-            0.2,
-            (avg_units_for_make / agency_count_for_make) * args.market_share_factor,
-        )
-        base_lambda = min(base_lambda, float(args.max_units_per_month))
-        agency_bias = float(rng.uniform(0.7, 1.35))
+        agency_share = float(agency_share_by_id.get(agency_id, float(args.market_share_factor)))
 
         for month_idx, (year, month) in enumerate(target_months):
             seasonality = demand.seasonality_by_month.get(month, 1.0)
             trend_factor = 0.92 + (0.18 * (month_idx / max(len(target_months) - 1, 1)))
-            expected_units = min(
-                float(args.max_units_per_month),
-                max(0.0, base_lambda * agency_bias * seasonality * trend_factor),
-            )
+            brand_month_units = demand.make_month_units.get((make_key or "", year, month))
+            if brand_month_units is None:
+                brand_month_units = avg_units_for_make * seasonality
+
+            # Agency synthetic volume from national demand * agency share assumption.
+            expected_units = max(0.0, float(brand_month_units) * agency_share * trend_factor)
+            expected_units = min(float(args.max_units_per_month), max(0.0, expected_units))
             units = int(rng.poisson(expected_units))
             if expected_units > 1.2 and units == 0 and rng.random() < 0.14:
                 units = 1
 
+            model_share = demand.model_share_by_make_month.get((make_key or "", year, month))
+            if not model_share:
+                model_share = demand.model_share_by_make.get(make_key or "", {})
+            variant_weights = variant_weights_from_model_share(variants, model_share)
+
             for _ in range(units):
-                variant = variants[int(rng.integers(0, len(variants)))]
+                if len(variant_weights):
+                    variant_index = int(rng.choice(np.arange(len(variants)), p=variant_weights))
+                else:
+                    variant_index = int(rng.integers(0, len(variants)))
+                variant = variants[variant_index]
                 msrp = float(variant["msrp"])
                 sale_price = round(msrp * float(rng.uniform(0.94, 1.07)), 2)
                 purchase_price = round(msrp * 0.88, 2)
@@ -892,12 +1177,9 @@ def main() -> int:
                 )
                 vin_counter += 1
 
-        stock_units = int(
-            max(
-                args.stock_min,
-                min(args.stock_max, round(base_lambda * agency_bias * float(rng.uniform(0.8, 1.6)))),
-            )
-        )
+        stock_bias = float(rng.uniform(0.85, 1.25))
+        stock_base = max(1.0, avg_units_for_make * agency_share * stock_bias)
+        stock_units = int(max(args.stock_min, min(args.stock_max, round(stock_base))))
         now_utc = generation_now_utc
         for _ in range(stock_units):
             variant = variants[int(rng.integers(0, len(variants)))]
@@ -943,6 +1225,9 @@ def main() -> int:
         print(f"Synthetic sales: {len(sold_meta)}")
         print(f"Synthetic in-stock vehicles: {len(stock_vehicle_docs)}")
         print(f"Demand files used: {demand.source_files}")
+        print("Agency share preview:")
+        for line in agency_share_preview:
+            print(f"  - {line}")
         return 0
 
     inserted_seller_ids: Dict[str, List[str]] = defaultdict(list)
@@ -1043,6 +1328,10 @@ def main() -> int:
             print(f"  - {path}")
     else:
         print("Demand files used: none (fallback demand profile)")
+    if agency_share_preview:
+        print("Agency share preview:")
+        for line in agency_share_preview:
+            print(f"  - {line}")
     return 0
 
 
