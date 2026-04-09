@@ -981,7 +981,7 @@ export default function DashboardPage() {
             ) : (
               <>
                 <div className="h-64">
-                  <SafeChart resetKey={`${selectedMonth}-${selectedYear}-${currentMonthTrendData.length}-sales`}>
+                  <SafeChart resetKey={`${currentMonthKey}-${currentMonthTrendData.length}-sales`}>
                     <ResponsiveContainer width="100%" height="100%">
                       <LineChart data={currentMonthTrendData}>
                         <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
@@ -1136,7 +1136,7 @@ export default function DashboardPage() {
                 <Skeleton className="h-64 w-full" />
               ) : hasAgingData ? (
                 <div className="h-64 flex items-center">
-                  <SafeChart resetKey={`${selectedMonth}-${selectedYear}-${agingGaussianData.length}-aging`}>
+                  <SafeChart resetKey={`${currentMonthKey}-${agingGaussianData.length}-aging`}>
                     <ResponsiveContainer width="100%" height="100%">
                       <LineChart data={agingGaussianData}>
                         <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
@@ -1201,7 +1201,7 @@ export default function DashboardPage() {
                 <Skeleton className="h-64 w-full" />
               ) : (
                 <div className="h-64">
-                  <SafeChart resetKey={`${selectedMonth}-${selectedYear}-${trends.length}-revenue`}>
+                  <SafeChart resetKey={`${currentMonthKey}-${trends.length}-revenue`}>
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart data={trends}>
                         <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
