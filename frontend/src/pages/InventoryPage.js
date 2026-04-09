@@ -279,6 +279,17 @@ export default function InventoryPage() {
     }).format(value);
   };
 
+  const formatSaleDate = (value) => {
+    if (!value) return '—';
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return '—';
+    return parsed.toLocaleDateString('es-MX', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric'
+    });
+  };
+
   const filteredVehicles = vehicles.filter((v) => {
     if (searchTerm) {
       const search = searchTerm.toLowerCase();
@@ -314,6 +325,10 @@ export default function InventoryPage() {
         return Number(vehicle.financial_cost || 0);
       case 'sale_commission':
         return Number(vehicle.sale_commission || 0);
+      case 'sale_price':
+        return Number(vehicle.sale_price || 0);
+      case 'sale_date':
+        return vehicle.sale_date ? new Date(vehicle.sale_date).getTime() : 0;
       case 'gross_profit':
         return Number(grossProfit || 0);
       case 'status':
@@ -653,6 +668,16 @@ export default function InventoryPage() {
                   </button>
                 </TableHead>
                 <TableHead className="text-right">
+                  <button type="button" onClick={() => toggleSort('sale_price')} className="inline-flex items-center gap-1 justify-end w-full">
+                    Valor factura {renderSortIndicator('sale_price')}
+                  </button>
+                </TableHead>
+                <TableHead>
+                  <button type="button" onClick={() => toggleSort('sale_date')} className="flex items-center gap-1">
+                    Fecha venta {renderSortIndicator('sale_date')}
+                  </button>
+                </TableHead>
+                <TableHead className="text-right">
                   <button type="button" onClick={() => toggleSort('sale_commission')} className="inline-flex items-center gap-1 justify-end w-full">
                     Comisión pagada {renderSortIndicator('sale_commission')}
                   </button>
@@ -674,7 +699,7 @@ export default function InventoryPage() {
               {loading ? (
                 [...Array(5)].map((_, i) => (
                   <TableRow key={i}>
-                    {[...Array(11)].map((_, j) => (
+                    {[...Array(13)].map((_, j) => (
                       <TableCell key={j}>
                         <Skeleton className="h-5 w-full" />
                       </TableCell>
@@ -683,7 +708,7 @@ export default function InventoryPage() {
                 ))
               ) : sortedVehicles.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={11} className="text-center py-12">
+                  <TableCell colSpan={13} className="text-center py-12">
                     <Car size={48} className="mx-auto text-muted-foreground mb-4" />
                     <p className="text-muted-foreground">No se encontraron vehículos</p>
                   </TableCell>
@@ -713,6 +738,16 @@ export default function InventoryPage() {
                     </TableCell>
                     <TableCell className="text-right tabular-nums text-[#E63946]">
                       {formatCurrency(vehicle.financial_cost)}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {vehicle.status === 'sold' && vehicle.sale_price !== undefined && vehicle.sale_price !== null
+                        ? formatCurrency(vehicle.sale_price)
+                        : '—'}
+                    </TableCell>
+                    <TableCell className="tabular-nums">
+                      {vehicle.status === 'sold'
+                        ? formatSaleDate(vehicle.sale_date)
+                        : '—'}
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
                       {vehicle.status === 'sold' && vehicle.sale_commission !== undefined && vehicle.sale_commission !== null

@@ -22,7 +22,7 @@ import {
   SelectTrigger,
   SelectValue
 } from '../components/ui/select';
-import { Plus, Target, Users, Storefront, Factory, Buildings } from '@phosphor-icons/react';
+import { Plus, Target, Users, Storefront } from '@phosphor-icons/react';
 import { toast } from 'sonner';
 import {
   BarChart,
@@ -64,7 +64,7 @@ const OBJECTIVE_STATUS_LABELS = {
 
 export default function ObjectivesPage() {
   const { user } = useAuth();
-  const filters = useHierarchicalFilters({ includeSellers: true });
+  const filters = useHierarchicalFilters({ includeSellers: false });
   const { getFilterParams } = filters;
   const [objectives, setObjectives] = useState([]);
   const [sellerPerformance, setSellerPerformance] = useState([]);
@@ -73,7 +73,6 @@ export default function ObjectivesPage() {
   const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
   const [formData, setFormData] = useState({
-    seller_id: '',
     agency_id: '',
     month: new Date().getMonth() + 1,
     year: new Date().getFullYear(),
@@ -118,7 +117,7 @@ export default function ObjectivesPage() {
     try {
       const response = await salesObjectivesApi.create({
         ...formData,
-        seller_id: formData.seller_id || null,
+        seller_id: null,
         units_target: parseInt(formData.units_target),
         revenue_target: parseFloat(formData.revenue_target),
         vehicle_line: formData.vehicle_line || null
@@ -131,7 +130,6 @@ export default function ObjectivesPage() {
       }
       setIsDialogOpen(false);
       setFormData({
-        seller_id: '',
         agency_id: '',
         month: new Date().getMonth() + 1,
         year: new Date().getFullYear(),
@@ -218,9 +216,13 @@ export default function ObjectivesPage() {
     commission: s.commission
   }));
 
-  // Group objectives by level (seller, agency, brand, group)
-  const sellerObjectives = objectives.filter(o => o.seller_id);
+  // Objetivos operativos actuales: agencia-marca.
   const agencyObjectives = objectives.filter(o => !o.seller_id);
+  const brandsWithObjectivesCount = new Set(
+    agencyObjectives
+      .map((objective) => objective?.brand_id)
+      .filter(Boolean)
+  ).size;
 
   // Calculate totals
   const totalUnitsTarget = objectives.reduce((sum, o) => sum + (o.units_target || 0), 0);
@@ -237,7 +239,7 @@ export default function ObjectivesPage() {
             Objetivos de Ventas
           </h1>
           <p className="text-muted-foreground">
-            Gestiona objetivos por vendedor, agencia, marca y grupo
+            Gestiona objetivos por agencia-marca
           </p>
         </div>
         <div className="flex gap-2">
@@ -279,7 +281,7 @@ export default function ObjectivesPage() {
       </div>
 
       {/* Hierarchical Filters */}
-      <HierarchicalFilters filters={filters} includeSellers={true} />
+      <HierarchicalFilters filters={filters} includeSellers={false} />
 
       {/* Summary Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -327,11 +329,11 @@ export default function ObjectivesPage() {
         <Card className="border-border/40">
           <CardContent className="p-4">
             <div className="text-xs font-semibold tracking-widest uppercase text-muted-foreground mb-1">
-              Objetivos de Vendedor
+              Marcas con Objetivo
             </div>
-            <div className="text-2xl font-bold">{sellerObjectives.length}</div>
+            <div className="text-2xl font-bold">{brandsWithObjectivesCount}</div>
             <div className="text-sm text-muted-foreground mt-1">
-              configurados
+              activas en el periodo
             </div>
           </CardContent>
         </Card>
@@ -449,78 +451,6 @@ export default function ObjectivesPage() {
         </div>
       </div>
 
-      {/* Seller Objectives */}
-      {sellerObjectives.length > 0 && (
-        <div className="space-y-4">
-          <h2 className="text-lg font-semibold flex items-center gap-2" style={{ fontFamily: 'Cabinet Grotesk' }}>
-            <Users size={20} weight="duotone" className="text-[#2A9D8F]" />
-            Objetivos por Vendedor
-          </h2>
-          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {sellerObjectives.map((objective) => {
-              const objectiveStatus = getObjectiveStatus(objective);
-              return (
-                <Card key={objective.id} className="border-border/40 border-l-4 border-l-[#2A9D8F]">
-                  <CardHeader className="pb-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <CardTitle className="text-base">{objective.seller_name}</CardTitle>
-                      <Badge variant="outline" className={getObjectiveStatusBadgeClass(objectiveStatus)}>
-                        {OBJECTIVE_STATUS_LABELS[objectiveStatus]}
-                      </Badge>
-                    </div>
-                    <div className="text-sm text-muted-foreground">
-                      {objective.agency_name}
-                    </div>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    <div>
-                      <div className="flex justify-between text-sm mb-1">
-                        <span className="text-muted-foreground">Unidades</span>
-                        <span className="font-medium">{formatUnits(objective.units_sold)} / {formatUnits(objective.units_target)}</span>
-                      </div>
-                      <Progress value={Math.min(objective.progress_units, 100)} className="h-2" />
-                    </div>
-                    <div>
-                      <div className="flex justify-between text-sm mb-1">
-                        <span className="text-muted-foreground">Comisiones</span>
-                        <span className="font-medium text-[#2A9D8F]">{formatCurrency(objective.commissions_achieved || 0)}</span>
-                      </div>
-                    </div>
-
-                    {objectiveStatus === OBJECTIVE_PENDING && canApproveObjectives && (
-                      <div className="flex items-center justify-end gap-2 pt-1">
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={() => handleApprovalDecision(objective, OBJECTIVE_REJECTED)}
-                          data-testid={`reject-seller-objective-${objective.id}`}
-                        >
-                          Rechazar
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          className="bg-[#2A9D8F] hover:bg-[#2A9D8F]/90"
-                          onClick={() => handleApprovalDecision(objective, OBJECTIVE_APPROVED)}
-                          data-testid={`approve-seller-objective-${objective.id}`}
-                        >
-                          Aprobar
-                        </Button>
-                      </div>
-                    )}
-
-                    {objectiveStatus === OBJECTIVE_REJECTED && objective.approval_comment && (
-                      <p className="text-xs text-[#E63946]">Motivo rechazo: {objective.approval_comment}</p>
-                    )}
-                  </CardContent>
-                </Card>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
       {/* Seller Performance */}
       <div className="grid lg:grid-cols-2 gap-6">
         <Card className="border-border/40" data-testid="seller-performance-chart">
@@ -629,25 +559,6 @@ export default function ObjectivesPage() {
                   {filters.filteredAgencies.map((agency) => (
                     <SelectItem key={agency.id} value={agency.id}>
                       {agency.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="seller_id">Vendedor (opcional - si está vacío, aplica a toda la agencia)</Label>
-              <Select
-                value={formData.seller_id || 'none'}
-                onValueChange={(value) => setFormData({ ...formData, seller_id: value === 'none' ? '' : value })}
-              >
-                <SelectTrigger data-testid="objective-seller-select">
-                  <SelectValue placeholder="Toda la agencia" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">Toda la agencia</SelectItem>
-                  {filters.sellers.map((seller) => (
-                    <SelectItem key={seller.id} value={seller.id}>
-                      {seller.name}
                     </SelectItem>
                   ))}
                 </SelectContent>

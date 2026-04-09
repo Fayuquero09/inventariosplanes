@@ -5,9 +5,7 @@ import { dashboardApi, vehiclesApi, groupsApi, brandsApi, agenciesApi, sellersAp
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
-import { Input } from '../components/ui/input';
 import { Skeleton } from '../components/ui/skeleton';
-import { toast } from 'sonner';
 import {
   Select,
   SelectContent,
@@ -72,34 +70,6 @@ function getMexicoHolidaySet(year) {
   }
 
   return holidays;
-}
-
-function buildMonthCalendarCells(year, month, holidaysSet) {
-  const daysInMonth = new Date(year, month, 0).getDate();
-  const firstDay = new Date(year, month - 1, 1).getDay(); // 0=domingo
-  const mondayAligned = (firstDay + 6) % 7; // 0=lunes ... 6=domingo
-
-  const cells = [];
-  for (let i = 0; i < mondayAligned; i += 1) {
-    cells.push(null);
-  }
-  for (let day = 1; day <= daysInMonth; day += 1) {
-    const dateKey = `${year}-${pad2(month)}-${pad2(day)}`;
-    const weekDay = new Date(year, month - 1, day).getDay();
-    const isSunday = weekDay === 0;
-    const isSaturday = weekDay === 6;
-    const isHoliday = holidaysSet.has(dateKey);
-    cells.push({
-      day,
-      isSunday,
-      isSaturday,
-      isHoliday,
-    });
-  }
-  while (cells.length % 7 !== 0) {
-    cells.push(null);
-  }
-  return cells;
 }
 
 function computeIndustryEffectiveDate(year, month, closeDay, monthOffset = 0) {
@@ -267,15 +237,10 @@ export default function DashboardPage() {
   const [selectedAgency, setSelectedAgency] = useState('all');
   const [selectedSeller, setSelectedSeller] = useState('all');
   const [monthlyCloseCalendar, setMonthlyCloseCalendar] = useState([]);
-  const [monthlyCloseDrafts, setMonthlyCloseDrafts] = useState({});
-  const [monthlyCloseLoading, setMonthlyCloseLoading] = useState(false);
-  const [monthlyCloseSavingMonth, setMonthlyCloseSavingMonth] = useState(null);
 
   // Check if user is super admin/user (can see all groups)
   const isSuperUser = user?.role === 'app_admin' || user?.role === 'app_user';
   const canSelectGroup = isSuperUser && groups.length > 1;
-  const isAppAdmin = user?.role === 'app_admin';
-  const calendarYear = 2026;
 
   // Load filter options
   useEffect(() => {
@@ -415,33 +380,19 @@ export default function DashboardPage() {
   }, [fetchData]);
 
   const fetchMonthlyCloseCalendar = useCallback(async () => {
-    setMonthlyCloseLoading(true);
     try {
+      const currentYear = new Date().getFullYear();
       const res = await dashboardApi.getMonthlyCloseCalendar({
-        year: calendarYear,
+        year: currentYear,
         from_current_month: true,
       });
       const items = Array.isArray(res?.data?.items) ? res.data.items : [];
       setMonthlyCloseCalendar(items);
-      setMonthlyCloseDrafts(
-        items.reduce((acc, item) => {
-          const key = String(item.month);
-          acc[key] = {
-            fiscal_close_day: item?.fiscal_close_day ?? '',
-            industry_close_day: item?.industry_close_day ?? '',
-            industry_close_month_offset: Number(item?.industry_close_month_offset ?? 0),
-          };
-          return acc;
-        }, {})
-      );
     } catch (error) {
       console.error('Error loading monthly close calendar:', error);
       setMonthlyCloseCalendar([]);
-      setMonthlyCloseDrafts({});
-    } finally {
-      setMonthlyCloseLoading(false);
     }
-  }, [calendarYear]);
+  }, []);
 
   useEffect(() => {
     fetchMonthlyCloseCalendar();
@@ -770,74 +721,6 @@ export default function DashboardPage() {
     return shiftedFromPrevious || candidates[0];
   }, [monthlyCloseCalendar, salesCalendarScope]);
 
-  const handleMonthlyCloseDraftChange = useCallback((month, field, value) => {
-    const key = String(month);
-    setMonthlyCloseDrafts((prev) => ({
-      ...prev,
-      [key]: {
-        ...(prev[key] || {}),
-        [field]: value,
-      },
-    }));
-  }, []);
-
-  const handleMonthlyCloseSaveMonth = useCallback(async (month, daysInMonth) => {
-    if (!isAppAdmin) return;
-
-    const key = String(month);
-    const draft = monthlyCloseDrafts[key] || {};
-    const monthLabel = new Date(calendarYear, Number(month) - 1, 1).toLocaleDateString('es-MX', {
-      month: 'long',
-      year: 'numeric',
-    });
-
-    try {
-      const parseCloseDay = (rawValue, maxDay, label) => {
-        const cleaned = String(rawValue ?? '').trim();
-        if (!cleaned) return null;
-        const parsed = Number(cleaned);
-        if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 1) {
-          throw new Error(`${label}: captura un día válido.`);
-        }
-        if (parsed > maxDay) {
-          throw new Error(`${label}: no puede ser mayor a ${maxDay}.`);
-        }
-        return parsed;
-      };
-
-      setMonthlyCloseSavingMonth(Number(month));
-      const industryMonthOffsetRaw = Number(draft?.industry_close_month_offset ?? 0);
-      const industryMonthOffset = [0, 1].includes(industryMonthOffsetRaw) ? industryMonthOffsetRaw : 0;
-      const industryBaseDate = new Date(Date.UTC(calendarYear, (Number(month) - 1) + industryMonthOffset, 1));
-      const industryTargetYear = industryBaseDate.getUTCFullYear();
-      const industryTargetMonth = industryBaseDate.getUTCMonth() + 1;
-      const industryDaysInTargetMonth = new Date(industryTargetYear, industryTargetMonth, 0).getDate();
-
-      const fiscalDay = parseCloseDay(draft?.fiscal_close_day, daysInMonth, 'Cierre fiscal');
-      const industryDay = parseCloseDay(
-        draft?.industry_close_day,
-        industryDaysInTargetMonth,
-        `Cierre industria (${industryMonthOffset === 1 ? 'mes siguiente' : 'mismo mes'})`
-      );
-
-      await dashboardApi.upsertMonthlyClose({
-        year: calendarYear,
-        month: Number(month),
-        fiscal_close_day: fiscalDay,
-        industry_close_day: industryDay,
-        industry_close_month_offset: industryMonthOffset,
-      });
-
-      toast.success(`Cierres guardados para ${monthLabel}.`);
-      await Promise.all([fetchMonthlyCloseCalendar(), fetchData()]);
-    } catch (error) {
-      console.error('Error saving monthly close month:', error);
-      toast.error(error?.message || 'No se pudo guardar el cierre mensual.');
-    } finally {
-      setMonthlyCloseSavingMonth(null);
-    }
-  }, [isAppAdmin, monthlyCloseDrafts, calendarYear, fetchMonthlyCloseCalendar, fetchData]);
-
   const fiscalCloseXAxisValue = currentFiscalCloseDay ? pad2(currentFiscalCloseDay) : null;
   const industryCloseXAxisValue = currentIndustryOperationalMarker?.effective?.day
     ? pad2(currentIndustryOperationalMarker.effective.day)
@@ -845,9 +728,6 @@ export default function DashboardPage() {
   const industryCloseXAxisLabel = currentIndustryOperationalMarker?.effective?.shifted
     ? 'Cierre industria (traslado)'
     : 'Cierre industria';
-  const industryCloseDisplayLabel = currentIndustryOperationalMarker?.effective
-    ? `${pad2(currentIndustryOperationalMarker.effective.day)}/${pad2(currentIndustryOperationalMarker.effective.month)}`
-    : 'Sin captura';
 
   return (
     <div className="space-y-6" data-testid="dashboard-page">
@@ -1054,225 +934,6 @@ export default function DashboardPage() {
           />
         )}
       </div>
-
-      <Card className="border-border/40" data-testid="monthly-close-card">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-lg" style={{ fontFamily: 'Cabinet Grotesk' }}>
-            Calendario Operativo 2026: Cierre Fiscal e Industria
-          </CardTitle>
-          <p className="text-xs text-muted-foreground">
-            Resto del año 2026. Domingos y feriados LFT en rojo. Este calendario aplica para todas las marcas y grupos.
-          </p>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex flex-wrap items-center gap-2 text-xs">
-            <Badge className="bg-[#B45309]/10 text-[#B45309] border-[#B45309]/30">F cierre fiscal</Badge>
-            <Badge className="bg-[#0F766E]/10 text-[#0F766E] border-[#0F766E]/30">I cierre industria</Badge>
-            <Badge className="bg-[#C28A00]/10 text-[#A16207] border-[#C28A00]/30">Sábado (medio día hábil)</Badge>
-            <Badge className="bg-[#E63946]/10 text-[#B91C1C] border-[#E63946]/30">Domingo / Feriado LFT</Badge>
-          </div>
-
-          <div className="rounded-md border border-border/50 bg-muted/20 p-3 text-sm">
-            <span className="font-medium">Mes actual en lienzo:</span>{' '}
-            {new Date(salesCalendarScope.year, salesCalendarScope.month - 1, 1).toLocaleDateString('es-MX', { month: 'long', year: 'numeric' })}{' '}
-            · Cierre fiscal: {currentFiscalCloseDay || 'Sin captura'} · Cierre industria:{' '}
-            {industryCloseDisplayLabel}
-            {currentIndustryOperationalMarker?.effective?.shifted && (
-              <>
-                {' '}(
-                traslado desde{' '}
-                {new Date(
-                  currentIndustryOperationalMarker.sourceYear,
-                  currentIndustryOperationalMarker.sourceMonth - 1,
-                  1
-                ).toLocaleDateString('es-MX', { month: 'long' })}
-                )
-              </>
-            )}
-          </div>
-
-          {monthlyCloseLoading ? (
-            <Skeleton className="h-64 w-full" />
-          ) : monthlyCloseCalendar.length === 0 ? (
-            <div className="rounded-md border border-border/50 bg-muted/20 p-4 flex items-center justify-between gap-3">
-              <p className="text-sm text-muted-foreground">
-                No se pudo cargar el calendario operativo en este momento.
-              </p>
-              <Button variant="outline" onClick={fetchMonthlyCloseCalendar}>
-                Reintentar
-              </Button>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-              {monthlyCloseCalendar.map((item) => {
-                const month = Number(item?.month || 0);
-                const daysInMonth = Number(item?.days_in_month || new Date(calendarYear, month, 0).getDate());
-                const monthName = new Date(calendarYear, month - 1, 1).toLocaleDateString('es-MX', {
-                  month: 'long',
-                  year: 'numeric',
-                });
-                const key = String(month);
-                const draft = monthlyCloseDrafts[key] || {};
-                const fiscalDraft = draft?.fiscal_close_day ?? '';
-                const industryDraft = draft?.industry_close_day ?? '';
-                const industryMonthOffsetDraft = Number(draft?.industry_close_month_offset ?? 0);
-                const industryTargetBaseDate = new Date(
-                  Date.UTC(calendarYear, (month - 1) + industryMonthOffsetDraft, 1)
-                );
-                const industryTargetYear = industryTargetBaseDate.getUTCFullYear();
-                const industryTargetMonth = industryTargetBaseDate.getUTCMonth() + 1;
-                const industryTargetDaysInMonth = new Date(industryTargetYear, industryTargetMonth, 0).getDate();
-                const industryTargetLabel = new Date(
-                  industryTargetYear,
-                  industryTargetMonth - 1,
-                  1
-                ).toLocaleDateString('es-MX', { month: 'long', year: 'numeric' });
-                const holidaysSet = new Set(
-                  (item?.holidays || []).map((day) => `${calendarYear}-${pad2(month)}-${pad2(day)}`)
-                );
-                const cells = buildMonthCalendarCells(calendarYear, month, holidaysSet);
-
-                return (
-                  <div key={`month-card-${month}`} className="rounded-md border border-border/50 p-3 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <div className="font-semibold capitalize">{monthName}</div>
-                      <Badge className="bg-muted text-foreground border-border/60">{daysInMonth} días</Badge>
-                    </div>
-
-                    <div className="grid grid-cols-7 gap-1 text-[11px] font-medium text-muted-foreground">
-                      {['L', 'M', 'M', 'J', 'V', 'S', 'D'].map((label, idx) => (
-                        <div key={`hdr-${month}-${idx}`} className={`text-center ${label === 'D' ? 'text-[#B91C1C]' : ''}`}>
-                          {label}
-                        </div>
-                      ))}
-                    </div>
-                    <div className="grid grid-cols-7 gap-1">
-                      {cells.map((cell, index) => {
-                        if (!cell) {
-                          return <div key={`empty-${month}-${index}`} className="h-7 rounded-sm bg-transparent" />;
-                        }
-                        const isFiscal = Number(fiscalDraft) === Number(cell.day);
-                        const isIndustry = industryMonthOffsetDraft === 0 && Number(industryDraft) === Number(cell.day);
-                        const emergencyDay = cell.isSunday || cell.isHoliday;
-                        const semiBusinessDay = cell.isSaturday && !emergencyDay;
-
-                        return (
-                          <div
-                            key={`day-${month}-${cell.day}`}
-                            className={[
-                              'h-7 rounded-sm border text-[11px] flex items-center justify-center font-medium',
-                              emergencyDay
-                                ? 'bg-[#E63946]/10 text-[#B91C1C] border-[#E63946]/30'
-                                : semiBusinessDay
-                                  ? 'bg-[#C28A00]/10 text-[#A16207] border-[#C28A00]/30'
-                                  : 'bg-muted/30 border-border/40',
-                              isFiscal ? 'ring-1 ring-[#B45309]' : '',
-                              isIndustry ? 'ring-1 ring-[#0F766E]' : '',
-                              (isFiscal && isIndustry) ? 'ring-2 ring-[#002FA7]' : '',
-                            ].filter(Boolean).join(' ')}
-                          >
-                            {cell.day}
-                          </div>
-                        );
-                      })}
-                    </div>
-
-                    {(() => {
-                      const effective = computeIndustryEffectiveDate(
-                        calendarYear,
-                        month,
-                        industryDraft,
-                        industryMonthOffsetDraft
-                      );
-                      if (!effective) return null;
-                      const effectiveLabel = new Date(
-                        effective.year,
-                        effective.month - 1,
-                        1
-                      ).toLocaleDateString('es-MX', { month: 'long' });
-                      const targetLabel = new Date(
-                        effective.baseYear,
-                        effective.baseMonth - 1,
-                        1
-                      ).toLocaleDateString('es-MX', { month: 'long' });
-                      if (!effective.shifted && industryMonthOffsetDraft === 0) return null;
-                      return (
-                        <p className="text-[11px] text-muted-foreground">
-                          Cierre industria programado: día {industryDraft || 'N/D'} de {targetLabel}
-                          {effective.shifted
-                            ? ` · Operativo: día ${effective.day} de ${effectiveLabel} (traslado automático por domingo/feriado).`
-                            : ` · Operativo: día ${effective.day} de ${effectiveLabel}.`}
-                        </p>
-                      );
-                    })()}
-
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                      <div className="space-y-1">
-                        <label className="text-xs font-medium text-muted-foreground">Cierre fiscal (día)</label>
-                        <Input
-                          type="number"
-                          min="1"
-                          max={daysInMonth}
-                          step="1"
-                          value={fiscalDraft}
-                          onChange={(e) => handleMonthlyCloseDraftChange(month, 'fiscal_close_day', e.target.value)}
-                          placeholder="Ej. 26"
-                          disabled={!isAppAdmin}
-                        />
-                      </div>
-                      <div className="space-y-1">
-                        <label className="text-xs font-medium text-muted-foreground">Mes cierre industria</label>
-                        <Select
-                          value={String(industryMonthOffsetDraft)}
-                          onValueChange={(value) => handleMonthlyCloseDraftChange(month, 'industry_close_month_offset', Number(value))}
-                          disabled={!isAppAdmin}
-                        >
-                          <SelectTrigger className="h-10">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="0">Mismo mes</SelectItem>
-                            <SelectItem value="1">Mes siguiente</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <div className="space-y-1">
-                        <label className="text-xs font-medium text-muted-foreground">Cierre industria (día)</label>
-                        <Input
-                          type="number"
-                          min="1"
-                          max={industryTargetDaysInMonth}
-                          step="1"
-                          value={industryDraft}
-                          onChange={(e) => handleMonthlyCloseDraftChange(month, 'industry_close_day', e.target.value)}
-                          placeholder={`Ej. ${Math.min(30, industryTargetDaysInMonth)}`}
-                          disabled={!isAppAdmin}
-                        />
-                        <p className="text-[11px] text-muted-foreground">
-                          Mes objetivo: {industryTargetLabel}
-                        </p>
-                      </div>
-                    </div>
-                    <Button
-                      className="w-full"
-                      onClick={() => handleMonthlyCloseSaveMonth(month, daysInMonth)}
-                      disabled={!isAppAdmin || monthlyCloseSavingMonth === month}
-                    >
-                      {monthlyCloseSavingMonth === month ? 'Guardando...' : 'Guardar Mes'}
-                    </Button>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
-          {!isAppAdmin && (
-            <p className="text-xs text-muted-foreground">
-              Solo App Admin puede editar los días de cierre fiscal e industria.
-            </p>
-          )}
-        </CardContent>
-      </Card>
 
       {!isSellerView && (
         <Card className="border-border/40">

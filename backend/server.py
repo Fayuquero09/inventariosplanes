@@ -417,7 +417,7 @@ class VehicleResponse(BaseModel):
     created_at: str
 
 class SalesObjectiveCreate(BaseModel):
-    seller_id: Optional[str] = None  # Si es nulo, aplica a toda la agencia
+    seller_id: Optional[str] = None  # legado: los nuevos objetivos se capturan por agencia-marca
     agency_id: str
     month: int
     year: int
@@ -3406,17 +3406,14 @@ async def create_sales_objective(objective_data: SalesObjectiveCreate, request: 
         raise HTTPException(status_code=404, detail="Agency not found")
     _ensure_doc_scope_access(current_user, agency, detail="No tienes acceso a esta agencia")
 
-    seller_id = objective_data.seller_id
-    if seller_id:
-        if not ObjectId.is_valid(seller_id):
-            raise HTTPException(status_code=400, detail="Invalid seller_id")
-        seller = await db.users.find_one({"_id": ObjectId(seller_id)})
-        if not seller:
-            raise HTTPException(status_code=404, detail="Seller not found")
-        if seller.get("role") != UserRole.SELLER:
-            raise HTTPException(status_code=400, detail="Selected user is not a seller")
-        if seller.get("agency_id") != objective_data.agency_id:
-            raise HTTPException(status_code=400, detail="Seller does not belong to selected agency")
+    # Objetivos operativos actuales: agencia-marca (no por vendedor).
+    # Mantener seller_id como campo legado para compatibilidad de payloads antiguos.
+    if objective_data.seller_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Los objetivos nuevos se capturan por agencia-marca. No enviar seller_id.",
+        )
+    seller_id = None
 
     now = datetime.now(timezone.utc)
     current_user_id = current_user.get("id")
@@ -3488,7 +3485,6 @@ async def get_sales_objectives(
             return []
         if seller_id and seller_id != current_seller_id:
             raise HTTPException(status_code=403, detail="No tienes acceso a este vendedor")
-        query["seller_id"] = current_seller_id
     elif seller_id:
         query["seller_id"] = seller_id
     if agency_id:
@@ -3502,6 +3498,14 @@ async def get_sales_objectives(
         query["month"] = month
     if year:
         query["year"] = year
+
+    # Modo actual por defecto: solo objetivos de agencia-marca (sin seller_id).
+    # seller_id explícito conserva lectura legado para auditoría/histórico.
+    if not seller_id:
+        query["$or"] = [
+            {"seller_id": None},
+            {"seller_id": {"$exists": False}},
+        ]
     
     objectives = await db.sales_objectives.find(query).to_list(1000)
     
@@ -5189,15 +5193,11 @@ async def get_sales_trends(
         if role_scoped_to_seller:
             objective_units = sum(int(obj.get("units_target", 0) or 0) for obj in approved_objectives)
         else:
-            seller_level = [obj for obj in approved_objectives if obj.get("seller_id")]
-            if seller_level:
-                objective_units = sum(int(obj.get("units_target", 0) or 0) for obj in seller_level)
-            else:
-                objective_units = sum(
-                    int(obj.get("units_target", 0) or 0)
-                    for obj in approved_objectives
-                    if not obj.get("seller_id")
-                )
+            objective_units = sum(
+                int(obj.get("units_target", 0) or 0)
+                for obj in approved_objectives
+                if not obj.get("seller_id")
+            )
 
         units_by_day: Dict[int, int] = {}
         revenue_by_day: Dict[int, float] = {}
@@ -5375,16 +5375,11 @@ async def get_sales_trends(
         if role_scoped_to_seller:
             objective_units = sum(int(obj.get("units_target", 0) or 0) for obj in approved_objectives)
         else:
-            # Prefer bottom-up seller objectives when present; otherwise use agency-level objectives.
-            seller_level = [obj for obj in approved_objectives if obj.get("seller_id")]
-            if seller_level:
-                objective_units = sum(int(obj.get("units_target", 0) or 0) for obj in seller_level)
-            else:
-                objective_units = sum(
-                    int(obj.get("units_target", 0) or 0)
-                    for obj in approved_objectives
-                    if not obj.get("seller_id")
-                )
+            objective_units = sum(
+                int(obj.get("units_target", 0) or 0)
+                for obj in approved_objectives
+                if not obj.get("seller_id")
+            )
 
         days_in_month = (end_date - start_date).days or 1
         elapsed_days_for_objective = now.day if (year == now.year and month == now.month) else None
