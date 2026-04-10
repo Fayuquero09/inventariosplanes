@@ -21,7 +21,9 @@ import pandas as pd
 from io import BytesIO
 import json
 from pathlib import Path
+from modules.commissions_routes import CommissionsRouteHandlers
 from modules.dashboard_routes import DashboardRouteHandlers
+from modules.financial_rates_routes import FinancialRatesRouteHandlers
 from modules.health_routes import HealthRouteHandlers
 from modules.inventory_routes import InventoryRouteHandlers
 from modules.registry import RouteModuleHandlers, register_route_modules
@@ -3536,7 +3538,6 @@ async def _build_default_financial_rate_name(
         return f"Tasa {group_name} - {brand_name}"
     return f"Tasa General {group_name}"
 
-@api_router.post("/financial-rates")
 async def create_financial_rate(rate_data: FinancialRateCreate, request: Request):
     current_user = await get_current_user(request)
     if current_user["role"] not in FINANCIAL_RATE_MANAGER_ROLES:
@@ -3609,7 +3610,6 @@ async def create_financial_rate(rate_data: FinancialRateCreate, request: Request
     return serialize_doc(rate_doc)
 
 
-@api_router.post("/financial-rates/apply-group-default")
 async def apply_group_default_financial_rate(
     payload: FinancialRateBulkApplyRequest,
     request: Request,
@@ -3719,7 +3719,6 @@ async def apply_group_default_financial_rate(
         "message": "Tasa general aplicada a marcas sin tasa propia.",
     }
 
-@api_router.get("/financial-rates")
 async def get_financial_rates(
     request: Request, 
     group_id: Optional[str] = None,
@@ -3808,7 +3807,6 @@ async def get_financial_rates(
     
     return result
 
-@api_router.put("/financial-rates/{rate_id}")
 async def update_financial_rate(rate_id: str, rate_data: FinancialRateCreate, request: Request):
     current_user = await get_current_user(request)
     if current_user["role"] not in FINANCIAL_RATE_MANAGER_ROLES:
@@ -3937,7 +3935,6 @@ async def update_financial_rate(rate_id: str, rate_data: FinancialRateCreate, re
     )
     return result
 
-@api_router.delete("/financial-rates/{rate_id}")
 async def delete_financial_rate(rate_id: str, request: Request):
     current_user = await get_current_user(request)
     if current_user["role"] not in FINANCIAL_RATE_MANAGER_ROLES:
@@ -5166,7 +5163,6 @@ async def _serialize_commission_matrix(agency: Dict[str, Any], matrix_doc: Optio
         "updated_by": matrix_doc.get("updated_by") if matrix_doc else None,
     }
 
-@api_router.get("/commission-matrix")
 async def get_commission_matrix(request: Request, agency_id: str):
     current_user = await get_current_user(request)
     if not ObjectId.is_valid(agency_id):
@@ -5180,7 +5176,6 @@ async def get_commission_matrix(request: Request, agency_id: str):
     matrix_doc = await db.commission_matrices.find_one({"agency_id": agency_id})
     return await _serialize_commission_matrix(agency, matrix_doc)
 
-@api_router.put("/commission-matrix")
 async def upsert_commission_matrix(payload: CommissionMatrixUpsert, request: Request):
     current_user = await get_current_user(request)
     if current_user.get("role") not in COMMISSION_MATRIX_EDITOR_ROLES:
@@ -5236,7 +5231,6 @@ async def upsert_commission_matrix(payload: CommissionMatrixUpsert, request: Req
 
     return await _serialize_commission_matrix(agency, matrix_doc)
 
-@api_router.post("/commission-rules")
 async def create_commission_rule(rule_data: CommissionRuleCreate, request: Request):
     current_user = await get_current_user(request)
     if current_user.get("role") not in COMMISSION_PROPOSER_ROLES:
@@ -5333,7 +5327,6 @@ async def _serialize_commission_rule(rule_doc: Dict[str, Any]) -> Dict[str, Any]
             serialized["rejected_by_name"] = rejector.get("name")
     return serialized
 
-@api_router.get("/commission-rules")
 async def get_commission_rules(
     request: Request, 
     group_id: Optional[str] = None,
@@ -5357,7 +5350,6 @@ async def get_commission_rules(
     result = [await _serialize_commission_rule(rule) for rule in rules]
     return result
 
-@api_router.put("/commission-rules/{rule_id}")
 async def update_commission_rule(rule_id: str, rule_data: CommissionRuleCreate, request: Request):
     current_user = await get_current_user(request)
     if current_user.get("role") not in COMMISSION_PROPOSER_ROLES:
@@ -5418,7 +5410,6 @@ async def update_commission_rule(rule_id: str, rule_data: CommissionRuleCreate, 
     )
     return await _serialize_commission_rule(rule)
 
-@api_router.post("/commission-rules/{rule_id}/approval")
 async def approve_commission_rule(
     rule_id: str,
     approval: CommissionApprovalAction,
@@ -5485,7 +5476,6 @@ async def approve_commission_rule(
     )
     return await _serialize_commission_rule(rule)
 
-@api_router.delete("/commission-rules/{rule_id}")
 async def delete_commission_rule(rule_id: str, request: Request):
     current_user = await get_current_user(request)
     role = current_user.get("role")
@@ -5544,7 +5534,6 @@ def _calculate_commission_from_rules(
             total_commission += (average_fi_revenue * units) * (value / 100)
     return round(total_commission, 2)
 
-@api_router.post("/commission-simulator")
 async def commission_simulator(payload: CommissionSimulatorInput, request: Request):
     current_user = await get_current_user(request)
     role = current_user.get("role")
@@ -5617,7 +5606,6 @@ async def commission_simulator(payload: CommissionSimulatorInput, request: Reque
         "suggested_units_to_target": suggested_units,
     }
 
-@api_router.post("/commission-closures")
 async def create_commission_closure(payload: CommissionClosureCreate, request: Request):
     current_user = await get_current_user(request)
     role = current_user.get("role")
@@ -5728,7 +5716,6 @@ async def create_commission_closure(payload: CommissionClosureCreate, request: R
     )
     return serialize_doc(closure)
 
-@api_router.get("/commission-closures")
 async def get_commission_closures(
     request: Request,
     group_id: Optional[str] = None,
@@ -5784,7 +5771,6 @@ async def get_commission_closures(
         enriched.append(closure)
     return [serialize_doc(c) for c in enriched]
 
-@api_router.post("/commission-closures/{closure_id}/approval")
 async def approve_commission_closure(
     closure_id: str,
     approval: CommissionClosureApprovalAction,
@@ -7954,6 +7940,34 @@ register_route_modules(
             get_sales_trends=get_sales_trends,
             get_seller_performance=get_seller_performance,
             get_vehicle_suggestions=get_vehicle_suggestions,
+        ),
+        financial_rates=FinancialRatesRouteHandlers(
+            FinancialRateCreate=FinancialRateCreate,
+            FinancialRateBulkApplyRequest=FinancialRateBulkApplyRequest,
+            create_financial_rate=create_financial_rate,
+            apply_group_default_financial_rate=apply_group_default_financial_rate,
+            get_financial_rates=get_financial_rates,
+            update_financial_rate=update_financial_rate,
+            delete_financial_rate=delete_financial_rate,
+        ),
+        commissions=CommissionsRouteHandlers(
+            CommissionMatrixUpsert=CommissionMatrixUpsert,
+            CommissionRuleCreate=CommissionRuleCreate,
+            CommissionApprovalAction=CommissionApprovalAction,
+            CommissionSimulatorInput=CommissionSimulatorInput,
+            CommissionClosureCreate=CommissionClosureCreate,
+            CommissionClosureApprovalAction=CommissionClosureApprovalAction,
+            get_commission_matrix=get_commission_matrix,
+            upsert_commission_matrix=upsert_commission_matrix,
+            create_commission_rule=create_commission_rule,
+            get_commission_rules=get_commission_rules,
+            update_commission_rule=update_commission_rule,
+            approve_commission_rule=approve_commission_rule,
+            delete_commission_rule=delete_commission_rule,
+            commission_simulator=commission_simulator,
+            create_commission_closure=create_commission_closure,
+            get_commission_closures=get_commission_closures,
+            approve_commission_closure=approve_commission_closure,
         ),
     ),
 )
