@@ -21,11 +21,13 @@ import pandas as pd
 from io import BytesIO
 import json
 from pathlib import Path
+from modules.auth_users_routes import AuthUsersRouteHandlers
 from modules.commissions_routes import CommissionsRouteHandlers
 from modules.dashboard_routes import DashboardRouteHandlers
 from modules.financial_rates_routes import FinancialRatesRouteHandlers
 from modules.health_routes import HealthRouteHandlers
 from modules.inventory_routes import InventoryRouteHandlers
+from modules.organization_catalog_routes import OrganizationCatalogRouteHandlers
 from modules.registry import RouteModuleHandlers, register_route_modules
 from modules.sales_objectives_routes import SalesObjectivesRouteHandlers
 
@@ -1417,7 +1419,6 @@ def _ensure_allowed_model_year(year: int) -> None:
 
 # ============== AUTH ROUTES ==============
 
-@api_router.post("/auth/register")
 async def register(user_data: UserCreate, request: Request):
     current_user = await get_current_user(request)
     actor_role = current_user.get("role")
@@ -1538,7 +1539,6 @@ async def register(user_data: UserCreate, request: Request):
         "created_at": user_doc["created_at"].isoformat()
     }
 
-@api_router.post("/auth/login")
 async def login(user_data: UserLogin, response: Response):
     email = str(user_data.email).strip().lower()
     user = await db.users.find_one({"email": email})
@@ -1573,13 +1573,11 @@ async def login(user_data: UserLogin, response: Response):
         "token": access_token
     }
 
-@api_router.post("/auth/logout")
 async def logout(response: Response):
     response.delete_cookie("access_token", path="/")
     response.delete_cookie("refresh_token", path="/")
     return {"message": "Logged out successfully"}
 
-@api_router.post("/auth/reset-password")
 async def reset_password(payload: PasswordResetRequest):
     email = str(payload.email).strip().lower()
 
@@ -1597,12 +1595,10 @@ async def reset_password(payload: PasswordResetRequest):
 
     return {"message": "Password updated successfully"}
 
-@api_router.get("/auth/me")
 async def get_me(request: Request):
     user = await get_current_user(request)
     return user
 
-@api_router.post("/auth/google")
 async def google_auth(request: Request, response: Response):
     """Handle Google OAuth callback"""
     data = await request.json()
@@ -1675,7 +1671,6 @@ async def google_auth(request: Request, response: Response):
 
 # ============== USERS ROUTES ==============
 
-@api_router.get("/users")
 async def get_users(request: Request):
     current_user = await get_current_user(request)
     actor_role = current_user.get("role")
@@ -1693,7 +1688,6 @@ async def get_users(request: Request):
     users = await db.users.find(query, {"password_hash": 0}).to_list(1000)
     return [serialize_doc(u) for u in users]
 
-@api_router.put("/users/{user_id}")
 async def update_user(user_id: str, request: Request):
     current_user = await get_current_user(request)
     actor_role = current_user.get("role")
@@ -1791,7 +1785,6 @@ async def update_user(user_id: str, request: Request):
     )
     return serialize_doc(user)
 
-@api_router.delete("/users/{user_id}")
 async def delete_user(user_id: str, request: Request):
     current_user = await get_current_user(request)
     actor_role = current_user.get("role")
@@ -1846,7 +1839,6 @@ async def delete_user(user_id: str, request: Request):
     )
     return {"message": "User deleted"}
 
-@api_router.get("/audit-logs")
 async def get_audit_logs(
     request: Request,
     agency_id: Optional[str] = None,
@@ -1890,7 +1882,6 @@ async def get_audit_logs(
     logs = await db.audit_logs.find(query).sort("created_at", -1).to_list(safe_limit)
     return [serialize_doc(item) for item in logs]
 
-@api_router.get("/sellers")
 async def get_sellers(request: Request, agency_id: Optional[str] = None, brand_id: Optional[str] = None, group_id: Optional[str] = None):
     """Get sellers (users with seller role) filtered by agency/brand/group"""
     current_user = await get_current_user(request)
@@ -1926,7 +1917,6 @@ async def get_sellers(request: Request, agency_id: Optional[str] = None, brand_i
 
 # ============== GROUPS ROUTES ==============
 
-@api_router.post("/groups")
 async def create_group(group_data: GroupCreate, request: Request):
     current_user = await get_current_user(request)
     if current_user["role"] != UserRole.APP_ADMIN:
@@ -1950,7 +1940,6 @@ async def create_group(group_data: GroupCreate, request: Request):
     )
     return serialize_doc(group_doc)
 
-@api_router.get("/groups")
 async def get_groups(request: Request):
     current_user = await get_current_user(request)
     
@@ -1967,7 +1956,6 @@ async def get_groups(request: Request):
     groups = await db.groups.find(query).to_list(1000)
     return [serialize_doc(g) for g in groups]
 
-@api_router.get("/groups/{group_id}")
 async def get_group(group_id: str, request: Request):
     current_user = await get_current_user(request)
     
@@ -1981,7 +1969,6 @@ async def get_group(group_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Group not found")
     return serialize_doc(group)
 
-@api_router.put("/groups/{group_id}")
 async def update_group(group_id: str, group_data: GroupCreate, request: Request):
     current_user = await get_current_user(request)
     if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN]:
@@ -2004,7 +1991,6 @@ async def update_group(group_id: str, group_data: GroupCreate, request: Request)
     )
     return serialize_doc(group)
 
-@api_router.delete("/groups/{group_id}")
 async def delete_group(group_id: str, request: Request, cascade: bool = Query(False)):
     current_user = await get_current_user(request)
     if current_user["role"] != UserRole.APP_ADMIN:
@@ -2129,7 +2115,6 @@ async def delete_group(group_id: str, request: Request, cascade: bool = Query(Fa
 
 # ============== BRANDS ROUTES ==============
 
-@api_router.post("/brands")
 async def create_brand(brand_data: BrandCreate, request: Request):
     current_user = await get_current_user(request)
     if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN]:
@@ -2171,7 +2156,6 @@ async def create_brand(brand_data: BrandCreate, request: Request):
             serialized["logo_url"] = fallback_logo
     return serialized
 
-@api_router.get("/brands")
 async def get_brands(request: Request, group_id: Optional[str] = None):
     current_user = await get_current_user(request)
     query = _build_scope_query(current_user)
@@ -2201,7 +2185,6 @@ async def get_brands(request: Request, group_id: Optional[str] = None):
         output.append(serialized)
     return output
 
-@api_router.put("/brands/{brand_id}")
 async def update_brand(brand_id: str, brand_data: BrandCreate, request: Request):
     current_user = await get_current_user(request)
     if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN, UserRole.BRAND_ADMIN]:
@@ -2263,7 +2246,6 @@ async def update_brand(brand_id: str, brand_data: BrandCreate, request: Request)
             serialized["logo_url"] = fallback_logo
     return serialized
 
-@api_router.delete("/brands/{brand_id}")
 async def delete_brand(brand_id: str, request: Request, cascade: bool = Query(False)):
     current_user = await get_current_user(request)
     if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN]:
@@ -2378,7 +2360,6 @@ async def delete_brand(brand_id: str, request: Request, cascade: bool = Query(Fa
 
 # ============== AGENCIES ROUTES ==============
 
-@api_router.post("/agencies")
 async def create_agency(agency_data: AgencyCreate, request: Request):
     current_user = await get_current_user(request)
     if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN, UserRole.BRAND_ADMIN]:
@@ -2456,7 +2437,6 @@ async def create_agency(agency_data: AgencyCreate, request: Request):
     )
     return serialize_doc(agency_doc)
 
-@api_router.get("/agencies")
 async def get_agencies(request: Request, brand_id: Optional[str] = None, group_id: Optional[str] = None):
     current_user = await get_current_user(request)
     query = _build_scope_query(current_user)
@@ -2495,7 +2475,6 @@ async def get_agencies(request: Request, brand_id: Optional[str] = None, group_i
     
     return result
 
-@api_router.put("/agencies/{agency_id}")
 async def update_agency(agency_id: str, agency_data: AgencyCreate, request: Request):
     current_user = await get_current_user(request)
     if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN, UserRole.BRAND_ADMIN, UserRole.AGENCY_ADMIN]:
@@ -2590,7 +2569,6 @@ async def update_agency(agency_id: str, agency_data: AgencyCreate, request: Requ
 
 # ============== VEHICLE CATALOG ROUTES ==============
 
-@api_router.get("/catalog/makes")
 async def get_catalog_makes(request: Request):
     await get_current_user(request)
     catalog = _build_catalog_tree_from_source()
@@ -2607,7 +2585,6 @@ async def get_catalog_makes(request: Request):
         ]
     }
 
-@api_router.get("/catalog/models")
 async def get_catalog_models(
     request: Request,
     make: str = Query(..., min_length=1),
@@ -2636,7 +2613,6 @@ async def get_catalog_models(
         ]
     }
 
-@api_router.get("/catalog/versions")
 async def get_catalog_versions(
     request: Request,
     make: str = Query(..., min_length=1),
@@ -7909,6 +7885,42 @@ async def health():
 register_route_modules(
     api_router,
     RouteModuleHandlers(
+        auth_users=AuthUsersRouteHandlers(
+            UserCreate=UserCreate,
+            UserLogin=UserLogin,
+            PasswordResetRequest=PasswordResetRequest,
+            register=register,
+            login=login,
+            logout=logout,
+            reset_password=reset_password,
+            get_me=get_me,
+            google_auth=google_auth,
+            get_users=get_users,
+            update_user=update_user,
+            delete_user=delete_user,
+            get_audit_logs=get_audit_logs,
+            get_sellers=get_sellers,
+        ),
+        organization_catalog=OrganizationCatalogRouteHandlers(
+            GroupCreate=GroupCreate,
+            BrandCreate=BrandCreate,
+            AgencyCreate=AgencyCreate,
+            create_group=create_group,
+            get_groups=get_groups,
+            get_group=get_group,
+            update_group=update_group,
+            delete_group=delete_group,
+            create_brand=create_brand,
+            get_brands=get_brands,
+            update_brand=update_brand,
+            delete_brand=delete_brand,
+            create_agency=create_agency,
+            get_agencies=get_agencies,
+            update_agency=update_agency,
+            get_catalog_makes=get_catalog_makes,
+            get_catalog_models=get_catalog_models,
+            get_catalog_versions=get_catalog_versions,
+        ),
         inventory=InventoryRouteHandlers(
             VehicleCreate=VehicleCreate,
             VehicleAgingIncentiveApply=VehicleAgingIncentiveApply,
