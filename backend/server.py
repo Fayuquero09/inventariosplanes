@@ -7039,7 +7039,8 @@ async def get_vehicle_suggestions(
     request: Request,
     group_id: Optional[str] = None,
     brand_id: Optional[str] = None,
-    agency_id: Optional[str] = None
+    agency_id: Optional[str] = None,
+    limit: int = 20,
 ):
     """Get smart suggestions for vehicles that should be promoted/discounted"""
     current_user = await get_current_user(request)
@@ -7085,10 +7086,13 @@ async def get_vehicle_suggestions(
         else:
             avg_days = 60  # Default assumption
         
-        # Suggest if aging is more than half the average
+        # Suggest only when the vehicle is beyond the expected average days to sell.
         if aging > avg_days / 2:
+            extra_aging_days = max(0, aging - avg_days)
+            if extra_aging_days <= 0:
+                continue
             financial_cost = enriched.get("financial_cost", 0)
-            projected_additional_cost = (avg_days - aging) * (vehicle["purchase_price"] * 0.12 / 365)
+            projected_additional_cost = extra_aging_days * (vehicle["purchase_price"] * 0.12 / 365)
             suggested_bonus = min(projected_additional_cost * 0.5, vehicle["purchase_price"] * 0.02)
             
             suggestions.append({
@@ -7108,7 +7112,8 @@ async def get_vehicle_suggestions(
                 "reason": f"Este vehículo lleva {aging} días en inventario. Vehículos similares se venden en promedio en {round(avg_days)} días."
             })
     
-    return sorted(suggestions, key=lambda x: x["current_aging"], reverse=True)[:20]
+    safe_limit = max(1, min(int(limit or 20), 1000))
+    return sorted(suggestions, key=lambda x: x["current_aging"], reverse=True)[:safe_limit]
 
 # ============== IMPORT ROUTES ==============
 

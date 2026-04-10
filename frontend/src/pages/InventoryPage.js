@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { vehiclesApi, vehicleCatalogApi } from '../lib/api';
+import { vehiclesApi, vehicleCatalogApi, dashboardApi } from '../lib/api';
 import { useHierarchicalFilters, HierarchicalFilters } from '../components/HierarchicalFilters';
 import { Card, CardContent } from '../components/ui/card';
 import { Button } from '../components/ui/button';
@@ -154,8 +154,29 @@ export default function InventoryPage() {
         vehicle_type: filterType !== 'all' ? filterType : undefined,
         sold_current_month_only: true
       };
-      const res = await vehiclesApi.getAll(params);
-      setVehicles(res.data);
+      const suggestionParams = {
+        group_id: params.group_id,
+        brand_id: params.brand_id,
+        agency_id: params.agency_id,
+        limit: 1000
+      };
+      const [vehiclesRes, suggestionsRes] = await Promise.all([
+        vehiclesApi.getAll(params),
+        dashboardApi.getSuggestions(suggestionParams)
+      ]);
+      const suggestionsMap = new Map(
+        (suggestionsRes.data || []).map((item) => [item.vehicle_id, item])
+      );
+      const mergedVehicles = (vehiclesRes.data || []).map((vehicle) => {
+        const suggestion = suggestionsMap.get(vehicle.id);
+        return {
+          ...vehicle,
+          aging_suggested_bonus: Number(suggestion?.suggested_bonus || 0),
+          aging_avg_days_to_sell: Number(suggestion?.avg_days_to_sell || 0),
+          aging_suggestion_reason: suggestion?.reason || null
+        };
+      });
+      setVehicles(mergedVehicles);
     } catch (error) {
       toast.error('Error al cargar datos');
     } finally {
@@ -324,6 +345,8 @@ export default function InventoryPage() {
         return Number(vehicle.aging_days || 0);
       case 'financial_cost':
         return Number(vehicle.financial_cost || 0);
+      case 'aging_incentive':
+        return Number(vehicle.aging_suggested_bonus || 0);
       case 'sale_commission':
         return Number(vehicle.sale_commission || 0);
       case 'sale_price':
@@ -669,6 +692,11 @@ export default function InventoryPage() {
                   </button>
                 </TableHead>
                 <TableHead className="text-right">
+                  <button type="button" onClick={() => toggleSort('aging_incentive')} className="inline-flex items-center gap-1 justify-end w-full">
+                    Incentivo Aging {renderSortIndicator('aging_incentive')}
+                  </button>
+                </TableHead>
+                <TableHead className="text-right">
                   <button type="button" onClick={() => toggleSort('sale_price')} className="inline-flex items-center gap-1 justify-end w-full">
                     Valor factura {renderSortIndicator('sale_price')}
                   </button>
@@ -700,7 +728,7 @@ export default function InventoryPage() {
               {loading ? (
                 [...Array(5)].map((_, i) => (
                   <TableRow key={i}>
-                    {[...Array(13)].map((_, j) => (
+                    {[...Array(14)].map((_, j) => (
                       <TableCell key={j}>
                         <Skeleton className="h-5 w-full" />
                       </TableCell>
@@ -709,7 +737,7 @@ export default function InventoryPage() {
                 ))
               ) : sortedVehicles.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={13} className="text-center py-12">
+                  <TableCell colSpan={14} className="text-center py-12">
                     <Car size={48} className="mx-auto text-muted-foreground mb-4" />
                     <p className="text-muted-foreground">No se encontraron vehículos</p>
                   </TableCell>
@@ -739,6 +767,13 @@ export default function InventoryPage() {
                     </TableCell>
                     <TableCell className="text-right tabular-nums text-[#E63946]">
                       {formatCurrency(vehicle.financial_cost)}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {vehicle.status !== 'in_stock'
+                        ? '—'
+                        : vehicle.aging_suggestion_reason
+                          ? formatCurrency(vehicle.aging_suggested_bonus)
+                          : <span className="text-muted-foreground">Sin sugerencia</span>}
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
                       {vehicle.status === 'sold' && vehicle.sale_price !== undefined && vehicle.sale_price !== null
