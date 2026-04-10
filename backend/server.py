@@ -21,9 +21,11 @@ import pandas as pd
 from io import BytesIO
 import json
 from pathlib import Path
+from modules.dashboard_routes import DashboardRouteHandlers
 from modules.health_routes import HealthRouteHandlers
 from modules.inventory_routes import InventoryRouteHandlers
 from modules.registry import RouteModuleHandlers, register_route_modules
+from modules.sales_objectives_routes import SalesObjectivesRouteHandlers
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -4347,7 +4349,6 @@ async def update_vehicle(vehicle_id: str, request: Request):
 
 # ============== SALES OBJECTIVES ROUTES ==============
 
-@api_router.post("/sales-objectives")
 async def create_sales_objective(objective_data: SalesObjectiveCreate, request: Request):
     current_user = await get_current_user(request)
     role = current_user.get("role")
@@ -4429,7 +4430,6 @@ async def create_sales_objective(objective_data: SalesObjectiveCreate, request: 
     )
     return serialize_doc(objective_doc)
 
-@api_router.get("/sales-objectives")
 async def get_sales_objectives(
     request: Request,
     group_id: Optional[str] = None,
@@ -4550,7 +4550,6 @@ async def get_sales_objectives(
     
     return result
 
-@api_router.get("/sales-objectives/suggestion")
 async def get_sales_objective_suggestion(
     request: Request,
     agency_id: str,
@@ -4805,7 +4804,6 @@ async def get_sales_objective_suggestion(
         "items": suggestion_items,
     }
 
-@api_router.put("/sales-objectives/{objective_id}")
 async def update_sales_objective(objective_id: str, objective_data: SalesObjectiveCreate, request: Request):
     current_user = await get_current_user(request)
     role = current_user.get("role")
@@ -4866,7 +4864,6 @@ async def update_sales_objective(objective_id: str, objective_data: SalesObjecti
     )
     return serialize_doc(objective)
 
-@api_router.post("/sales-objectives/{objective_id}/approval")
 async def approve_sales_objective(
     objective_id: str,
     approval: SalesObjectiveApprovalAction,
@@ -6295,7 +6292,6 @@ def _mexico_lft_holidays_by_month(year: int) -> Dict[int, List[int]]:
     return {month: sorted(days) for month, days in holidays.items()}
 
 
-@api_router.get("/dashboard/monthly-close")
 async def get_dashboard_monthly_close(
     request: Request,
     month: Optional[int] = None,
@@ -6334,7 +6330,6 @@ async def get_dashboard_monthly_close(
     }
 
 
-@api_router.get("/dashboard/monthly-close-calendar")
 async def get_dashboard_monthly_close_calendar(
     request: Request,
     year: Optional[int] = None,
@@ -6386,7 +6381,6 @@ async def get_dashboard_monthly_close_calendar(
     }
 
 
-@api_router.put("/dashboard/monthly-close")
 async def upsert_dashboard_monthly_close(payload: DashboardMonthlyCloseUpsert, request: Request):
     current_user = await get_current_user(request)
     if current_user.get("role") != UserRole.APP_ADMIN:
@@ -6465,7 +6459,6 @@ async def upsert_dashboard_monthly_close(payload: DashboardMonthlyCloseUpsert, r
         "updated_at": updated.get("updated_at") if updated else now,
     }
 
-@api_router.get("/dashboard/kpis")
 async def get_dashboard_kpis(
     request: Request, 
     group_id: Optional[str] = None,
@@ -6675,7 +6668,6 @@ async def get_dashboard_kpis(
         "industry_close_month_offset": industry_close_month_offset,
     }
 
-@api_router.get("/dashboard/trends")
 async def get_sales_trends(
     request: Request, 
     group_id: Optional[str] = None,
@@ -7143,7 +7135,6 @@ async def get_sales_trends(
 
     return trends
 
-@api_router.get("/dashboard/seller-performance")
 async def get_seller_performance(request: Request, agency_id: Optional[str] = None, month: Optional[int] = None, year: Optional[int] = None):
     current_user = await get_current_user(request)
     
@@ -7259,7 +7250,6 @@ async def _build_vehicle_aging_suggestion(
         "reason": f"Este vehículo lleva {aging} días en inventario. Vehículos similares se venden en promedio en {round(avg_days)} días.",
     }
 
-@api_router.get("/dashboard/suggestions")
 async def get_vehicle_suggestions(
     request: Request,
     group_id: Optional[str] = None,
@@ -7945,6 +7935,25 @@ register_route_modules(
         health=HealthRouteHandlers(
             root=root,
             health=health,
+        ),
+        sales_objectives=SalesObjectivesRouteHandlers(
+            SalesObjectiveCreate=SalesObjectiveCreate,
+            SalesObjectiveApprovalAction=SalesObjectiveApprovalAction,
+            create_sales_objective=create_sales_objective,
+            get_sales_objectives=get_sales_objectives,
+            get_sales_objective_suggestion=get_sales_objective_suggestion,
+            update_sales_objective=update_sales_objective,
+            approve_sales_objective=approve_sales_objective,
+        ),
+        dashboard=DashboardRouteHandlers(
+            DashboardMonthlyCloseUpsert=DashboardMonthlyCloseUpsert,
+            get_dashboard_monthly_close=get_dashboard_monthly_close,
+            get_dashboard_monthly_close_calendar=get_dashboard_monthly_close_calendar,
+            upsert_dashboard_monthly_close=upsert_dashboard_monthly_close,
+            get_dashboard_kpis=get_dashboard_kpis,
+            get_sales_trends=get_sales_trends,
+            get_seller_performance=get_seller_performance,
+            get_vehicle_suggestions=get_vehicle_suggestions,
         ),
     ),
 )
