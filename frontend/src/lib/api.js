@@ -77,6 +77,7 @@ export const vehiclesApi = {
   getOne: (id) => api.get(`/vehicles/${id}`),
   create: (data) => api.post('/vehicles', data),
   update: (id, data) => api.put(`/vehicles/${id}`, data),
+  applyAgingIncentive: (id, data) => api.post(`/vehicles/${id}/aging-incentive`, data),
   import: (file) => {
     const formData = new FormData();
     formData.append('file', file);

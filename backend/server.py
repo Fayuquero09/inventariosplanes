@@ -575,6 +575,9 @@ class SaleResponse(BaseModel):
     effective_revenue: Optional[float] = None
     brand_incentive_amount: Optional[float] = None
     dealer_incentive_amount: Optional[float] = None
+    aging_incentive_sale_discount_amount: Optional[float] = None
+    aging_incentive_seller_bonus_amount: Optional[float] = None
+    aging_incentive_total_amount: Optional[float] = None
     sale_date: str
     fi_revenue: float
     plant_incentive: float = 0
@@ -604,6 +607,11 @@ class VehicleSuggestion(BaseModel):
     financial_cost: float
     suggested_bonus: float
     reason: str
+
+class VehicleAgingIncentiveApply(BaseModel):
+    sale_discount_amount: float = Field(0, ge=0)
+    seller_bonus_amount: float = Field(0, ge=0)
+    notes: Optional[str] = None
 
 class DashboardMonthlyCloseUpsert(BaseModel):
     month: int = Field(..., ge=1, le=12)
@@ -4210,6 +4218,95 @@ async def get_vehicle(vehicle_id: str, request: Request):
     _ensure_doc_scope_access(current_user, vehicle, detail="No tienes acceso a este vehículo")
     return await enrich_vehicle(vehicle)
 
+@api_router.post("/vehicles/{vehicle_id}/aging-incentive")
+async def apply_vehicle_aging_incentive(
+    vehicle_id: str,
+    payload: VehicleAgingIncentiveApply,
+    request: Request,
+):
+    current_user = await get_current_user(request)
+    allowed_roles = {
+        UserRole.APP_ADMIN,
+        UserRole.GROUP_ADMIN,
+        UserRole.GROUP_FINANCE_MANAGER,
+        UserRole.BRAND_ADMIN,
+        UserRole.AGENCY_ADMIN,
+        UserRole.AGENCY_GENERAL_MANAGER,
+        UserRole.AGENCY_SALES_MANAGER,
+    }
+    if current_user.get("role") not in allowed_roles:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    vehicle = await db.vehicles.find_one({"_id": ObjectId(vehicle_id)})
+    if not vehicle:
+        raise HTTPException(status_code=404, detail="Vehicle not found")
+    _ensure_doc_scope_access(current_user, vehicle, detail="No tienes acceso a este vehículo")
+    if vehicle.get("status") != "in_stock":
+        raise HTTPException(status_code=400, detail="Solo se puede configurar incentivo aging para vehículos en stock")
+
+    enriched_vehicle = await enrich_vehicle(vehicle)
+    suggestion = await _build_vehicle_aging_suggestion(vehicle, enriched_vehicle=enriched_vehicle)
+    if not suggestion:
+        raise HTTPException(status_code=400, detail="No hay incentivo sugerido para este vehículo en este momento")
+
+    sale_discount_amount = round(_to_non_negative_float(payload.sale_discount_amount, 0.0), 2)
+    seller_bonus_amount = round(_to_non_negative_float(payload.seller_bonus_amount, 0.0), 2)
+    total_amount = round(sale_discount_amount + seller_bonus_amount, 2)
+    if total_amount <= 0:
+        raise HTTPException(status_code=400, detail="Debes capturar un monto mayor a cero para venta o vendedor")
+
+    suggested_amount = round(_to_non_negative_float(suggestion.get("suggested_bonus"), 0.0), 2)
+    if total_amount - suggested_amount > 0.01:
+        raise HTTPException(
+            status_code=400,
+            detail=f"El total aplicado ({total_amount}) no puede ser mayor al sugerido ({suggested_amount})",
+        )
+
+    plan_doc = {
+        "active": True,
+        "suggested_amount": suggested_amount,
+        "sale_discount_amount": sale_discount_amount,
+        "seller_bonus_amount": seller_bonus_amount,
+        "total_amount": total_amount,
+        "avg_days_to_sell": int(suggestion.get("avg_days_to_sell") or 0),
+        "current_aging": int(suggestion.get("current_aging") or 0),
+        "reason": suggestion.get("reason"),
+        "notes": (payload.notes or "").strip() or None,
+        "configured_by": current_user.get("id"),
+        "configured_by_name": current_user.get("name"),
+        "configured_at": datetime.now(timezone.utc),
+        "applied_sale_id": None,
+        "applied_at": None,
+        "applied_sale_discount_amount": 0.0,
+        "applied_seller_bonus_amount": 0.0,
+    }
+
+    await db.vehicles.update_one({"_id": ObjectId(vehicle_id)}, {"$set": {"aging_incentive_plan": plan_doc}})
+    updated_vehicle = await db.vehicles.find_one({"_id": ObjectId(vehicle_id)})
+
+    await log_audit_event(
+        request=request,
+        current_user=current_user,
+        action="apply_vehicle_aging_incentive",
+        entity_type="vehicle",
+        entity_id=vehicle_id,
+        group_id=vehicle.get("group_id"),
+        brand_id=vehicle.get("brand_id"),
+        agency_id=vehicle.get("agency_id"),
+        details={
+            "vin": vehicle.get("vin"),
+            "model": vehicle.get("model"),
+            "trim": vehicle.get("trim"),
+            "suggested_amount": suggested_amount,
+            "sale_discount_amount": sale_discount_amount,
+            "seller_bonus_amount": seller_bonus_amount,
+            "total_amount": total_amount,
+            "notes": plan_doc.get("notes"),
+        },
+    )
+
+    return await enrich_vehicle(updated_vehicle)
+
 @api_router.put("/vehicles/{vehicle_id}")
 async def update_vehicle(vehicle_id: str, request: Request):
     current_user = await get_current_user(request)
@@ -5870,6 +5967,57 @@ async def calculate_commission(
 
     return round(total_commission, 2)
 
+def _extract_active_aging_incentive_plan(vehicle: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    plan = (vehicle or {}).get("aging_incentive_plan")
+    if not isinstance(plan, dict):
+        return None
+    if not bool(plan.get("active")):
+        return None
+
+    sale_discount_amount = round(_to_non_negative_float(plan.get("sale_discount_amount"), 0.0), 2)
+    seller_bonus_amount = round(_to_non_negative_float(plan.get("seller_bonus_amount"), 0.0), 2)
+    total_amount = round(sale_discount_amount + seller_bonus_amount, 2)
+    if total_amount <= 0:
+        return None
+
+    return {
+        "sale_discount_amount": sale_discount_amount,
+        "seller_bonus_amount": seller_bonus_amount,
+        "total_amount": total_amount,
+        "suggested_amount": round(_to_non_negative_float(plan.get("suggested_amount"), 0.0), 2),
+        "configured_by": plan.get("configured_by"),
+        "configured_by_name": plan.get("configured_by_name"),
+        "configured_at": plan.get("configured_at"),
+    }
+
+
+def _apply_aging_plan_to_effective_pricing(
+    effective_pricing: Dict[str, Any],
+    aging_plan: Optional[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], Dict[str, float]]:
+    pricing = dict(effective_pricing or {})
+    applied_sale_discount = 0.0
+    applied_seller_bonus = 0.0
+
+    if aging_plan:
+        transaction_price = _to_non_negative_float(pricing.get("transaction_price"), 0.0)
+        planned_sale_discount = _to_non_negative_float(aging_plan.get("sale_discount_amount"), 0.0)
+        applied_sale_discount = round(min(transaction_price, planned_sale_discount), 2)
+        transaction_price = round(max(0.0, transaction_price - applied_sale_discount), 2)
+        pricing["transaction_price"] = transaction_price
+
+        brand_incentive_amount = _to_non_negative_float(pricing.get("brand_incentive_amount"), 0.0)
+        pricing["commission_base_price"] = round(transaction_price + brand_incentive_amount, 2)
+        pricing["effective_revenue"] = round(transaction_price + brand_incentive_amount, 2)
+
+        applied_seller_bonus = round(_to_non_negative_float(aging_plan.get("seller_bonus_amount"), 0.0), 2)
+
+    return pricing, {
+        "sale_discount_amount": applied_sale_discount,
+        "seller_bonus_amount": applied_seller_bonus,
+        "total_amount": round(applied_sale_discount + applied_seller_bonus, 2),
+    }
+
 @api_router.post("/sales")
 async def create_sale(sale_data: SaleCreate, request: Request):
     current_user = await get_current_user(request)
@@ -5911,6 +6059,8 @@ async def create_sale(sale_data: SaleCreate, request: Request):
         fallback_msrp=_to_non_negative_float(sale_data.sale_price, _to_non_negative_float(vehicle.get("msrp"), 0.0)),
     )
     effective_pricing = _apply_manual_sale_price_override(configured_pricing, sale_data.sale_price)
+    aging_plan = _extract_active_aging_incentive_plan(vehicle)
+    effective_pricing, applied_aging = _apply_aging_plan_to_effective_pricing(effective_pricing, aging_plan)
     resolved_sale_price = _to_non_negative_float(effective_pricing.get("transaction_price"), 0.0)
     if resolved_sale_price <= 0:
         raise HTTPException(
@@ -5919,7 +6069,7 @@ async def create_sale(sale_data: SaleCreate, request: Request):
         )
     
     # Calculate commission
-    commission = await calculate_commission(
+    base_commission = await calculate_commission(
         {
             "sale_price": resolved_sale_price,
             "commission_base_price": _to_non_negative_float(effective_pricing.get("commission_base_price"), resolved_sale_price),
@@ -5932,6 +6082,7 @@ async def create_sale(sale_data: SaleCreate, request: Request):
         vehicle=vehicle,
         sale_date=sale_date,
     )
+    commission = round(base_commission + _to_non_negative_float(applied_aging.get("seller_bonus_amount"), 0.0), 2)
     
     sale_doc = {
         "vehicle_id": sale_data.vehicle_id,
@@ -5945,6 +6096,9 @@ async def create_sale(sale_data: SaleCreate, request: Request):
         "brand_incentive_amount": round(_to_non_negative_float(effective_pricing.get("brand_incentive_amount"), 0.0), 2),
         "dealer_incentive_amount": round(_to_non_negative_float(effective_pricing.get("dealer_incentive_amount"), 0.0), 2),
         "undocumented_dealer_incentive_amount": round(_to_non_negative_float(effective_pricing.get("undocumented_dealer_incentive_amount"), 0.0), 2),
+        "aging_incentive_sale_discount_amount": round(_to_non_negative_float(applied_aging.get("sale_discount_amount"), 0.0), 2),
+        "aging_incentive_seller_bonus_amount": round(_to_non_negative_float(applied_aging.get("seller_bonus_amount"), 0.0), 2),
+        "aging_incentive_total_amount": round(_to_non_negative_float(applied_aging.get("total_amount"), 0.0), 2),
         "sale_date": sale_date,
         "fi_revenue": sale_data.fi_revenue,
         "plant_incentive": sale_data.plant_incentive,
@@ -5957,9 +6111,18 @@ async def create_sale(sale_data: SaleCreate, request: Request):
     result = await db.sales.insert_one(sale_doc)
     
     # Mark vehicle as sold
+    vehicle_update = {"status": "sold", "exit_date": sale_date}
+    if aging_plan:
+        vehicle_update.update({
+            "aging_incentive_plan.active": False,
+            "aging_incentive_plan.applied_sale_id": str(result.inserted_id),
+            "aging_incentive_plan.applied_at": datetime.now(timezone.utc),
+            "aging_incentive_plan.applied_sale_discount_amount": round(_to_non_negative_float(applied_aging.get("sale_discount_amount"), 0.0), 2),
+            "aging_incentive_plan.applied_seller_bonus_amount": round(_to_non_negative_float(applied_aging.get("seller_bonus_amount"), 0.0), 2),
+        })
     await db.vehicles.update_one(
         {"_id": ObjectId(sale_data.vehicle_id)},
-        {"$set": {"status": "sold", "exit_date": sale_date}}
+        {"$set": vehicle_update}
     )
 
     await log_audit_event(
@@ -5980,8 +6143,12 @@ async def create_sale(sale_data: SaleCreate, request: Request):
             "brand_incentive_amount": round(_to_non_negative_float(effective_pricing.get("brand_incentive_amount"), 0.0), 2),
             "dealer_incentive_amount": round(_to_non_negative_float(effective_pricing.get("dealer_incentive_amount"), 0.0), 2),
             "undocumented_dealer_incentive_amount": round(_to_non_negative_float(effective_pricing.get("undocumented_dealer_incentive_amount"), 0.0), 2),
+            "aging_incentive_sale_discount_amount": round(_to_non_negative_float(applied_aging.get("sale_discount_amount"), 0.0), 2),
+            "aging_incentive_seller_bonus_amount": round(_to_non_negative_float(applied_aging.get("seller_bonus_amount"), 0.0), 2),
+            "aging_incentive_total_amount": round(_to_non_negative_float(applied_aging.get("total_amount"), 0.0), 2),
             "fi_revenue": sale_data.fi_revenue,
             "plant_incentive": sale_data.plant_incentive,
+            "base_commission": base_commission,
             "commission": commission,
         },
     )
@@ -7034,6 +7201,66 @@ async def get_seller_performance(request: Request, agency_id: Optional[str] = No
     
     return sorted(result, key=lambda x: x["units"], reverse=True)
 
+
+async def _build_vehicle_aging_suggestion(
+    vehicle: Dict[str, Any],
+    *,
+    enriched_vehicle: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    enriched = enriched_vehicle or await enrich_vehicle(vehicle)
+    aging = int(enriched.get("aging_days", 0) or 0)
+
+    similar_query = {
+        "model": vehicle.get("model"),
+        "trim": vehicle.get("trim"),
+        "color": vehicle.get("color"),
+        "status": "sold",
+        "group_id": vehicle.get("group_id"),
+    }
+    similar_sold = await db.vehicles.find(similar_query).to_list(100)
+
+    if similar_sold:
+        avg_days = sum(
+            (v.get("exit_date", datetime.now(timezone.utc)) - v.get("entry_date", datetime.now(timezone.utc))).days
+            if isinstance(v.get("exit_date"), datetime) and isinstance(v.get("entry_date"), datetime)
+            else 60
+            for v in similar_sold
+        ) / len(similar_sold)
+    else:
+        avg_days = 60  # fallback when no historical similar sales exist
+
+    # Suggest only after exceeding expected average days-to-sell.
+    if aging <= avg_days:
+        return None
+
+    extra_aging_days = float(aging) - float(avg_days)
+
+    purchase_price = _to_non_negative_float(vehicle.get("purchase_price"), 0.0)
+    if purchase_price <= 0:
+        return None
+
+    projected_additional_cost = extra_aging_days * (purchase_price * 0.12 / 365)
+    suggested_bonus = min(projected_additional_cost * 0.5, purchase_price * 0.02)
+    if suggested_bonus <= 0:
+        return None
+
+    return {
+        "vehicle_id": enriched["id"],
+        "vehicle_info": {
+            "model": vehicle.get("model"),
+            "year": vehicle.get("year"),
+            "trim": vehicle.get("trim"),
+            "color": vehicle.get("color"),
+            "vin": vehicle.get("vin"),
+            "purchase_price": purchase_price,
+        },
+        "avg_days_to_sell": round(avg_days),
+        "current_aging": aging,
+        "financial_cost": _to_non_negative_float(enriched.get("financial_cost"), 0.0),
+        "suggested_bonus": round(suggested_bonus, 2),
+        "reason": f"Este vehículo lleva {aging} días en inventario. Vehículos similares se venden en promedio en {round(avg_days)} días.",
+    }
+
 @api_router.get("/dashboard/suggestions")
 async def get_vehicle_suggestions(
     request: Request,
@@ -7064,53 +7291,9 @@ async def get_vehicle_suggestions(
     
     for vehicle in vehicles:
         enriched = await enrich_vehicle(vehicle)
-        aging = enriched.get("aging_days", 0)
-        
-        # Find average days to sell for similar vehicles
-        similar_query = {
-            "model": vehicle["model"],
-            "trim": vehicle["trim"],
-            "color": vehicle["color"],
-            "status": "sold",
-            "group_id": vehicle.get("group_id")
-        }
-        similar_sold = await db.vehicles.find(similar_query).to_list(100)
-        
-        if similar_sold:
-            avg_days = sum(
-                (v.get("exit_date", datetime.now(timezone.utc)) - v.get("entry_date", datetime.now(timezone.utc))).days 
-                if isinstance(v.get("exit_date"), datetime) and isinstance(v.get("entry_date"), datetime)
-                else 60
-                for v in similar_sold
-            ) / len(similar_sold)
-        else:
-            avg_days = 60  # Default assumption
-        
-        # Suggest only when the vehicle is beyond the expected average days to sell.
-        if aging > avg_days / 2:
-            extra_aging_days = max(0, aging - avg_days)
-            if extra_aging_days <= 0:
-                continue
-            financial_cost = enriched.get("financial_cost", 0)
-            projected_additional_cost = extra_aging_days * (vehicle["purchase_price"] * 0.12 / 365)
-            suggested_bonus = min(projected_additional_cost * 0.5, vehicle["purchase_price"] * 0.02)
-            
-            suggestions.append({
-                "vehicle_id": enriched["id"],
-                "vehicle_info": {
-                    "model": vehicle["model"],
-                    "year": vehicle["year"],
-                    "trim": vehicle["trim"],
-                    "color": vehicle["color"],
-                    "vin": vehicle["vin"],
-                    "purchase_price": vehicle["purchase_price"]
-                },
-                "avg_days_to_sell": round(avg_days),
-                "current_aging": aging,
-                "financial_cost": financial_cost,
-                "suggested_bonus": round(suggested_bonus, 2),
-                "reason": f"Este vehículo lleva {aging} días en inventario. Vehículos similares se venden en promedio en {round(avg_days)} días."
-            })
+        suggestion = await _build_vehicle_aging_suggestion(vehicle, enriched_vehicle=enriched)
+        if suggestion:
+            suggestions.append(suggestion)
     
     safe_limit = max(1, min(int(limit or 20), 1000))
     return sorted(suggestions, key=lambda x: x["current_aging"], reverse=True)[:safe_limit]
@@ -7652,12 +7835,14 @@ async def import_sales(request: Request, file: UploadFile = File(...)):
                 fallback_msrp=_to_non_negative_float(row.get('sale_price'), _to_non_negative_float(vehicle.get("msrp"), 0.0)),
             )
             effective_pricing = _apply_manual_sale_price_override(configured_pricing, row.get('sale_price'))
+            aging_plan = _extract_active_aging_incentive_plan(vehicle)
+            effective_pricing, applied_aging = _apply_aging_plan_to_effective_pricing(effective_pricing, aging_plan)
             resolved_sale_price = _to_non_negative_float(effective_pricing.get("transaction_price"), 0.0)
             if resolved_sale_price <= 0:
                 errors.append(f"Row {idx + 2}: unable to resolve effective sale price")
                 continue
 
-            commission = await calculate_commission(
+            base_commission = await calculate_commission(
                 {
                     "sale_price": float(resolved_sale_price),
                     "commission_base_price": _to_non_negative_float(effective_pricing.get("commission_base_price"), resolved_sale_price),
@@ -7670,6 +7855,7 @@ async def import_sales(request: Request, file: UploadFile = File(...)):
                 vehicle=vehicle,
                 sale_date=sale_date,
             )
+            commission = round(base_commission + _to_non_negative_float(applied_aging.get("seller_bonus_amount"), 0.0), 2)
             
             sale_doc = {
                 "vehicle_id": str(row['vehicle_id']),
@@ -7683,6 +7869,9 @@ async def import_sales(request: Request, file: UploadFile = File(...)):
                 "brand_incentive_amount": round(_to_non_negative_float(effective_pricing.get("brand_incentive_amount"), 0.0), 2),
                 "dealer_incentive_amount": round(_to_non_negative_float(effective_pricing.get("dealer_incentive_amount"), 0.0), 2),
                 "undocumented_dealer_incentive_amount": round(_to_non_negative_float(effective_pricing.get("undocumented_dealer_incentive_amount"), 0.0), 2),
+                "aging_incentive_sale_discount_amount": round(_to_non_negative_float(applied_aging.get("sale_discount_amount"), 0.0), 2),
+                "aging_incentive_seller_bonus_amount": round(_to_non_negative_float(applied_aging.get("seller_bonus_amount"), 0.0), 2),
+                "aging_incentive_total_amount": round(_to_non_negative_float(applied_aging.get("total_amount"), 0.0), 2),
                 "sale_date": sale_date,
                 "fi_revenue": fi_revenue,
                 "plant_incentive": plant_incentive,
@@ -7693,12 +7882,21 @@ async def import_sales(request: Request, file: UploadFile = File(...)):
                 "created_at": datetime.now(timezone.utc)
             }
             
-            await db.sales.insert_one(sale_doc)
+            sale_result = await db.sales.insert_one(sale_doc)
             
             # Mark vehicle as sold
+            vehicle_update = {"status": "sold", "exit_date": sale_date}
+            if aging_plan:
+                vehicle_update.update({
+                    "aging_incentive_plan.active": False,
+                    "aging_incentive_plan.applied_sale_id": str(sale_result.inserted_id),
+                    "aging_incentive_plan.applied_at": datetime.now(timezone.utc),
+                    "aging_incentive_plan.applied_sale_discount_amount": round(_to_non_negative_float(applied_aging.get("sale_discount_amount"), 0.0), 2),
+                    "aging_incentive_plan.applied_seller_bonus_amount": round(_to_non_negative_float(applied_aging.get("seller_bonus_amount"), 0.0), 2),
+                })
             await db.vehicles.update_one(
                 {"_id": ObjectId(row['vehicle_id'])},
-                {"$set": {"status": "sold", "exit_date": sale_date}}
+                {"$set": vehicle_update}
             )
             
             imported += 1

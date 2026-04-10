@@ -70,6 +70,14 @@ export default function InventoryPage() {
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
+  const [isAgingIncentiveDialogOpen, setIsAgingIncentiveDialogOpen] = useState(false);
+  const [selectedVehicleForAgingIncentive, setSelectedVehicleForAgingIncentive] = useState(null);
+  const [savingAgingIncentive, setSavingAgingIncentive] = useState(false);
+  const [agingIncentiveForm, setAgingIncentiveForm] = useState({
+    sale_discount_amount: '0',
+    seller_bonus_amount: '0',
+    notes: ''
+  });
   const [newVehicle, setNewVehicle] = useState({
     vin: '',
     make: '',
@@ -400,6 +408,64 @@ export default function InventoryPage() {
     return <span className="text-xs text-[#002FA7]">{sortConfig.direction === 'asc' ? '↑' : '↓'}</span>;
   };
 
+  const openAgingIncentiveDialog = (vehicle) => {
+    const suggested = Number(vehicle?.aging_suggested_bonus || 0);
+    setSelectedVehicleForAgingIncentive(vehicle);
+    setAgingIncentiveForm({
+      sale_discount_amount: String(Number(vehicle?.aging_incentive_plan?.sale_discount_amount || 0)),
+      seller_bonus_amount: String(
+        Number(
+          vehicle?.aging_incentive_plan?.seller_bonus_amount
+          ?? (suggested > 0 ? suggested : 0)
+        )
+      ),
+      notes: vehicle?.aging_incentive_plan?.notes || ''
+    });
+    setIsAgingIncentiveDialogOpen(true);
+  };
+
+  const agingSuggestedAmount = Number(selectedVehicleForAgingIncentive?.aging_suggested_bonus || 0);
+  const agingSaleDiscountAmount = Number(agingIncentiveForm.sale_discount_amount || 0);
+  const agingSellerBonusAmount = Number(agingIncentiveForm.seller_bonus_amount || 0);
+  const agingAppliedTotal = agingSaleDiscountAmount + agingSellerBonusAmount;
+  const agingRemaining = agingSuggestedAmount - agingAppliedTotal;
+  const agingExceedsSuggestion = agingAppliedTotal - agingSuggestedAmount > 0.01;
+
+  const handleSaveAgingIncentive = async (e) => {
+    e.preventDefault();
+    if (!selectedVehicleForAgingIncentive?.id) return;
+    if (agingAppliedTotal <= 0) {
+      toast.error('Captura monto para venta o para vendedor');
+      return;
+    }
+    if (agingSuggestedAmount <= 0) {
+      toast.error('Este vehículo no tiene incentivo sugerido vigente');
+      return;
+    }
+    if (agingExceedsSuggestion) {
+      toast.error('El total aplicado no puede ser mayor al incentivo sugerido');
+      return;
+    }
+
+    setSavingAgingIncentive(true);
+    try {
+      await vehiclesApi.applyAgingIncentive(selectedVehicleForAgingIncentive.id, {
+        sale_discount_amount: agingSaleDiscountAmount,
+        seller_bonus_amount: agingSellerBonusAmount,
+        notes: agingIncentiveForm.notes?.trim() || null
+      });
+      toast.success('Incentivo de aging aplicado');
+      setIsAgingIncentiveDialogOpen(false);
+      setSelectedVehicleForAgingIncentive(null);
+      fetchData();
+    } catch (error) {
+      const detail = error.response?.data?.detail;
+      toast.error(typeof detail === 'string' ? detail : 'No se pudo aplicar el incentivo de aging');
+    } finally {
+      setSavingAgingIncentive(false);
+    }
+  };
+
   // Calculate totals
   const totals = {
     count: filteredVehicles.length,
@@ -608,6 +674,128 @@ export default function InventoryPage() {
         </div>
       </div>
 
+      <Dialog
+        open={isAgingIncentiveDialogOpen}
+        onOpenChange={(open) => {
+          setIsAgingIncentiveDialogOpen(open);
+          if (!open) setSelectedVehicleForAgingIncentive(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-[560px]">
+          <DialogHeader>
+            <DialogTitle>Aplicar Incentivo por Aging</DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleSaveAgingIncentive} className="space-y-4">
+            <div className="rounded-md border border-border/60 bg-muted/30 p-3">
+              <div className="font-medium">
+                {selectedVehicleForAgingIncentive?.model} {selectedVehicleForAgingIncentive?.trim}
+              </div>
+              <div className="text-sm text-muted-foreground">
+                VIN: {selectedVehicleForAgingIncentive?.vin} • Aging: {selectedVehicleForAgingIncentive?.aging_days || 0} días
+              </div>
+              <div className="text-sm mt-2">
+                Sugerido: <span className="font-semibold">{formatCurrency(agingSuggestedAmount)}</span>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                disabled={agingSuggestedAmount <= 0}
+                onClick={() => setAgingIncentiveForm((prev) => ({
+                  ...prev,
+                  sale_discount_amount: String(agingSuggestedAmount),
+                  seller_bonus_amount: '0'
+                }))}
+              >
+                100% a Venta
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={agingSuggestedAmount <= 0}
+                onClick={() => setAgingIncentiveForm((prev) => ({
+                  ...prev,
+                  sale_discount_amount: '0',
+                  seller_bonus_amount: String(agingSuggestedAmount)
+                }))}
+              >
+                100% a Vendedor
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setAgingIncentiveForm((prev) => ({
+                  ...prev,
+                  sale_discount_amount: '0',
+                  seller_bonus_amount: '0'
+                }))}
+              >
+                Limpiar
+              </Button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Aplicar a venta ($)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={agingIncentiveForm.sale_discount_amount}
+                  onChange={(e) => setAgingIncentiveForm((prev) => ({ ...prev, sale_discount_amount: e.target.value }))}
+                />
+                <p className="text-xs text-muted-foreground">Este monto reduce precio de venta al registrar la operación.</p>
+              </div>
+              <div className="space-y-2">
+                <Label>Aplicar a vendedor ($)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={agingIncentiveForm.seller_bonus_amount}
+                  onChange={(e) => setAgingIncentiveForm((prev) => ({ ...prev, seller_bonus_amount: e.target.value }))}
+                />
+                <p className="text-xs text-muted-foreground">Este monto se suma como bono directo a la comisión.</p>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Notas (opcional)</Label>
+              <Input
+                value={agingIncentiveForm.notes}
+                onChange={(e) => setAgingIncentiveForm((prev) => ({ ...prev, notes: e.target.value }))}
+                placeholder="Ej: priorizar salida por costo financiero"
+              />
+            </div>
+
+            <div className="rounded-md border border-border/60 p-3 text-sm">
+              <div>Total aplicado: <span className="font-semibold">{formatCurrency(agingAppliedTotal)}</span></div>
+              <div className={agingRemaining < 0 ? 'text-[#E63946]' : 'text-muted-foreground'}>
+                Remanente sugerido: {formatCurrency(agingRemaining)}
+              </div>
+              {agingExceedsSuggestion && (
+                <div className="text-[#E63946] mt-1">El total aplicado no puede superar el sugerido.</div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="outline" onClick={() => setIsAgingIncentiveDialogOpen(false)}>
+                Cancelar
+              </Button>
+              <Button
+                type="submit"
+                className="bg-[#002FA7] hover:bg-[#002FA7]/90"
+                disabled={savingAgingIncentive || agingExceedsSuggestion || agingSuggestedAmount <= 0}
+              >
+                {savingAgingIncentive ? 'Guardando...' : 'Aplicar incentivo'}
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
+
       {/* Hierarchical Filters */}
       <HierarchicalFilters filters={filters} />
 
@@ -769,11 +957,22 @@ export default function InventoryPage() {
                       {formatCurrency(vehicle.financial_cost)}
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
-                      {vehicle.status !== 'in_stock'
-                        ? '—'
-                        : vehicle.aging_suggestion_reason
-                          ? formatCurrency(vehicle.aging_suggested_bonus)
-                          : <span className="text-muted-foreground">Sin sugerencia</span>}
+                      {vehicle.status !== 'in_stock' ? (
+                        '—'
+                      ) : (
+                        <div>
+                          {vehicle.aging_suggestion_reason ? (
+                            <div>{formatCurrency(vehicle.aging_suggested_bonus)}</div>
+                          ) : (
+                            <div className="text-muted-foreground">Sin sugerencia</div>
+                          )}
+                          {vehicle.aging_incentive_plan?.active && (
+                            <div className="text-xs text-muted-foreground mt-1">
+                              Venta {formatCurrency(Number(vehicle.aging_incentive_plan.sale_discount_amount || 0))} • Vendedor {formatCurrency(Number(vehicle.aging_incentive_plan.seller_bonus_amount || 0))}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
                       {vehicle.status === 'sold' && vehicle.sale_price !== undefined && vehicle.sale_price !== null
@@ -809,6 +1008,12 @@ export default function InventoryPage() {
                           <DropdownMenuItem>Ver detalles</DropdownMenuItem>
                           <DropdownMenuItem>Editar</DropdownMenuItem>
                           <DropdownMenuItem>Registrar venta</DropdownMenuItem>
+                          <DropdownMenuItem
+                            onClick={() => openAgingIncentiveDialog(vehicle)}
+                            disabled={vehicle.status !== 'in_stock' || (!vehicle.aging_suggestion_reason && !vehicle.aging_incentive_plan?.active)}
+                          >
+                            Aplicar incentivo aging
+                          </DropdownMenuItem>
                         </DropdownMenuContent>
                       </DropdownMenu>
                     </TableCell>
