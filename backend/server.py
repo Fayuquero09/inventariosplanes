@@ -30,6 +30,14 @@ from modules.inventory_routes import InventoryRouteHandlers
 from modules.organization_catalog_routes import OrganizationCatalogRouteHandlers
 from modules.registry import RouteModuleHandlers, register_route_modules
 from modules.sales_objectives_routes import SalesObjectivesRouteHandlers
+from repositories.commission_repository import list_active_rules_by_agency
+from repositories.dashboard_repository import (
+    find_agency_group_id,
+    find_brand_group_id,
+    find_monthly_close,
+    list_global_monthly_closes_by_year,
+    upsert_global_monthly_close,
+)
 from services.commission_service import calculate_commission_from_rules as _calculate_commission_from_rules
 from services.operational_calendar_service import (
     add_months_ym as _add_months_ym,
@@ -5524,13 +5532,12 @@ async def commission_simulator(payload: CommissionSimulatorInput, request: Reque
             if seller.get("agency_id") != payload.agency_id:
                 raise HTTPException(status_code=400, detail="Seller does not belong to selected agency")
 
-    rules = await db.commission_rules.find({
-        "agency_id": payload.agency_id,
-        "$or": [
-            {"approval_status": {"$exists": False}},
-            {"approval_status": COMMISSION_APPROVED},
-        ],
-    }).to_list(1000)
+    rules = await list_active_rules_by_agency(
+        db,
+        agency_id=payload.agency_id,
+        approved_status=COMMISSION_APPROVED,
+        limit=1000,
+    )
 
     estimated_commission = _calculate_commission_from_rules(
         rules,
@@ -6167,15 +6174,15 @@ async def _resolve_dashboard_scope_group_id(scope_query: Dict[str, Any]) -> Opti
     if scope_query.get("group_id"):
         return str(scope_query.get("group_id"))
 
-    if scope_query.get("brand_id") and ObjectId.is_valid(str(scope_query.get("brand_id"))):
-        brand = await db.brands.find_one({"_id": ObjectId(str(scope_query.get("brand_id")))})
-        if brand and brand.get("group_id"):
-            return str(brand.get("group_id"))
+    if scope_query.get("brand_id"):
+        brand_group_id = await find_brand_group_id(db, str(scope_query.get("brand_id")))
+        if brand_group_id:
+            return brand_group_id
 
-    if scope_query.get("agency_id") and ObjectId.is_valid(str(scope_query.get("agency_id"))):
-        agency = await db.agencies.find_one({"_id": ObjectId(str(scope_query.get("agency_id")))})
-        if agency and agency.get("group_id"):
-            return str(agency.get("group_id"))
+    if scope_query.get("agency_id"):
+        agency_group_id = await find_agency_group_id(db, str(scope_query.get("agency_id")))
+        if agency_group_id:
+            return agency_group_id
 
     return None
 
@@ -6185,24 +6192,12 @@ async def _find_dashboard_monthly_close(
     month: int,
     group_id: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], str]:
-    if group_id:
-        group_doc = await db.dashboard_monthly_closes.find_one({
-            "year": int(year),
-            "month": int(month),
-            "group_id": str(group_id),
-        })
-        if group_doc:
-            return group_doc, "group"
-
-    global_doc = await db.dashboard_monthly_closes.find_one({
-        "year": int(year),
-        "month": int(month),
-        "group_id": None,
-    })
-    if global_doc:
-        return global_doc, "global"
-
-    return None, "none"
+    return await find_monthly_close(
+        db,
+        year=int(year),
+        month=int(month),
+        group_id=str(group_id) if group_id else None,
+    )
 
 
 async def get_dashboard_monthly_close(
@@ -6258,10 +6253,7 @@ async def get_dashboard_monthly_close_calendar(
     start_month = now.month if (from_current_month and target_year == now.year) else 1
     holidays_by_month = _mexico_lft_holidays_by_month(target_year)
 
-    docs = await db.dashboard_monthly_closes.find({
-        "year": target_year,
-        "group_id": None,
-    }).to_list(1000)
+    docs = await list_global_monthly_closes_by_year(db, year=target_year, limit=1000)
     docs_by_month = {int(doc.get("month")): doc for doc in docs if doc.get("month")}
 
     items: List[Dict[str, Any]] = []
@@ -6319,30 +6311,16 @@ async def upsert_dashboard_monthly_close(payload: DashboardMonthlyCloseUpsert, r
         )
 
     now = datetime.now(timezone.utc)
-    query = {
-        "year": int(payload.year),
-        "month": int(payload.month),
-        "group_id": None,
-    }
-    update_doc = {
-        "fiscal_close_day": payload.fiscal_close_day,
-        "industry_close_day": payload.industry_close_day,
-        "industry_close_month_offset": int(payload.industry_close_month_offset or 0),
-        "updated_at": now,
-        "updated_by": current_user.get("id"),
-    }
-    await db.dashboard_monthly_closes.update_one(
-        query,
-        {
-            "$set": update_doc,
-            "$setOnInsert": {
-                "created_at": now,
-            },
-        },
-        upsert=True,
+    updated = await upsert_global_monthly_close(
+        db,
+        year=int(payload.year),
+        month=int(payload.month),
+        fiscal_close_day=payload.fiscal_close_day,
+        industry_close_day=payload.industry_close_day,
+        industry_close_month_offset=int(payload.industry_close_month_offset or 0),
+        updated_by=current_user.get("id"),
+        now=now,
     )
-
-    updated = await db.dashboard_monthly_closes.find_one(query)
     await log_audit_event(
         request=request,
         current_user=current_user,
