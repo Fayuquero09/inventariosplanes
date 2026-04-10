@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { salesObjectivesApi, dashboardApi, vehicleCatalogApi, sellersApi } from '../lib/api';
 import { useHierarchicalFilters, HierarchicalFilters } from '../components/HierarchicalFilters';
 import { useAuth } from '../contexts/AuthContext';
@@ -37,18 +37,19 @@ const MONTHS = [
   { value: 12, label: 'Diciembre' }
 ];
 
+const OBJECTIVE_DRAFT = 'draft';
 const OBJECTIVE_PENDING = 'pending';
 const OBJECTIVE_APPROVED = 'approved';
 const OBJECTIVE_REJECTED = 'rejected';
 
 const OBJECTIVE_EDITOR_ROLES = ['agency_sales_manager'];
-const OBJECTIVE_APPROVER_ROLES = ['agency_general_manager', 'agency_admin', 'agency_commercial_manager'];
 const AGENCY_SCOPED_ROLES = ['agency_sales_manager', 'agency_general_manager', 'agency_admin', 'agency_commercial_manager', 'agency_user', 'seller'];
 
 const OBJECTIVE_STATUS_LABELS = {
-  [OBJECTIVE_PENDING]: 'Pendiente',
-  [OBJECTIVE_APPROVED]: 'Aprobado',
-  [OBJECTIVE_REJECTED]: 'Rechazado'
+  [OBJECTIVE_DRAFT]: 'Borrador',
+  [OBJECTIVE_PENDING]: 'Activo',
+  [OBJECTIVE_APPROVED]: 'Activo',
+  [OBJECTIVE_REJECTED]: 'Activo'
 };
 
 const CAPTURE_SCOPE = {
@@ -90,8 +91,7 @@ export default function ObjectivesPage() {
   });
 
   const canCreateObjectives = OBJECTIVE_EDITOR_ROLES.includes(user?.role);
-  const canApproveObjectives = OBJECTIVE_APPROVER_ROLES.includes(user?.role);
-  const objectiveSubmitLabel = canApproveObjectives ? 'Crear y Aprobar' : 'Enviar a Aprobación';
+  const objectiveSubmitLabel = 'Guardar y Aplicar';
   const isAgencyScopedUser = AGENCY_SCOPED_ROLES.includes(user?.role);
   const singleAgencyId = filters.filteredAgencies.length === 1 ? filters.filteredAgencies[0]?.id : '';
   const shouldLockAgencySelector = isAgencyScopedUser && Boolean(singleAgencyId);
@@ -204,20 +204,26 @@ export default function ObjectivesPage() {
     }
   }, [captureScope, formData.seller_id, availableSellers]);
 
-  const scopedObjectives = objectives.filter((objective) => {
-    if (!formData.agency_id) return false;
-    if (objective?.agency_id !== formData.agency_id) return false;
-    if (Number(objective?.month) !== Number(formData.month)) return false;
-    if (Number(objective?.year) !== Number(formData.year)) return false;
-    if (captureScope === CAPTURE_SCOPE.SELLER) {
-      if (!formData.seller_id) return false;
-      return String(objective?.seller_id || '') === formData.seller_id;
-    }
-    return !objective?.seller_id;
-  });
-  const isScopePendingApproval = scopedObjectives.some((objective) => (
-    String(objective?.approval_status || OBJECTIVE_APPROVED).toLowerCase() === OBJECTIVE_PENDING
-  ));
+  const scopedObjectives = useMemo(() => (
+    objectives.filter((objective) => {
+      if (!formData.agency_id) return false;
+      if (objective?.agency_id !== formData.agency_id) return false;
+      if (Number(objective?.month) !== Number(formData.month)) return false;
+      if (Number(objective?.year) !== Number(formData.year)) return false;
+      if (captureScope === CAPTURE_SCOPE.SELLER) {
+        if (!formData.seller_id) return false;
+        return String(objective?.seller_id || '') === formData.seller_id;
+      }
+      return !objective?.seller_id;
+    })
+  ), [
+    objectives,
+    captureScope,
+    formData.agency_id,
+    formData.month,
+    formData.year,
+    formData.seller_id,
+  ]);
   const canSuggestByHistory = (
     captureScope === CAPTURE_SCOPE.SELLER
     && Boolean(formData.agency_id)
@@ -324,12 +330,8 @@ export default function ObjectivesPage() {
     fetchData();
   }, [fetchData]);
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (isScopePendingApproval) {
-      toast.error('Este alcance ya está enviado a aprobación. Espera aprobación/rechazo para editar.');
-      return;
-    }
+  const saveObjectives = async (submitForApproval = true) => {
+    const saveAsDraft = !submitForApproval;
     if (!formData.agency_id) {
       toast.error('Selecciona una agencia para capturar el objetivo');
       return;
@@ -373,17 +375,18 @@ export default function ObjectivesPage() {
         units_target: unitsTarget,
         revenue_target: revenueTarget,
         vehicle_line: null,
+        save_as_draft: saveAsDraft,
       };
 
       try {
         if (existingTotalObjective?.id) {
           await salesObjectivesApi.update(existingTotalObjective.id, payload);
-          toast.success('Objetivo total actualizado');
+          toast.success(saveAsDraft ? 'Borrador total guardado' : 'Objetivo total aplicado');
         } else {
           await salesObjectivesApi.create(payload);
-          toast.success('Objetivo total creado');
+          toast.success(saveAsDraft ? 'Borrador total creado' : 'Objetivo total aplicado');
         }
-        fetchData();
+        await fetchData();
       } catch (error) {
         const detail = error.response?.data?.detail;
         toast.error(typeof detail === 'string' ? detail : 'Error al guardar objetivo total');
@@ -433,6 +436,7 @@ export default function ObjectivesPage() {
             units_target: row.unitsTarget,
             revenue_target: row.revenueTarget,
             vehicle_line: row.model,
+            save_as_draft: saveAsDraft,
           };
           const existingObjective = existingByModel.get(row.model.toLowerCase());
           if (existingObjective?.id) {
@@ -458,7 +462,11 @@ export default function ObjectivesPage() {
       });
 
       if (successful.length > 0) {
-        toast.success(`Objetivos guardados: ${successful.length} (${createdCount} nuevos, ${updatedCount} actualizados)`);
+        toast.success(
+          saveAsDraft
+            ? `Borrador guardado: ${successful.length} (${createdCount} nuevos, ${updatedCount} actualizados)`
+            : `Objetivos aplicados: ${successful.length} (${createdCount} nuevos, ${updatedCount} actualizados)`
+        );
       }
       if (failed > 0) {
         const firstFailure = failedRows[0];
@@ -470,18 +478,23 @@ export default function ObjectivesPage() {
       }
 
       if (failed === 0) setModelSearch('');
-      fetchData();
+      await fetchData();
     } catch (error) {
       const detail = error.response?.data?.detail;
       toast.error(typeof detail === 'string' ? detail : 'Error al crear objetivo');
     }
   };
 
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    await saveObjectives(true);
+  };
+
+  const handleSaveDraft = async () => {
+    await saveObjectives(false);
+  };
+
   const handleSuggestFromHistory = async () => {
-    if (isScopePendingApproval) {
-      toast.error('Este alcance ya está enviado a aprobación. Espera aprobación/rechazo para editar.');
-      return;
-    }
     if (!formData.agency_id || !formData.seller_id) {
       toast.error('Selecciona agencia y vendedor para calcular sugerencias');
       return;
@@ -551,36 +564,6 @@ export default function ObjectivesPage() {
     }
   };
 
-  const handleApprovalDecision = async (objective, decision) => {
-    if (!objective?.id) return;
-    const normalizedDecision = String(decision || '').toLowerCase();
-    if (![OBJECTIVE_APPROVED, OBJECTIVE_REJECTED].includes(normalizedDecision)) return;
-
-    let comment = null;
-    if (normalizedDecision === OBJECTIVE_REJECTED) {
-      const reason = window.prompt('Motivo de rechazo (obligatorio):', '');
-      if (reason === null) return;
-      const trimmed = String(reason || '').trim();
-      if (!trimmed) {
-        toast.error('El rechazo requiere un motivo');
-        return;
-      }
-      comment = trimmed;
-    }
-
-    try {
-      await salesObjectivesApi.approve(objective.id, {
-        decision: normalizedDecision,
-        comment
-      });
-      toast.success(normalizedDecision === OBJECTIVE_APPROVED ? 'Objetivo aprobado' : 'Objetivo rechazado');
-      fetchData();
-    } catch (error) {
-      const detail = error.response?.data?.detail;
-      toast.error(typeof detail === 'string' ? detail : 'No se pudo procesar la aprobación');
-    }
-  };
-
   const formatCurrency = (value) => {
     return new Intl.NumberFormat('es-MX', {
       style: 'currency',
@@ -598,7 +581,12 @@ export default function ObjectivesPage() {
 
   const getObjectiveStatus = (objective) => {
     const status = String(objective?.approval_status || '').toLowerCase();
-    if (status === OBJECTIVE_PENDING || status === OBJECTIVE_REJECTED || status === OBJECTIVE_APPROVED) {
+    if (
+      status === OBJECTIVE_DRAFT
+      || status === OBJECTIVE_PENDING
+      || status === OBJECTIVE_REJECTED
+      || status === OBJECTIVE_APPROVED
+    ) {
       return status;
     }
     // Backward compatibility for existing records created before approval flow.
@@ -606,9 +594,20 @@ export default function ObjectivesPage() {
   };
 
   const getObjectiveStatusBadgeClass = (status) => {
+    if (status === OBJECTIVE_DRAFT) return 'border-[#6B7280] text-[#4B5563]';
     if (status === OBJECTIVE_APPROVED) return 'border-[#2A9D8F] text-[#2A9D8F]';
     if (status === OBJECTIVE_REJECTED) return 'border-[#E63946] text-[#E63946]';
     return 'border-[#E9C46A] text-[#8A6D1A]';
+  };
+
+  const getSellerStatus = (row) => {
+    if (!row || Number(row.units_target || 0) <= 0) {
+      return { label: 'Sin objetivo', className: 'border-[#6B7280] text-[#4B5563]' };
+    }
+    const pct = Number(row.units_compliance || 0);
+    if (pct >= 100) return { label: 'En meta', className: 'border-[#2A9D8F] text-[#2A9D8F]' };
+    if (pct >= 80) return { label: 'En riesgo', className: 'border-[#E9C46A] text-[#8A6D1A]' };
+    return { label: 'Bajo meta', className: 'border-[#E63946] text-[#E63946]' };
   };
 
   const sellerChartData = sellerPerformance.map((s) => ({
@@ -616,6 +615,94 @@ export default function ObjectivesPage() {
     units: Math.round(Number(s.units || 0)),
     commission: s.commission
   }));
+
+  const sellerMonthlySummary = useMemo(() => {
+    const objectivesBySeller = new Map();
+    objectives.forEach((objective) => {
+      const sellerId = String(objective?.seller_id || '').trim();
+      if (!sellerId) return;
+
+      const current = objectivesBySeller.get(sellerId) || {
+        seller_id: sellerId,
+        seller_name: objective?.seller_name || 'Vendedor',
+        total_target: null,
+        model_units_target: 0,
+        model_revenue_target: 0,
+      };
+
+      const hasVehicleLine = Boolean(String(objective?.vehicle_line || '').trim());
+      if (!hasVehicleLine) {
+        current.total_target = {
+          units_target: Number(objective?.units_target || 0),
+          revenue_target: Number(objective?.revenue_target || 0),
+        };
+      } else {
+        current.model_units_target += Number(objective?.units_target || 0);
+        current.model_revenue_target += Number(objective?.revenue_target || 0);
+      }
+
+      if (!current.seller_name && objective?.seller_name) {
+        current.seller_name = objective.seller_name;
+      }
+      objectivesBySeller.set(sellerId, current);
+    });
+
+    const performanceBySeller = new Map();
+    sellerPerformance.forEach((seller) => {
+      const sellerId = String(seller?.seller_id || '').trim();
+      if (!sellerId) return;
+      performanceBySeller.set(sellerId, {
+        seller_id: sellerId,
+        seller_name: seller?.seller_name || 'Vendedor',
+        units: Number(seller?.units || 0),
+        revenue: Number(seller?.revenue || 0),
+        commission: Number(seller?.commission || 0),
+      });
+    });
+
+    const sellerIds = new Set([
+      ...objectivesBySeller.keys(),
+      ...performanceBySeller.keys(),
+    ]);
+
+    const rows = [];
+    sellerIds.forEach((sellerId) => {
+      const objectiveData = objectivesBySeller.get(sellerId);
+      const perfData = performanceBySeller.get(sellerId);
+      const unitsTarget = objectiveData?.total_target
+        ? Number(objectiveData.total_target.units_target || 0)
+        : Number(objectiveData?.model_units_target || 0);
+      const revenueTarget = objectiveData?.total_target
+        ? Number(objectiveData.total_target.revenue_target || 0)
+        : Number(objectiveData?.model_revenue_target || 0);
+
+      const unitsSold = Number(perfData?.units || 0);
+      const revenueSold = Number(perfData?.revenue || 0);
+      const commission = Number(perfData?.commission || 0);
+
+      const unitsCompliance = unitsTarget > 0 ? (unitsSold / unitsTarget) * 100 : null;
+      const revenueCompliance = revenueTarget > 0 ? (revenueSold / revenueTarget) * 100 : null;
+      const avgTicket = unitsSold > 0 ? revenueSold / unitsSold : 0;
+
+      rows.push({
+        seller_id: sellerId,
+        seller_name: perfData?.seller_name || objectiveData?.seller_name || 'Vendedor',
+        units_sold: unitsSold,
+        units_target: unitsTarget,
+        units_compliance: unitsCompliance,
+        revenue_sold: revenueSold,
+        revenue_target: revenueTarget,
+        revenue_compliance: revenueCompliance,
+        avg_ticket: avgTicket,
+        commission,
+      });
+    });
+
+    return rows.sort((a, b) => {
+      if (b.units_sold !== a.units_sold) return b.units_sold - a.units_sold;
+      return a.seller_name.localeCompare(b.seller_name, 'es-MX');
+    });
+  }, [objectives, sellerPerformance]);
 
   // Objetivos operativos visibles en el periodo (agencia y/o vendedor).
   const operationalObjectives = objectives;
@@ -630,6 +717,66 @@ export default function ObjectivesPage() {
   const totalUnitsSold = objectives.reduce((sum, o) => sum + (o.units_sold || 0), 0);
   const totalRevenueTarget = objectives.reduce((sum, o) => sum + (o.revenue_target || 0), 0);
   const totalRevenueAchieved = objectives.reduce((sum, o) => sum + (o.revenue_achieved || 0), 0);
+
+  // Live preview totals while editing (without waiting for save)
+  const scopedUnitsTarget = scopedObjectives.reduce((sum, o) => sum + Number(o?.units_target || 0), 0);
+  const scopedRevenueTarget = scopedObjectives.reduce((sum, o) => sum + Number(o?.revenue_target || 0), 0);
+
+  const draftScopeTargets = useMemo(() => {
+    if (!canCreateObjectives) return null;
+    if (!formData.agency_id) return null;
+    if (captureScope === CAPTURE_SCOPE.SELLER && !formData.seller_id) return null;
+
+    if (captureMode === CAPTURE_MODE.MODEL) {
+      const minMsrpByModel = new Map(
+        availableModels.map((modelItem) => [modelItem.name, Number(modelItem.min_msrp || 0)])
+      );
+      let unitsTarget = 0;
+      let revenueTarget = 0;
+      let hasAnyValue = false;
+
+      Object.entries(modelTargets).forEach(([modelName, rawValue]) => {
+        const digitsOnly = String(rawValue || '').replace(/[^\d]/g, '').trim();
+        if (!digitsOnly) return;
+        const units = Number(digitsOnly);
+        if (!Number.isFinite(units) || units <= 0) return;
+        hasAnyValue = true;
+        unitsTarget += units;
+        const minMsrp = Number(minMsrpByModel.get(modelName) || 0);
+        if (minMsrp > 0) revenueTarget += units * minMsrp;
+      });
+
+      if (!hasAnyValue) return { unitsTarget: 0, revenueTarget: 0 };
+      return { unitsTarget, revenueTarget };
+    }
+
+    const unitsRaw = String(totalUnitsInput || '').replace(/[^\d]/g, '').trim();
+    const revenueRaw = String(totalRevenueInput || '').replace(/[^\d]/g, '').trim();
+    const hasAnyValue = unitsRaw.length > 0 || revenueRaw.length > 0;
+    if (!hasAnyValue) return { unitsTarget: 0, revenueTarget: 0 };
+
+    return {
+      unitsTarget: Number(unitsRaw || 0),
+      revenueTarget: Number(revenueRaw || 0),
+    };
+  }, [
+    canCreateObjectives,
+    formData.agency_id,
+    formData.seller_id,
+    captureScope,
+    captureMode,
+    availableModels,
+    modelTargets,
+    totalUnitsInput,
+    totalRevenueInput,
+  ]);
+
+  const previewUnitsTarget = draftScopeTargets
+    ? Math.max(0, totalUnitsTarget - scopedUnitsTarget + Number(draftScopeTargets.unitsTarget || 0))
+    : totalUnitsTarget;
+  const previewRevenueTarget = draftScopeTargets
+    ? Math.max(0, totalRevenueTarget - scopedRevenueTarget + Number(draftScopeTargets.revenueTarget || 0))
+    : totalRevenueTarget;
 
   return (
     <div className="space-y-6" data-testid="objectives-page">
@@ -677,13 +824,13 @@ export default function ObjectivesPage() {
             <div className="text-xs font-semibold tracking-widest uppercase text-muted-foreground mb-1">
               Meta Unidades
             </div>
-            <div className="text-2xl font-bold">{formatUnits(totalUnitsTarget)}</div>
+            <div className="text-2xl font-bold">{formatUnits(previewUnitsTarget)}</div>
             <Progress 
-              value={totalUnitsTarget > 0 ? (totalUnitsSold / totalUnitsTarget * 100) : 0} 
+              value={previewUnitsTarget > 0 ? (totalUnitsSold / previewUnitsTarget * 100) : 0} 
               className="h-2 mt-2" 
             />
             <div className="text-sm text-muted-foreground mt-1">
-              {formatUnits(totalUnitsSold)} vendidas ({totalUnitsTarget > 0 ? ((totalUnitsSold / totalUnitsTarget) * 100).toFixed(1) : 0}%)
+              {formatUnits(totalUnitsSold)} vendidas ({previewUnitsTarget > 0 ? ((totalUnitsSold / previewUnitsTarget) * 100).toFixed(1) : 0}%)
             </div>
           </CardContent>
         </Card>
@@ -692,13 +839,13 @@ export default function ObjectivesPage() {
             <div className="text-xs font-semibold tracking-widest uppercase text-muted-foreground mb-1">
               Meta Ingresos
             </div>
-            <div className="text-2xl font-bold">{formatCurrency(totalRevenueTarget)}</div>
+            <div className="text-2xl font-bold">{formatCurrency(previewRevenueTarget)}</div>
             <Progress 
-              value={totalRevenueTarget > 0 ? (totalRevenueAchieved / totalRevenueTarget * 100) : 0} 
+              value={previewRevenueTarget > 0 ? (totalRevenueAchieved / previewRevenueTarget * 100) : 0} 
               className="h-2 mt-2" 
             />
             <div className="text-sm text-muted-foreground mt-1">
-              {formatCurrency(totalRevenueAchieved)} ({totalRevenueTarget > 0 ? ((totalRevenueAchieved / totalRevenueTarget) * 100).toFixed(1) : 0}%)
+              {formatCurrency(totalRevenueAchieved)} ({previewRevenueTarget > 0 ? ((totalRevenueAchieved / previewRevenueTarget) * 100).toFixed(1) : 0}%)
             </div>
           </CardContent>
         </Card>
@@ -861,13 +1008,12 @@ export default function ObjectivesPage() {
                       onChange={(e) => setModelSearch(e.target.value)}
                       placeholder="Buscar modelo..."
                       disabled={
-                        isScopePendingApproval
-                        || !formData.agency_id
+                        !formData.agency_id
                         || loadingModels
                         || (captureScope === CAPTURE_SCOPE.SELLER && !formData.seller_id)
                       }
                     />
-                    <div className="max-h-64 overflow-y-auto rounded-md border border-border/60" data-testid="objective-line-input">
+                    <div className="rounded-md border border-border/60 overflow-x-auto" data-testid="objective-line-input">
                       {!formData.agency_id ? (
                         <p className="text-xs text-muted-foreground p-3">Selecciona una agencia para ver modelos.</p>
                       ) : captureScope === CAPTURE_SCOPE.SELLER && !formData.seller_id ? (
@@ -912,7 +1058,6 @@ export default function ObjectivesPage() {
                                         placeholder="0"
                                         className="w-24 ml-auto text-right"
                                         data-testid={`objective-units-input-${modelItem.name}`}
-                                        disabled={isScopePendingApproval}
                                       />
                                     </td>
                                     <td className="px-3 py-2 text-right font-medium">
@@ -948,7 +1093,6 @@ export default function ObjectivesPage() {
                         onChange={(e) => setTotalUnitsInput(String(e.target.value || '').replace(/[^\d]/g, ''))}
                         placeholder="Ej: 80"
                         data-testid="objective-total-units-input"
-                        disabled={isScopePendingApproval}
                       />
                     </div>
                     <div className="space-y-2">
@@ -963,7 +1107,6 @@ export default function ObjectivesPage() {
                         onChange={(e) => setTotalRevenueInput(String(e.target.value || '').replace(/[^\d]/g, ''))}
                         placeholder="Ej: 25000000"
                         data-testid="objective-total-revenue-input"
-                        disabled={isScopePendingApproval}
                       />
                     </div>
                     <p className="text-xs text-muted-foreground md:col-span-2">
@@ -979,7 +1122,7 @@ export default function ObjectivesPage() {
                         type="button"
                         variant="outline"
                         onClick={handleSuggestFromHistory}
-                        disabled={isScopePendingApproval || loadingSuggestion || (captureMode === CAPTURE_MODE.MODEL && loadingModels)}
+                        disabled={loadingSuggestion || (captureMode === CAPTURE_MODE.MODEL && loadingModels)}
                         data-testid="suggest-objective-btn"
                       >
                         {loadingSuggestion ? 'Calculando sugerencia...' : 'Sugerir por histórico'}
@@ -987,10 +1130,17 @@ export default function ObjectivesPage() {
                     )}
                   </div>
                   <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleSaveDraft}
+                    data-testid="save-objective-draft-btn"
+                  >
+                    Guardar
+                  </Button>
+                  <Button
                     type="submit"
                     className="bg-[#002FA7] hover:bg-[#002FA7]/90"
                     data-testid="save-objective-btn"
-                    disabled={isScopePendingApproval}
                   >
                     {objectiveSubmitLabel}
                   </Button>
@@ -1000,11 +1150,6 @@ export default function ObjectivesPage() {
                     Sugerencia aplicada. Año pasado mismo mes: {formatUnits(lastSuggestionMeta.previousYearUnits)} u ·
                     promedio reciente: {Number(lastSuggestionMeta.recentAvgUnits || 0).toFixed(1)} u/mes ·
                     objetivo sugerido: {formatUnits(lastSuggestionMeta.totalUnits)} u.
-                  </p>
-                )}
-                {isScopePendingApproval && (
-                  <p className="text-xs text-[#8A6D1A]">
-                    Objetivos bloqueados: este alcance ya fue enviado a aprobación. Espera aprobación o rechazo para volver a editar.
                   </p>
                 )}
               </form>
@@ -1035,7 +1180,7 @@ export default function ObjectivesPage() {
               </div>
             </CardHeader>
             <CardContent>
-              <div className="max-h-[520px] overflow-auto rounded-md border border-border/40">
+              <div className="overflow-x-auto rounded-md border border-border/40">
                 <table className="w-full text-sm">
                   <thead className="bg-muted/40 sticky top-0">
                     <tr>
@@ -1075,31 +1220,12 @@ export default function ObjectivesPage() {
                           <td className="px-3 py-2 text-right">{formatCurrency(objective.revenue_target)}</td>
                           <td className="px-3 py-2 text-right">{formatCurrency(objective.revenue_achieved)}</td>
                           <td className="px-3 py-2 text-right">
-                            {objectiveStatus === OBJECTIVE_PENDING && canApproveObjectives ? (
-                              <div className="flex justify-end gap-2">
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  variant="outline"
-                                  onClick={() => handleApprovalDecision(objective, OBJECTIVE_REJECTED)}
-                                  data-testid={`reject-objective-${objective.id}`}
-                                >
-                                  Rechazar
-                                </Button>
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  className="bg-[#2A9D8F] hover:bg-[#2A9D8F]/90"
-                                  onClick={() => handleApprovalDecision(objective, OBJECTIVE_APPROVED)}
-                                  data-testid={`approve-objective-${objective.id}`}
-                                >
-                                  Aprobar
-                                </Button>
-                              </div>
-                            ) : objectiveStatus === OBJECTIVE_APPROVED && objective.approved_by_name ? (
-                              <span className="text-xs text-[#2A9D8F]">Aprobado: {objective.approved_by_name}</span>
+                            {objectiveStatus === OBJECTIVE_DRAFT ? (
+                              <span className="text-xs text-[#4B5563]">Borrador</span>
                             ) : (
-                              <span className="text-xs text-muted-foreground">-</span>
+                              <span className="text-xs text-[#2A9D8F]">
+                                Aplicado{objective.updated_at ? `: ${new Date(objective.updated_at).toLocaleDateString('es-MX')}` : ''}
+                              </span>
                             )}
                           </td>
                         </tr>
@@ -1165,7 +1291,7 @@ export default function ObjectivesPage() {
         <Card className="border-border/40" data-testid="seller-performance-table">
           <CardHeader>
             <CardTitle className="text-lg" style={{ fontFamily: 'Cabinet Grotesk' }}>
-              Comisiones del Mes
+              Resumen Mensual por Vendedor
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -1175,32 +1301,55 @@ export default function ObjectivesPage() {
                   <Skeleton key={i} className="h-12 w-full" />
                 ))}
               </div>
-            ) : sellerPerformance.length === 0 ? (
+            ) : sellerMonthlySummary.length === 0 ? (
               <div className="py-12 text-center text-muted-foreground">
-                No hay datos de comisiones
+                No hay datos mensuales por vendedor
               </div>
             ) : (
-              <div className="space-y-2">
-                {sellerPerformance.map((seller, index) => (
-                  <div
-                    key={seller.seller_id}
-                    className="flex items-center justify-between p-3 rounded-md bg-muted/30"
-                  >
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-full bg-[#002FA7] flex items-center justify-center text-white text-sm font-medium">
-                        {index + 1}
-                      </div>
-                      <div>
-                        <div className="font-medium">{seller.seller_name}</div>
-                        <div className="text-sm text-muted-foreground">{formatUnits(seller.units)} unidades</div>
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <div className="font-medium text-[#2A9D8F]">{formatCurrency(seller.commission)}</div>
-                      <div className="text-sm text-muted-foreground">{formatCurrency(seller.revenue)} ventas</div>
-                    </div>
-                  </div>
-                ))}
+              <div className="rounded-md border border-border/40 overflow-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-muted/40 sticky top-0">
+                    <tr>
+                      <th className="text-left px-3 py-2 font-semibold">Vendedor</th>
+                      <th className="text-right px-3 py-2 font-semibold">Unidades</th>
+                      <th className="text-right px-3 py-2 font-semibold">Meta U</th>
+                      <th className="text-right px-3 py-2 font-semibold">Cumpl. U</th>
+                      <th className="text-right px-3 py-2 font-semibold">Ingresos</th>
+                      <th className="text-right px-3 py-2 font-semibold">Meta Ing.</th>
+                      <th className="text-right px-3 py-2 font-semibold">Cumpl. Ing.</th>
+                      <th className="text-right px-3 py-2 font-semibold">Ticket Prom.</th>
+                      <th className="text-right px-3 py-2 font-semibold">Comisión</th>
+                      <th className="text-right px-3 py-2 font-semibold">Estado</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sellerMonthlySummary.map((row) => {
+                      const sellerStatus = getSellerStatus(row);
+                      return (
+                        <tr key={row.seller_id} className="border-t border-border/40">
+                          <td className="px-3 py-2 font-medium">{row.seller_name}</td>
+                          <td className="px-3 py-2 text-right">{formatUnits(row.units_sold)}</td>
+                          <td className="px-3 py-2 text-right">{formatUnits(row.units_target)}</td>
+                          <td className="px-3 py-2 text-right">
+                            {row.units_compliance === null ? 'N/D' : `${row.units_compliance.toFixed(1)}%`}
+                          </td>
+                          <td className="px-3 py-2 text-right">{formatCurrency(row.revenue_sold)}</td>
+                          <td className="px-3 py-2 text-right">{formatCurrency(row.revenue_target)}</td>
+                          <td className="px-3 py-2 text-right">
+                            {row.revenue_compliance === null ? 'N/D' : `${row.revenue_compliance.toFixed(1)}%`}
+                          </td>
+                          <td className="px-3 py-2 text-right">{formatCurrency(row.avg_ticket)}</td>
+                          <td className="px-3 py-2 text-right">{formatCurrency(row.commission)}</td>
+                          <td className="px-3 py-2 text-right">
+                            <Badge variant="outline" className={sellerStatus.className}>
+                              {sellerStatus.label}
+                            </Badge>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
             )}
           </CardContent>

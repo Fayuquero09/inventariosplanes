@@ -425,6 +425,7 @@ class SalesObjectiveCreate(BaseModel):
     units_target: int
     revenue_target: float
     vehicle_line: Optional[str] = None
+    save_as_draft: bool = False
 
 class SalesObjectiveApprovalAction(BaseModel):
     decision: str  # approved | rejected
@@ -444,7 +445,7 @@ class SalesObjectiveResponse(BaseModel):
     units_target: int
     revenue_target: float
     vehicle_line: Optional[str] = None
-    approval_status: str = "pending"
+    approval_status: str = "approved"
     approval_comment: Optional[str] = None
     created_by: Optional[str] = None
     created_by_name: Optional[str] = None
@@ -467,6 +468,51 @@ class CommissionRuleCreate(BaseModel):
     value: float
     min_units: Optional[int] = None
     max_units: Optional[int] = None
+
+class CommissionMatrixVolumeTierConfig(BaseModel):
+    min_units: int = Field(..., ge=1)
+    max_units: Optional[int] = Field(default=None, ge=1)
+    bonus_per_unit: float = Field(0, ge=0)
+
+class CommissionMatrixGeneralConfig(BaseModel):
+    global_percentage: float = 0
+    global_per_unit_bonus: float = 0
+    global_aged_61_90_bonus: float = 0
+    global_aged_90_plus_bonus: float = 0
+    volume_tiers: List[CommissionMatrixVolumeTierConfig] = Field(default_factory=list)
+
+class CommissionMatrixModelConfig(BaseModel):
+    model: str
+    model_percentage: Optional[float] = None
+    model_bonus: float = 0
+    aged_61_90_bonus: float = 0
+    aged_90_plus_bonus: float = 0
+    plant_incentive_share_pct: float = 100
+
+class CommissionMatrixUpsert(BaseModel):
+    agency_id: str
+    general: CommissionMatrixGeneralConfig = Field(default_factory=CommissionMatrixGeneralConfig)
+    models: List[CommissionMatrixModelConfig] = Field(default_factory=list)
+
+class PriceBulletinItem(BaseModel):
+    model: str
+    version: Optional[str] = None
+    msrp: float = Field(0, ge=0)
+    transaction_price: Optional[float] = Field(default=None, ge=0)
+    brand_bonus_amount: float = Field(0, ge=0)
+    brand_bonus_percentage: float = Field(0, ge=0)
+    dealer_bonus_amount: float = Field(0, ge=0)
+    dealer_share_percentage: float = Field(0, ge=0, le=100)
+
+class PriceBulletinBulkUpsert(BaseModel):
+    group_id: str
+    brand_id: str
+    agency_id: Optional[str] = None
+    bulletin_name: Optional[str] = None
+    effective_from: Optional[str] = None
+    effective_to: Optional[str] = None
+    notes: Optional[str] = None
+    items: List[PriceBulletinItem] = Field(default_factory=list)
 
 class CommissionRuleResponse(BaseModel):
     id: str
@@ -515,6 +561,7 @@ class SaleCreate(BaseModel):
     sale_price: float
     sale_date: Optional[str] = None
     fi_revenue: float = 0
+    plant_incentive: float = 0
 
 class SaleResponse(BaseModel):
     id: str
@@ -524,8 +571,13 @@ class SaleResponse(BaseModel):
     seller_name: Optional[str] = None
     agency_id: str
     sale_price: float
+    commission_base_price: Optional[float] = None
+    effective_revenue: Optional[float] = None
+    brand_incentive_amount: Optional[float] = None
+    dealer_incentive_amount: Optional[float] = None
     sale_date: str
     fi_revenue: float
+    plant_incentive: float = 0
     commission: float
     created_at: str
 
@@ -651,6 +703,7 @@ DEALER_SALES_ASSIGNABLE_ROLES = {
 COMMISSION_PENDING = "pending"
 COMMISSION_APPROVED = "approved"
 COMMISSION_REJECTED = "rejected"
+COMMISSION_MATRIX_DEFAULT_PLANT_SHARE_PCT = 100.0
 
 def _same_scope_id(left: Optional[str], right: Optional[str]) -> bool:
     if left is None or right is None:
@@ -852,8 +905,19 @@ WRITE_AUDIT_ROLES = {
 }
 
 FINANCIAL_RATE_MANAGER_ROLES = CORP_FINANCE_ROLES
+PRICE_BULLETIN_EDITOR_ROLES = {
+    UserRole.APP_ADMIN,
+    UserRole.GROUP_ADMIN,
+    UserRole.GROUP_FINANCE_MANAGER,
+    UserRole.BRAND_ADMIN,
+    UserRole.AGENCY_GENERAL_MANAGER,
+    UserRole.AGENCY_SALES_MANAGER,
+    UserRole.AGENCY_ADMIN,
+    UserRole.AGENCY_COMMERCIAL_MANAGER,
+}
 
 OBJECTIVE_PENDING = "pending"
+OBJECTIVE_DRAFT = "draft"
 OBJECTIVE_APPROVED = "approved"
 OBJECTIVE_REJECTED = "rejected"
 
@@ -862,6 +926,16 @@ OBJECTIVE_APPROVER_ROLES = DEALER_GENERAL_EFFECTIVE_ROLES
 
 COMMISSION_PROPOSER_ROLES = DEALER_SALES_EFFECTIVE_ROLES
 COMMISSION_APPROVER_ROLES = DEALER_GENERAL_EFFECTIVE_ROLES
+COMMISSION_MATRIX_EDITOR_ROLES = (
+    DEALER_SALES_EFFECTIVE_ROLES
+    | DEALER_GENERAL_EFFECTIVE_ROLES
+    | {
+        UserRole.APP_ADMIN,
+        UserRole.GROUP_ADMIN,
+        UserRole.GROUP_FINANCE_MANAGER,
+        UserRole.BRAND_ADMIN,
+    }
+)
 
 def _to_jsonable(value: Any) -> Any:
     if isinstance(value, ObjectId):
@@ -2551,12 +2625,15 @@ async def get_catalog_models(
 async def get_catalog_versions(
     request: Request,
     make: str = Query(..., min_length=1),
-    model: str = Query(..., min_length=1)
+    model: str = Query(..., min_length=1),
+    all_years: bool = Query(False),
 ):
     await get_current_user(request)
-    catalog = _build_catalog_tree_from_source()
+    catalog = _build_catalog_tree_from_source(all_years=all_years)
     make_entry = _find_catalog_make(catalog, make)
     if not make_entry:
+        if catalog.get("all_years"):
+            raise HTTPException(status_code=404, detail="Make not found in catalog")
         raise HTTPException(status_code=404, detail=f"Make not found in catalog for model year {catalog['model_year']}")
 
     model_entry = _find_catalog_model(make_entry, model)
@@ -2565,10 +2642,712 @@ async def get_catalog_versions(
 
     return {
         "model_year": catalog["model_year"],
+        "all_years": bool(catalog.get("all_years")),
+        "available_years": catalog.get("available_years", []),
         "make": make_entry["name"],
         "model": model_entry["name"],
         "items": model_entry.get("versions", [])
     }
+
+# ============== PRICE BULLETINS ROUTES ==============
+
+def _normalize_iso_date_string(value: Optional[str], *, field_name: str, required: bool = False) -> Optional[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        if required:
+            raise HTTPException(status_code=400, detail=f"{field_name} is required")
+        return None
+    if len(raw) == 10:
+        try:
+            parsed = datetime.strptime(raw, "%Y-%m-%d")
+            return parsed.date().isoformat()
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid {field_name}. Use YYYY-MM-DD")
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return parsed.date().isoformat()
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid {field_name}. Use YYYY-MM-DD")
+
+async def _resolve_price_bulletin_scope(
+    current_user: dict,
+    *,
+    group_id: Optional[str],
+    brand_id: Optional[str],
+    agency_id: Optional[str],
+) -> Dict[str, Optional[str]]:
+    normalized_group_id = str(group_id or "").strip()
+    normalized_brand_id = str(brand_id or "").strip()
+    normalized_agency_id = str(agency_id or "").strip() or None
+
+    if not normalized_group_id:
+        raise HTTPException(status_code=400, detail="group_id is required")
+    if not normalized_brand_id:
+        raise HTTPException(status_code=400, detail="brand_id is required")
+    if not ObjectId.is_valid(normalized_group_id):
+        raise HTTPException(status_code=400, detail="Invalid group_id")
+    if not ObjectId.is_valid(normalized_brand_id):
+        raise HTTPException(status_code=400, detail="Invalid brand_id")
+
+    group = await db.groups.find_one({"_id": ObjectId(normalized_group_id)})
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    brand = await db.brands.find_one({"_id": ObjectId(normalized_brand_id)})
+    if not brand:
+        raise HTTPException(status_code=404, detail="Brand not found")
+    if str(brand.get("group_id") or "") != normalized_group_id:
+        raise HTTPException(status_code=400, detail="Brand does not belong to selected group")
+
+    _validate_scope_filters(
+        current_user,
+        group_id=normalized_group_id,
+        brand_id=normalized_brand_id,
+        agency_id=normalized_agency_id,
+    )
+
+    agency = None
+    if normalized_agency_id:
+        if not ObjectId.is_valid(normalized_agency_id):
+            raise HTTPException(status_code=400, detail="Invalid agency_id")
+        agency = await db.agencies.find_one({"_id": ObjectId(normalized_agency_id)})
+        if not agency:
+            raise HTTPException(status_code=404, detail="Agency not found")
+        if str(agency.get("group_id") or "") != normalized_group_id:
+            raise HTTPException(status_code=400, detail="Agency does not belong to selected group")
+        if str(agency.get("brand_id") or "") != normalized_brand_id:
+            raise HTTPException(status_code=400, detail="Agency does not belong to selected brand")
+
+    return {
+        "group_id": normalized_group_id,
+        "group_name": str(group.get("name") or ""),
+        "brand_id": normalized_brand_id,
+        "brand_name": str(brand.get("name") or ""),
+        "agency_id": normalized_agency_id,
+        "agency_name": str(agency.get("name") or "") if agency else "",
+    }
+
+def _is_price_bulletin_active(doc: Dict[str, Any], current_date_ymd: str) -> bool:
+    effective_from = str(doc.get("effective_from") or "").strip()
+    effective_to = str(doc.get("effective_to") or "").strip()
+    if effective_from and current_date_ymd < effective_from:
+        return False
+    if effective_to and current_date_ymd > effective_to:
+        return False
+    return True
+
+async def _resolve_price_bulletin_for_model(
+    *,
+    group_id: Optional[str],
+    brand_id: Optional[str],
+    agency_id: Optional[str],
+    model: Optional[str],
+    version: Optional[str] = None,
+    reference_date_ymd: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    normalized_group_id = str(group_id or "").strip()
+    normalized_brand_id = str(brand_id or "").strip()
+    normalized_agency_id = str(agency_id or "").strip()
+    normalized_model = str(model or "").strip()
+    normalized_version = str(version or "").strip() or None
+    if not normalized_group_id or not normalized_brand_id or not normalized_model:
+        return None
+
+    query: Dict[str, Any] = {
+        "group_id": normalized_group_id,
+        "brand_id": normalized_brand_id,
+        "model": normalized_model,
+    }
+
+    if normalized_version:
+        query["version"] = {"$in": [normalized_version, None, ""]}
+    else:
+        query["version"] = {"$in": [None, ""]}
+
+    if normalized_agency_id:
+        query["$or"] = [
+            {"agency_id": normalized_agency_id},
+            {"agency_id": None},
+        ]
+    else:
+        query["agency_id"] = None
+
+    docs = await db.price_bulletins.find(query).sort([
+        ("effective_from", -1),
+        ("updated_at", -1),
+        ("created_at", -1),
+    ]).to_list(200)
+    if not docs:
+        return None
+
+    target_date = reference_date_ymd or datetime.now(timezone.utc).date().isoformat()
+    active_docs = [doc for doc in docs if _is_price_bulletin_active(doc, target_date)]
+    source_docs = active_docs if active_docs else docs
+
+    def pick_by_version_preference(candidates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not candidates:
+            return None
+        if normalized_version:
+            for doc in candidates:
+                if str(doc.get("version") or "").strip() == normalized_version:
+                    return doc
+            for doc in candidates:
+                if not str(doc.get("version") or "").strip():
+                    return doc
+        return candidates[0]
+
+    if normalized_agency_id:
+        agency_docs = [doc for doc in source_docs if str(doc.get("agency_id") or "") == normalized_agency_id]
+        agency_pick = pick_by_version_preference(agency_docs)
+        if agency_pick:
+            return agency_pick
+
+        brand_default_docs = [doc for doc in source_docs if not str(doc.get("agency_id") or "").strip()]
+        brand_default_pick = pick_by_version_preference(brand_default_docs)
+        if brand_default_pick:
+            return brand_default_pick
+
+    return pick_by_version_preference(source_docs)
+
+async def _resolve_effective_sale_pricing_for_model(
+    *,
+    group_id: Optional[str],
+    brand_id: Optional[str],
+    agency_id: Optional[str],
+    model: Optional[str],
+    version: Optional[str] = None,
+    reference_date_ymd: Optional[str] = None,
+    fallback_msrp: Optional[float] = None,
+) -> Dict[str, Any]:
+    fallback_price = _to_non_negative_float(fallback_msrp, 0.0)
+    bulletin = await _resolve_price_bulletin_for_model(
+        group_id=group_id,
+        brand_id=brand_id,
+        agency_id=agency_id,
+        model=model,
+        version=version,
+        reference_date_ymd=reference_date_ymd,
+    )
+    transaction_price = fallback_price
+    brand_incentive_amount = 0.0
+    dealer_incentive_amount = 0.0
+    if bulletin:
+        brand_incentive_amount = _to_non_negative_float(bulletin.get("brand_bonus_amount"), 0.0)
+        dealer_incentive_amount = _to_non_negative_float(bulletin.get("dealer_bonus_amount"), 0.0)
+        transaction_price_raw = bulletin.get("transaction_price")
+        if transaction_price_raw is not None and _to_non_negative_float(transaction_price_raw, 0.0) > 0:
+            transaction_price = _to_non_negative_float(transaction_price_raw, 0.0)
+        else:
+            msrp = bulletin.get("msrp")
+            if msrp is not None and _to_non_negative_float(msrp, 0.0) > 0:
+                transaction_price = _to_non_negative_float(msrp, 0.0)
+
+    commission_base_price = transaction_price + brand_incentive_amount
+    effective_revenue = transaction_price + brand_incentive_amount
+    return {
+        "configured_transaction_price": round(_to_non_negative_float(transaction_price, 0.0), 2),
+        "transaction_price": round(_to_non_negative_float(transaction_price, 0.0), 2),
+        "brand_incentive_amount": round(brand_incentive_amount, 2),
+        "dealer_incentive_amount": round(dealer_incentive_amount, 2),
+        "commission_base_price": round(_to_non_negative_float(commission_base_price, 0.0), 2),
+        "effective_revenue": round(_to_non_negative_float(effective_revenue, 0.0), 2),
+        "undocumented_dealer_incentive_amount": 0.0,
+        "price_source": "price_bulletin",
+    }
+
+def _apply_manual_sale_price_override(
+    pricing: Dict[str, Any],
+    supplied_sale_price: Optional[float],
+) -> Dict[str, Any]:
+    configured_transaction_price = _to_non_negative_float(
+        pricing.get("configured_transaction_price", pricing.get("transaction_price")),
+        0.0,
+    )
+    supplied_price = _to_non_negative_float(supplied_sale_price, 0.0)
+    brand_incentive_amount = _to_non_negative_float(pricing.get("brand_incentive_amount"), 0.0)
+    documented_dealer_incentive = _to_non_negative_float(pricing.get("dealer_incentive_amount"), 0.0)
+
+    # Regla operativa:
+    # Si factura/transacción capturada viene menor al precio configurado en Precios,
+    # se asume incentivo dealer no documentado y se usa ese precio menor.
+    if configured_transaction_price > 0 and supplied_price > 0 and supplied_price < configured_transaction_price:
+        transaction_price = supplied_price
+        undocumented_dealer_incentive = round(configured_transaction_price - supplied_price, 2)
+        price_source = "dealer_undocumented_incentive"
+    else:
+        transaction_price = configured_transaction_price if configured_transaction_price > 0 else supplied_price
+        undocumented_dealer_incentive = 0.0
+        price_source = pricing.get("price_source") or "price_bulletin"
+
+    transaction_price = round(_to_non_negative_float(transaction_price, 0.0), 2)
+    dealer_incentive_amount = round(documented_dealer_incentive + undocumented_dealer_incentive, 2)
+    commission_base_price = round(transaction_price + brand_incentive_amount, 2)
+    effective_revenue = round(transaction_price + brand_incentive_amount, 2)
+
+    return {
+        **pricing,
+        "configured_transaction_price": round(configured_transaction_price, 2),
+        "transaction_price": transaction_price,
+        "brand_incentive_amount": round(brand_incentive_amount, 2),
+        "dealer_incentive_amount": dealer_incentive_amount,
+        "undocumented_dealer_incentive_amount": round(undocumented_dealer_incentive, 2),
+        "commission_base_price": commission_base_price,
+        "effective_revenue": effective_revenue,
+        "price_source": price_source,
+    }
+
+async def _resolve_effective_transaction_price_for_model(
+    *,
+    group_id: Optional[str],
+    brand_id: Optional[str],
+    agency_id: Optional[str],
+    model: Optional[str],
+    version: Optional[str] = None,
+    reference_date_ymd: Optional[str] = None,
+    fallback_msrp: Optional[float] = None,
+) -> float:
+    pricing = await _resolve_effective_sale_pricing_for_model(
+        group_id=group_id,
+        brand_id=brand_id,
+        agency_id=agency_id,
+        model=model,
+        version=version,
+        reference_date_ymd=reference_date_ymd,
+        fallback_msrp=fallback_msrp,
+    )
+    return _to_non_negative_float(pricing.get("transaction_price"), 0.0)
+
+def _price_item_applies_to_sale(
+    *,
+    sale_model: Optional[str],
+    sale_version: Optional[str],
+    affected_exact_keys: set[str],
+    affected_model_keys: set[str],
+) -> bool:
+    model_name = str(sale_model or "").strip()
+    if not model_name:
+        return False
+    model_key = model_name.casefold()
+    version_key = str(sale_version or "").strip().casefold()
+    exact_key = f"{model_key}::{version_key}"
+    if exact_key in affected_exact_keys:
+        return True
+    if model_key in affected_model_keys:
+        return True
+    return False
+
+async def _reprice_sales_for_price_bulletin(
+    *,
+    scope: Dict[str, Optional[str]],
+    effective_from: Optional[str],
+    effective_to: Optional[str],
+    items: List[PriceBulletinItem],
+) -> Dict[str, int]:
+    affected_exact_keys: set[str] = set()
+    affected_model_keys: set[str] = set()
+    for item in items:
+        model_name = str(item.model or "").strip()
+        if not model_name:
+            continue
+        model_key = model_name.casefold()
+        version_key = str(item.version or "").strip().casefold()
+        affected_exact_keys.add(f"{model_key}::{version_key}")
+        affected_model_keys.add(model_key)
+
+    if not affected_exact_keys and not affected_model_keys:
+        return {"checked": 0, "repriced": 0}
+
+    sales_query: Dict[str, Any] = {
+        "group_id": scope.get("group_id"),
+        "brand_id": scope.get("brand_id"),
+    }
+    if scope.get("agency_id"):
+        sales_query["agency_id"] = scope.get("agency_id")
+
+    start_dt = None
+    if effective_from:
+        try:
+            start_dt = datetime.fromisoformat(f"{effective_from}T00:00:00+00:00")
+        except ValueError:
+            start_dt = None
+
+    end_dt_exclusive = None
+    if effective_to:
+        try:
+            end_dt = datetime.fromisoformat(f"{effective_to}T00:00:00+00:00")
+            end_dt_exclusive = end_dt + timedelta(days=1)
+        except ValueError:
+            end_dt_exclusive = None
+
+    if start_dt or end_dt_exclusive:
+        date_query: Dict[str, Any] = {}
+        if start_dt:
+            date_query["$gte"] = start_dt
+        if end_dt_exclusive:
+            date_query["$lt"] = end_dt_exclusive
+        sales_query["sale_date"] = date_query
+
+    sales = await db.sales.find(sales_query).to_list(50000)
+    if not sales:
+        return {"checked": 0, "repriced": 0}
+
+    vehicle_ids = [
+        ObjectId(str(sale.get("vehicle_id")))
+        for sale in sales
+        if ObjectId.is_valid(str(sale.get("vehicle_id") or ""))
+    ]
+    vehicles = await db.vehicles.find({"_id": {"$in": vehicle_ids}}).to_list(len(vehicle_ids) or 1)
+    vehicle_map: Dict[str, Dict[str, Any]] = {str(v["_id"]): v for v in vehicles}
+
+    checked = 0
+    repriced = 0
+
+    for sale in sales:
+        vehicle_id = str(sale.get("vehicle_id") or "")
+        vehicle = vehicle_map.get(vehicle_id)
+        sale_model = str(sale.get("model") or (vehicle or {}).get("model") or "").strip()
+        sale_version = str(
+            sale.get("version")
+            or (vehicle or {}).get("version")
+            or (vehicle or {}).get("trim")
+            or ""
+        ).strip()
+        if not _price_item_applies_to_sale(
+            sale_model=sale_model,
+            sale_version=sale_version,
+            affected_exact_keys=affected_exact_keys,
+            affected_model_keys=affected_model_keys,
+        ):
+            continue
+
+        checked += 1
+        sale_date = _coerce_utc_datetime(sale.get("sale_date")) or datetime.now(timezone.utc)
+        reference_date_ymd = sale_date.date().isoformat()
+        fallback_price = _to_non_negative_float(
+            sale.get("sale_price"),
+            _to_non_negative_float((vehicle or {}).get("msrp"), 0.0),
+        )
+        configured_pricing = await _resolve_effective_sale_pricing_for_model(
+            group_id=sale.get("group_id") or (vehicle or {}).get("group_id"),
+            brand_id=sale.get("brand_id") or (vehicle or {}).get("brand_id"),
+            agency_id=sale.get("agency_id") or (vehicle or {}).get("agency_id"),
+            model=sale_model,
+            version=sale_version,
+            reference_date_ymd=reference_date_ymd,
+            fallback_msrp=fallback_price,
+        )
+        effective_pricing = _apply_manual_sale_price_override(configured_pricing, sale.get("sale_price"))
+        effective_sale_price = _to_non_negative_float(effective_pricing.get("transaction_price"), 0.0)
+        if effective_sale_price <= 0:
+            continue
+
+        seller_id = str(sale.get("seller_id") or "")
+        agency_id = str(sale.get("agency_id") or (vehicle or {}).get("agency_id") or "")
+        if not seller_id or not agency_id:
+            continue
+
+        recalculated_commission = await calculate_commission(
+            {
+                "sale_price": effective_sale_price,
+                "commission_base_price": _to_non_negative_float(effective_pricing.get("commission_base_price"), effective_sale_price),
+                "fi_revenue": _to_non_negative_float(sale.get("fi_revenue"), 0.0),
+                "plant_incentive": _to_non_negative_float(sale.get("plant_incentive"), 0.0),
+                "model": sale_model,
+            },
+            agency_id,
+            seller_id,
+            vehicle=vehicle,
+            sale_date=sale_date,
+        )
+
+        current_sale_price = _to_non_negative_float(sale.get("sale_price"), 0.0)
+        current_commission = _to_non_negative_float(sale.get("commission"), 0.0)
+        current_commission_base = _to_non_negative_float(sale.get("commission_base_price"), current_sale_price)
+        current_brand_incentive = _to_non_negative_float(sale.get("brand_incentive_amount"), 0.0)
+        current_dealer_incentive = _to_non_negative_float(sale.get("dealer_incentive_amount"), 0.0)
+        if (
+            abs(current_sale_price - effective_sale_price) < 0.01
+            and abs(current_commission - recalculated_commission) < 0.01
+            and abs(current_commission_base - _to_non_negative_float(effective_pricing.get("commission_base_price"), effective_sale_price)) < 0.01
+            and abs(current_brand_incentive - _to_non_negative_float(effective_pricing.get("brand_incentive_amount"), 0.0)) < 0.01
+            and abs(current_dealer_incentive - _to_non_negative_float(effective_pricing.get("dealer_incentive_amount"), 0.0)) < 0.01
+        ):
+            continue
+
+        await db.sales.update_one(
+            {"_id": sale["_id"]},
+            {
+                "$set": {
+                    "sale_price": round(effective_sale_price, 2),
+                    "commission": round(recalculated_commission, 2),
+                    "commission_base_price": round(_to_non_negative_float(effective_pricing.get("commission_base_price"), effective_sale_price), 2),
+                    "effective_revenue": round(_to_non_negative_float(effective_pricing.get("effective_revenue"), effective_sale_price), 2),
+                    "brand_incentive_amount": round(_to_non_negative_float(effective_pricing.get("brand_incentive_amount"), 0.0), 2),
+                    "dealer_incentive_amount": round(_to_non_negative_float(effective_pricing.get("dealer_incentive_amount"), 0.0), 2),
+                    "undocumented_dealer_incentive_amount": round(_to_non_negative_float(effective_pricing.get("undocumented_dealer_incentive_amount"), 0.0), 2),
+                    "model": sale_model or None,
+                    "version": sale_version or None,
+                    "price_source": str(effective_pricing.get("price_source") or "price_bulletin"),
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            },
+        )
+        repriced += 1
+
+    return {"checked": checked, "repriced": repriced}
+
+@api_router.get("/price-bulletins")
+async def get_price_bulletins(
+    request: Request,
+    group_id: Optional[str] = None,
+    brand_id: Optional[str] = None,
+    agency_id: Optional[str] = None,
+    model: Optional[str] = None,
+    active_only: bool = False,
+    latest_per_model: bool = False,
+    include_brand_defaults: bool = True,
+):
+    current_user = await get_current_user(request)
+    query = _build_scope_query(current_user)
+    if not _scope_query_has_access(query):
+        return []
+
+    _validate_scope_filters(current_user, group_id=group_id, brand_id=brand_id, agency_id=agency_id)
+
+    if group_id:
+        query["group_id"] = group_id
+    if brand_id:
+        query["brand_id"] = brand_id
+
+    normalized_agency_id = str(agency_id or "").strip() or None
+    if normalized_agency_id:
+        if include_brand_defaults:
+            query["$or"] = [{"agency_id": normalized_agency_id}, {"agency_id": None}]
+        else:
+            query["agency_id"] = normalized_agency_id
+    else:
+        query["agency_id"] = None
+
+    normalized_model = str(model or "").strip()
+    if normalized_model:
+        query["model"] = normalized_model
+
+    docs = await db.price_bulletins.find(query).sort([
+        ("effective_from", -1),
+        ("updated_at", -1),
+        ("created_at", -1),
+    ]).to_list(5000)
+
+    current_date_ymd = datetime.now(timezone.utc).date().isoformat()
+    if active_only:
+        docs = [doc for doc in docs if _is_price_bulletin_active(doc, current_date_ymd)]
+
+    if latest_per_model:
+        deduped: Dict[str, Dict[str, Any]] = {}
+        sorted_docs = docs
+        if normalized_agency_id:
+            sorted_docs = sorted(
+                docs,
+                key=lambda d: (
+                    0 if str(d.get("agency_id") or "") == normalized_agency_id else 1,
+                    str(d.get("effective_from") or ""),
+                    d.get("updated_at") or datetime.min.replace(tzinfo=timezone.utc),
+                    d.get("created_at") or datetime.min.replace(tzinfo=timezone.utc),
+                ),
+                reverse=True,
+            )
+        for doc in sorted_docs:
+            key = f"{str(doc.get('model') or '').strip().casefold()}::{str(doc.get('version') or '').strip().casefold()}"
+            if not key.strip(":"):
+                continue
+            if key in deduped:
+                continue
+            deduped[key] = doc
+        docs = list(deduped.values())
+
+    group_cache: Dict[str, str] = {}
+    brand_cache: Dict[str, str] = {}
+    agency_cache: Dict[str, str] = {}
+    output: List[Dict[str, Any]] = []
+    for doc in docs:
+        serialized = serialize_doc(doc)
+        gid = str(doc.get("group_id") or "")
+        bid = str(doc.get("brand_id") or "")
+        aid = str(doc.get("agency_id") or "")
+
+        if gid and gid not in group_cache and ObjectId.is_valid(gid):
+            g = await db.groups.find_one({"_id": ObjectId(gid)})
+            group_cache[gid] = str(g.get("name") or "") if g else ""
+        if bid and bid not in brand_cache and ObjectId.is_valid(bid):
+            b = await db.brands.find_one({"_id": ObjectId(bid)})
+            brand_cache[bid] = str(b.get("name") or "") if b else ""
+        if aid and aid not in agency_cache and ObjectId.is_valid(aid):
+            a = await db.agencies.find_one({"_id": ObjectId(aid)})
+            agency_cache[aid] = str(a.get("name") or "") if a else ""
+
+        serialized["group_name"] = group_cache.get(gid, "")
+        serialized["brand_name"] = brand_cache.get(bid, "")
+        serialized["agency_name"] = agency_cache.get(aid, "")
+        serialized["is_active"] = _is_price_bulletin_active(doc, current_date_ymd)
+        output.append(serialized)
+
+    return output
+
+@api_router.put("/price-bulletins/bulk")
+async def upsert_price_bulletins_bulk(payload: PriceBulletinBulkUpsert, request: Request):
+    current_user = await get_current_user(request)
+    if current_user.get("role") not in PRICE_BULLETIN_EDITOR_ROLES:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="At least one item is required")
+
+    scope = await _resolve_price_bulletin_scope(
+        current_user=current_user,
+        group_id=payload.group_id,
+        brand_id=payload.brand_id,
+        agency_id=payload.agency_id,
+    )
+
+    effective_from = _normalize_iso_date_string(
+        payload.effective_from or datetime.now(timezone.utc).date().isoformat(),
+        field_name="effective_from",
+        required=True,
+    )
+    effective_to = _normalize_iso_date_string(payload.effective_to, field_name="effective_to", required=False)
+    if effective_to and effective_to < effective_from:
+        raise HTTPException(status_code=400, detail="effective_to must be on or after effective_from")
+
+    bulletin_name = str(payload.bulletin_name or "").strip()
+    if not bulletin_name:
+        bulletin_name = f"Boletín {scope['brand_name']} {effective_from}"
+    notes = str(payload.notes or "").strip() or None
+
+    now = datetime.now(timezone.utc)
+    updated_count = 0
+    valid_items: List[PriceBulletinItem] = []
+    for item in payload.items:
+        model_name = str(item.model or "").strip()
+        if not model_name:
+            continue
+        valid_items.append(item)
+        version_name = str(item.version or "").strip() or None
+        query = {
+            "group_id": scope["group_id"],
+            "brand_id": scope["brand_id"],
+            "agency_id": scope["agency_id"],
+            "model": model_name,
+            "version": version_name,
+            "effective_from": effective_from,
+        }
+        set_fields = {
+            "group_id": scope["group_id"],
+            "brand_id": scope["brand_id"],
+            "agency_id": scope["agency_id"],
+            "model": model_name,
+            "version": version_name,
+            "msrp": _to_non_negative_float(item.msrp, 0.0),
+            "transaction_price": (
+                _to_non_negative_float(item.transaction_price, 0.0)
+                if item.transaction_price is not None
+                else None
+            ),
+            "brand_bonus_amount": _to_non_negative_float(item.brand_bonus_amount, 0.0),
+            "brand_bonus_percentage": _to_non_negative_float(item.brand_bonus_percentage, 0.0),
+            "dealer_bonus_amount": _to_non_negative_float(item.dealer_bonus_amount, 0.0),
+            "dealer_share_percentage": min(100.0, _to_non_negative_float(item.dealer_share_percentage, 0.0)),
+            "bulletin_name": bulletin_name,
+            "effective_from": effective_from,
+            "effective_to": effective_to,
+            "notes": notes,
+            "source": "manual",
+            "updated_at": now,
+            "updated_by": current_user.get("id"),
+        }
+        await db.price_bulletins.update_one(
+            query,
+            {
+                "$set": set_fields,
+                "$setOnInsert": {
+                    "created_at": now,
+                    "created_by": current_user.get("id"),
+                },
+            },
+            upsert=True,
+        )
+        updated_count += 1
+
+    if updated_count == 0:
+        raise HTTPException(status_code=400, detail="No valid items to save")
+
+    repricing_summary = await _reprice_sales_for_price_bulletin(
+        scope=scope,
+        effective_from=effective_from,
+        effective_to=effective_to,
+        items=valid_items,
+    )
+
+    await log_audit_event(
+        request=request,
+        current_user=current_user,
+        action="upsert_price_bulletins_bulk",
+        entity_type="price_bulletin",
+        entity_id=None,
+        group_id=scope["group_id"],
+        brand_id=scope["brand_id"],
+        agency_id=scope["agency_id"],
+        details={
+            "bulletin_name": bulletin_name,
+            "effective_from": effective_from,
+            "effective_to": effective_to,
+            "items_count": updated_count,
+            "repricing": repricing_summary,
+        },
+    )
+
+    return {
+        "message": "Price bulletins saved",
+        "group_id": scope["group_id"],
+        "brand_id": scope["brand_id"],
+        "agency_id": scope["agency_id"],
+        "bulletin_name": bulletin_name,
+        "effective_from": effective_from,
+        "effective_to": effective_to,
+        "items_count": updated_count,
+        "repricing": repricing_summary,
+    }
+
+@api_router.delete("/price-bulletins/{bulletin_id}")
+async def delete_price_bulletin(bulletin_id: str, request: Request):
+    current_user = await get_current_user(request)
+    if current_user.get("role") not in PRICE_BULLETIN_EDITOR_ROLES:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    if not ObjectId.is_valid(bulletin_id):
+        raise HTTPException(status_code=400, detail="Invalid bulletin_id")
+
+    previous = await db.price_bulletins.find_one({"_id": ObjectId(bulletin_id)})
+    if not previous:
+        raise HTTPException(status_code=404, detail="Price bulletin not found")
+    _ensure_doc_scope_access(current_user, previous, detail="No tienes acceso a este boletín")
+
+    await db.price_bulletins.delete_one({"_id": ObjectId(bulletin_id)})
+
+    await log_audit_event(
+        request=request,
+        current_user=current_user,
+        action="delete_price_bulletin",
+        entity_type="price_bulletin",
+        entity_id=bulletin_id,
+        group_id=previous.get("group_id"),
+        brand_id=previous.get("brand_id"),
+        agency_id=previous.get("agency_id"),
+        details={
+            "model": previous.get("model"),
+            "version": previous.get("version"),
+            "effective_from": previous.get("effective_from"),
+        },
+    )
+    return {"message": "Price bulletin deleted"}
 
 # ============== FINANCIAL RATES ROUTES ==============
 
@@ -3293,6 +4072,7 @@ async def enrich_vehicle(vehicle: dict) -> dict:
             serialized_sale = serialize_doc(sale_doc)
             result["sale_commission"] = round(float(serialized_sale.get("commission", 0) or 0), 2)
             result["sale_price"] = round(float(serialized_sale.get("sale_price", 0) or 0), 2)
+            result["effective_revenue"] = round(_sale_effective_revenue(serialized_sale), 2)
             result["sale_date"] = serialized_sale.get("sale_date")
             seller_id = serialized_sale.get("seller_id")
             if seller_id and ObjectId.is_valid(seller_id):
@@ -3506,7 +4286,8 @@ async def create_sales_objective(objective_data: SalesObjectiveCreate, request: 
 
     now = datetime.now(timezone.utc)
     current_user_id = current_user.get("id")
-    approval_status = OBJECTIVE_PENDING
+    is_draft = bool(objective_data.save_as_draft)
+    approval_status = OBJECTIVE_DRAFT if is_draft else OBJECTIVE_APPROVED
     objective_doc = {
         "seller_id": seller_id,
         "agency_id": objective_data.agency_id,
@@ -3520,8 +4301,8 @@ async def create_sales_objective(objective_data: SalesObjectiveCreate, request: 
         "approval_status": approval_status,
         "approval_comment": None,
         "created_by": current_user_id,
-        "approved_by": None,
-        "approved_at": None,
+        "approved_by": None if is_draft else current_user_id,
+        "approved_at": None if is_draft else now,
         "rejected_by": None,
         "rejected_at": None,
         "created_at": now,
@@ -3548,6 +4329,7 @@ async def create_sales_objective(objective_data: SalesObjectiveCreate, request: 
             "revenue_target": objective_data.revenue_target,
             "vehicle_line": normalized_vehicle_line,
             "approval_status": approval_status,
+            "save_as_draft": bool(objective_data.save_as_draft),
         },
     )
     return serialize_doc(objective_doc)
@@ -3664,7 +4446,7 @@ async def get_sales_objectives(
 
         sales = await db.sales.find(sales_query).to_list(1000)
         serialized["units_sold"] = len(sales)
-        serialized["revenue_achieved"] = sum(s.get("sale_price", 0) for s in sales)
+        serialized["revenue_achieved"] = sum(_sale_effective_revenue(s) for s in sales)
         serialized["commissions_achieved"] = sum(s.get("commission", 0) for s in sales)
         serialized["progress_units"] = round((serialized["units_sold"] / obj["units_target"] * 100) if obj["units_target"] > 0 else 0, 1)
         serialized["progress_revenue"] = round((serialized["revenue_achieved"] / obj["revenue_target"] * 100) if obj["revenue_target"] > 0 else 0, 1)
@@ -3740,7 +4522,7 @@ async def get_sales_objective_suggestion(
         model_name = str(sale.get("model") or "").strip()
         if model_name:
             model_previous_year_totals[model_name] = model_previous_year_totals.get(model_name, 0) + 1
-        sale_price = float(sale.get("sale_price", 0) or 0)
+        sale_price = _sale_effective_revenue(sale)
         if model_name and sale_price > 0:
             model_price_totals[model_name] = model_price_totals.get(model_name, 0.0) + sale_price
             model_price_counts[model_name] = model_price_counts.get(model_name, 0) + 1
@@ -3757,7 +4539,7 @@ async def get_sales_objective_suggestion(
             model_name = str(sale.get("model") or "").strip()
             if model_name:
                 model_recent_totals[model_name] = model_recent_totals.get(model_name, 0) + 1
-            sale_price = float(sale.get("sale_price", 0) or 0)
+            sale_price = _sale_effective_revenue(sale)
             if model_name and sale_price > 0:
                 model_price_totals[model_name] = model_price_totals.get(model_name, 0.0) + sale_price
                 model_price_counts[model_name] = model_price_counts.get(model_name, 0) + 1
@@ -3789,6 +4571,43 @@ async def get_sales_objective_suggestion(
         except Exception:
             # Best-effort enhancement only; suggestions can still be computed without catalog.
             pass
+
+    bulletin_price_by_model: Dict[str, float] = {}
+    agency_group_id = str(agency.get("group_id") or "").strip()
+    agency_brand_id = str(agency.get("brand_id") or "").strip()
+    reference_date_ymd = f"{target_year:04d}-{target_month:02d}-01"
+    if agency_group_id and agency_brand_id:
+        bulletin_docs = await db.price_bulletins.find({
+            "group_id": agency_group_id,
+            "brand_id": agency_brand_id,
+            "$or": [
+                {"agency_id": agency_id},
+                {"agency_id": None},
+            ],
+        }).sort([
+            ("effective_from", -1),
+            ("updated_at", -1),
+            ("created_at", -1),
+        ]).to_list(3000)
+
+        for doc in bulletin_docs:
+            if not _is_price_bulletin_active(doc, reference_date_ymd):
+                continue
+            model_name = str(doc.get("model") or "").strip()
+            if not model_name:
+                continue
+            key = model_name.casefold()
+            is_agency_specific = str(doc.get("agency_id") or "") == agency_id
+            existing_price = bulletin_price_by_model.get(key)
+            if existing_price is not None and not is_agency_specific:
+                continue
+
+            transaction_price = _to_non_negative_float(doc.get("transaction_price"), 0.0)
+            msrp_price = _to_non_negative_float(doc.get("msrp"), 0.0)
+            effective_price = transaction_price if transaction_price > 0 else msrp_price
+            if effective_price <= 0:
+                continue
+            bulletin_price_by_model[key] = effective_price
 
     model_keys = set(model_previous_year_totals.keys()) | set(model_recent_totals.keys())
     model_scores: List[Dict[str, Any]] = []
@@ -3856,8 +4675,9 @@ async def get_sales_objective_suggestion(
             if model_price_counts.get(model_name, 0) > 0
             else 0.0
         )
+        bulletin_price = float(bulletin_price_by_model.get(model_name.casefold(), 0.0) or 0.0)
         catalog_min_msrp = float(catalog_min_msrp_by_model.get(model_name.casefold(), 0.0) or 0.0)
-        effective_price = avg_sale_price if avg_sale_price > 0 else catalog_min_msrp
+        effective_price = avg_sale_price if avg_sale_price > 0 else (bulletin_price if bulletin_price > 0 else catalog_min_msrp)
         suggested_revenue = round(units * effective_price, 2) if effective_price > 0 else 0.0
         suggestion_total_revenue += suggested_revenue
         suggestion_items.append({
@@ -3902,26 +4722,21 @@ async def update_sales_objective(objective_id: str, objective_data: SalesObjecti
 
     previous = await db.sales_objectives.find_one({"_id": ObjectId(objective_id)})
     _ensure_doc_scope_access(current_user, previous, detail="No tienes acceso a este objetivo")
-    previous_status = str(previous.get("approval_status") or OBJECTIVE_APPROVED).strip().lower() if previous else OBJECTIVE_APPROVED
-    if previous_status == OBJECTIVE_PENDING:
-        raise HTTPException(
-            status_code=409,
-            detail="Este objetivo está en aprobación y no se puede editar hasta que sea aprobado o rechazado.",
-        )
+    normalized_vehicle_line = str(objective_data.vehicle_line or "").strip() or None
     now = datetime.now(timezone.utc)
+    is_draft = bool(objective_data.save_as_draft)
     update_fields: Dict[str, Any] = {
         "units_target": objective_data.units_target,
         "revenue_target": objective_data.revenue_target,
-        "vehicle_line": objective_data.vehicle_line,
+        "vehicle_line": normalized_vehicle_line,
         "updated_at": now,
         "updated_by": current_user.get("id"),
     }
 
-    # Any edit by sales manager returns the objective to approval queue.
     update_fields.update({
-        "approval_status": OBJECTIVE_PENDING,
-        "approved_by": None,
-        "approved_at": None,
+        "approval_status": OBJECTIVE_DRAFT if is_draft else OBJECTIVE_APPROVED,
+        "approved_by": None if is_draft else current_user.get("id"),
+        "approved_at": None if is_draft else now,
         "rejected_by": None,
         "rejected_at": None,
         "approval_comment": None,
@@ -4025,6 +4840,309 @@ async def approve_sales_objective(
     return serialize_doc(objective)
 
 # ============== COMMISSION RULES ROUTES ==============
+
+def _to_non_negative_float(value: Any, default: float = 0.0) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if numeric != numeric:  # NaN
+        return float(default)
+    return max(0.0, numeric)
+
+def _sale_effective_revenue(sale: Dict[str, Any]) -> float:
+    explicit = sale.get("effective_revenue")
+    if explicit is not None:
+        return _to_non_negative_float(explicit, 0.0)
+    sale_price = _to_non_negative_float(sale.get("sale_price"), 0.0)
+    brand_incentive = _to_non_negative_float(sale.get("brand_incentive_amount"), 0.0)
+    return round(sale_price + brand_incentive, 2)
+
+def _sale_commission_base_price(sale: Dict[str, Any]) -> float:
+    explicit = sale.get("commission_base_price")
+    if explicit is not None:
+        return _to_non_negative_float(explicit, 0.0)
+    sale_price = _to_non_negative_float(sale.get("sale_price"), 0.0)
+    brand_incentive = _to_non_negative_float(sale.get("brand_incentive_amount"), 0.0)
+    return round(sale_price + brand_incentive, 2)
+
+def _normalize_commission_matrix_volume_tiers(tiers: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in tiers or []:
+        payload = row or {}
+        try:
+            min_units = int(payload.get("min_units"))
+        except (TypeError, ValueError):
+            continue
+        min_units = max(1, min_units)
+
+        max_units_raw = payload.get("max_units")
+        max_units: Optional[int] = None
+        if max_units_raw not in (None, ""):
+            try:
+                parsed_max = int(max_units_raw)
+                if parsed_max > 0:
+                    max_units = max(min_units, parsed_max)
+            except (TypeError, ValueError):
+                max_units = None
+
+        bonus_per_unit = _to_non_negative_float(payload.get("bonus_per_unit"), 0.0)
+        if bonus_per_unit <= 0:
+            continue
+
+        dedupe_key = f"{min_units}:{max_units if max_units is not None else 'inf'}:{round(bonus_per_unit, 6)}"
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        normalized.append({
+            "min_units": min_units,
+            "max_units": max_units,
+            "bonus_per_unit": bonus_per_unit,
+        })
+
+    normalized.sort(key=lambda row: (int(row.get("min_units") or 0), int(row.get("max_units") or 10**9)))
+    return normalized
+
+def _normalize_commission_matrix_general(general: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    payload = general or {}
+    return {
+        "global_percentage": _to_non_negative_float(payload.get("global_percentage"), 0.0),
+        "global_per_unit_bonus": _to_non_negative_float(payload.get("global_per_unit_bonus"), 0.0),
+        "global_aged_61_90_bonus": _to_non_negative_float(payload.get("global_aged_61_90_bonus"), 0.0),
+        "global_aged_90_plus_bonus": _to_non_negative_float(payload.get("global_aged_90_plus_bonus"), 0.0),
+        "volume_tiers": _normalize_commission_matrix_volume_tiers(payload.get("volume_tiers")),
+    }
+
+def _normalize_commission_matrix_models(models: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in models or []:
+        model_name = str((row or {}).get("model") or "").strip()
+        if not model_name:
+            continue
+        model_key = model_name.casefold()
+        if model_key in seen:
+            continue
+        seen.add(model_key)
+        raw_model_percentage = (row or {}).get("model_percentage")
+        model_percentage = None
+        if raw_model_percentage is not None and str(raw_model_percentage).strip() != "":
+            model_percentage = _to_non_negative_float(raw_model_percentage, 0.0)
+        normalized.append({
+            "model": model_name,
+            "model_percentage": model_percentage,
+            "model_bonus": _to_non_negative_float((row or {}).get("model_bonus"), 0.0),
+            "aged_61_90_bonus": _to_non_negative_float((row or {}).get("aged_61_90_bonus"), 0.0),
+            "aged_90_plus_bonus": _to_non_negative_float((row or {}).get("aged_90_plus_bonus"), 0.0),
+            "plant_incentive_share_pct": min(100.0, _to_non_negative_float((row or {}).get("plant_incentive_share_pct"), COMMISSION_MATRIX_DEFAULT_PLANT_SHARE_PCT)),
+        })
+    return normalized
+
+def _get_catalog_models_for_brand(brand_name: Optional[str]) -> List[Dict[str, Any]]:
+    make_name = str(brand_name or "").strip()
+    if not make_name:
+        return []
+    try:
+        catalog = _build_catalog_tree_from_source(all_years=True)
+        make_entry = _find_catalog_make(catalog, make_name)
+        if not make_entry:
+            return []
+        rows: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for model_entry in make_entry.get("models", []):
+            model_name = str(model_entry.get("name") or "").strip()
+            if not model_name:
+                continue
+            key = model_name.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append({
+                "model": model_name,
+                "min_msrp": _to_non_negative_float(_parse_catalog_price(model_entry.get("min_msrp")), 0.0),
+            })
+        rows.sort(key=lambda item: item["model"].lower())
+        return rows
+    except Exception:
+        return []
+
+def _build_matrix_models_response(
+    catalog_models: List[Dict[str, Any]],
+    overrides: List[Dict[str, Any]],
+    default_percentage: float,
+) -> List[Dict[str, Any]]:
+    override_map: Dict[str, Dict[str, Any]] = {
+        str(item.get("model") or "").strip().casefold(): item
+        for item in overrides
+        if str(item.get("model") or "").strip()
+    }
+    rows: List[Dict[str, Any]] = []
+    used: set[str] = set()
+    for item in catalog_models:
+        model_name = str(item.get("model") or "").strip()
+        if not model_name:
+            continue
+        model_key = model_name.casefold()
+        used.add(model_key)
+        override = override_map.get(model_key) or {}
+        override_model_percentage = override.get("model_percentage")
+        model_percentage = (
+            _to_non_negative_float(override_model_percentage, default_percentage)
+            if override_model_percentage is not None
+            else _to_non_negative_float(default_percentage, 0.0)
+        )
+        rows.append({
+            "model": model_name,
+            "min_msrp": _to_non_negative_float(item.get("min_msrp"), 0.0),
+            "model_percentage": model_percentage,
+            "model_bonus": _to_non_negative_float(override.get("model_bonus"), 0.0),
+            "aged_61_90_bonus": _to_non_negative_float(override.get("aged_61_90_bonus"), 0.0),
+            "aged_90_plus_bonus": _to_non_negative_float(override.get("aged_90_plus_bonus"), 0.0),
+            "plant_incentive_share_pct": min(100.0, _to_non_negative_float(override.get("plant_incentive_share_pct"), COMMISSION_MATRIX_DEFAULT_PLANT_SHARE_PCT)),
+            "source": "catalog",
+        })
+
+    # Preserve custom rows not present in current catalog.
+    custom_rows = []
+    for override in overrides:
+        model_name = str(override.get("model") or "").strip()
+        if not model_name:
+            continue
+        model_key = model_name.casefold()
+        if model_key in used:
+            continue
+        custom_rows.append({
+            "model": model_name,
+            "min_msrp": 0.0,
+            "model_percentage": _to_non_negative_float(override.get("model_percentage"), _to_non_negative_float(default_percentage, 0.0)),
+            "model_bonus": _to_non_negative_float(override.get("model_bonus"), 0.0),
+            "aged_61_90_bonus": _to_non_negative_float(override.get("aged_61_90_bonus"), 0.0),
+            "aged_90_plus_bonus": _to_non_negative_float(override.get("aged_90_plus_bonus"), 0.0),
+            "plant_incentive_share_pct": min(100.0, _to_non_negative_float(override.get("plant_incentive_share_pct"), COMMISSION_MATRIX_DEFAULT_PLANT_SHARE_PCT)),
+            "source": "custom",
+        })
+    custom_rows.sort(key=lambda item: item["model"].lower())
+    rows.extend(custom_rows)
+    return rows
+
+def _resolve_matrix_volume_bonus_per_unit(volume_tiers: Optional[List[Dict[str, Any]]], seller_month_units: int) -> float:
+    units = max(0, int(seller_month_units or 0))
+    if units <= 0:
+        return 0.0
+    best_match: Optional[Dict[str, Any]] = None
+    for tier in volume_tiers or []:
+        min_units = int(tier.get("min_units") or 0)
+        max_units = tier.get("max_units")
+        if units < min_units:
+            continue
+        if max_units is not None and units > int(max_units):
+            continue
+        if best_match is None or min_units > int(best_match.get("min_units") or 0):
+            best_match = tier
+    if not best_match:
+        return 0.0
+    return _to_non_negative_float(best_match.get("bonus_per_unit"), 0.0)
+
+async def _serialize_commission_matrix(agency: Dict[str, Any], matrix_doc: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    brand_name = ""
+    group_name = ""
+    if agency.get("brand_id") and ObjectId.is_valid(str(agency["brand_id"])):
+        brand = await db.brands.find_one({"_id": ObjectId(str(agency["brand_id"]))})
+        if brand:
+            brand_name = str(brand.get("name") or "")
+    if agency.get("group_id") and ObjectId.is_valid(str(agency["group_id"])):
+        group = await db.groups.find_one({"_id": ObjectId(str(agency["group_id"]))})
+        if group:
+            group_name = str(group.get("name") or "")
+
+    general = _normalize_commission_matrix_general((matrix_doc or {}).get("general"))
+    overrides = _normalize_commission_matrix_models((matrix_doc or {}).get("models"))
+    catalog_models = _get_catalog_models_for_brand(brand_name)
+    models_response = _build_matrix_models_response(catalog_models, overrides, general.get("global_percentage", 0.0))
+
+    return {
+        "agency_id": str(agency.get("_id")),
+        "agency_name": agency.get("name"),
+        "brand_id": str(agency.get("brand_id")) if agency.get("brand_id") else None,
+        "brand_name": brand_name,
+        "group_id": str(agency.get("group_id")) if agency.get("group_id") else None,
+        "group_name": group_name,
+        "general": general,
+        "models": models_response,
+        "updated_at": matrix_doc.get("updated_at").isoformat() if matrix_doc and isinstance(matrix_doc.get("updated_at"), datetime) else None,
+        "updated_by": matrix_doc.get("updated_by") if matrix_doc else None,
+    }
+
+@api_router.get("/commission-matrix")
+async def get_commission_matrix(request: Request, agency_id: str):
+    current_user = await get_current_user(request)
+    if not ObjectId.is_valid(agency_id):
+        raise HTTPException(status_code=400, detail="Invalid agency_id")
+
+    agency = await db.agencies.find_one({"_id": ObjectId(agency_id)})
+    if not agency:
+        raise HTTPException(status_code=404, detail="Agency not found")
+    _ensure_doc_scope_access(current_user, agency, agency_field="_id", detail="No tienes acceso a esta agencia")
+
+    matrix_doc = await db.commission_matrices.find_one({"agency_id": agency_id})
+    return await _serialize_commission_matrix(agency, matrix_doc)
+
+@api_router.put("/commission-matrix")
+async def upsert_commission_matrix(payload: CommissionMatrixUpsert, request: Request):
+    current_user = await get_current_user(request)
+    if current_user.get("role") not in COMMISSION_MATRIX_EDITOR_ROLES:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    if not ObjectId.is_valid(payload.agency_id):
+        raise HTTPException(status_code=400, detail="Invalid agency_id")
+
+    agency = await db.agencies.find_one({"_id": ObjectId(payload.agency_id)})
+    if not agency:
+        raise HTTPException(status_code=404, detail="Agency not found")
+    _ensure_doc_scope_access(current_user, agency, agency_field="_id", detail="No tienes acceso a esta agencia")
+
+    now = datetime.now(timezone.utc)
+    normalized_general = _normalize_commission_matrix_general(payload.general.model_dump())
+    normalized_models = _normalize_commission_matrix_models([model.model_dump() for model in payload.models])
+
+    await db.commission_matrices.update_one(
+        {"agency_id": payload.agency_id},
+        {
+            "$set": {
+                "agency_id": payload.agency_id,
+                "brand_id": agency.get("brand_id"),
+                "group_id": agency.get("group_id"),
+                "general": normalized_general,
+                "models": normalized_models,
+                "updated_at": now,
+                "updated_by": current_user.get("id"),
+            },
+            "$setOnInsert": {
+                "created_at": now,
+                "created_by": current_user.get("id"),
+            },
+        },
+        upsert=True,
+    )
+
+    matrix_doc = await db.commission_matrices.find_one({"agency_id": payload.agency_id})
+
+    await log_audit_event(
+        request=request,
+        current_user=current_user,
+        action="upsert_commission_matrix",
+        entity_type="commission_matrix",
+        entity_id=str(matrix_doc.get("_id")) if matrix_doc else None,
+        group_id=str(agency.get("group_id")) if agency.get("group_id") else None,
+        brand_id=str(agency.get("brand_id")) if agency.get("brand_id") else None,
+        agency_id=payload.agency_id,
+        details={
+            "general": normalized_general,
+            "models_count": len(normalized_models),
+        },
+    )
+
+    return await _serialize_commission_matrix(agency, matrix_doc)
 
 @api_router.post("/commission-rules")
 async def create_commission_rule(rule_data: CommissionRuleCreate, request: Request):
@@ -4447,7 +5565,7 @@ async def create_commission_closure(payload: CommissionClosureCreate, request: R
     sales = await db.sales.find(sales_query).to_list(10000)
     snapshot = {
         "sales_count": len(sales),
-        "sales_total": round(sum(s.get("sale_price", 0) for s in sales), 2),
+        "sales_total": round(sum(_sale_effective_revenue(s) for s in sales), 2),
         "fi_revenue_total": round(sum(s.get("fi_revenue", 0) for s in sales), 2),
         "commission_total": round(sum(s.get("commission", 0) for s in sales), 2),
         "generated_at": datetime.now(timezone.utc),
@@ -4642,8 +5760,73 @@ async def approve_commission_closure(
 
 # ============== SALES ROUTES ==============
 
-async def calculate_commission(sale: dict, agency_id: str, seller_id: str) -> float:
-    """Calculate commission based on rules"""
+def _calculate_matrix_commission_for_sale(
+    matrix_doc: Optional[Dict[str, Any]],
+    *,
+    sale: Dict[str, Any],
+    vehicle: Optional[Dict[str, Any]],
+    sale_date: Optional[datetime],
+    seller_month_units: int = 0,
+) -> float:
+    if not matrix_doc:
+        return 0.0
+
+    general = _normalize_commission_matrix_general((matrix_doc or {}).get("general"))
+    models = _normalize_commission_matrix_models((matrix_doc or {}).get("models"))
+    model_map: Dict[str, Dict[str, Any]] = {
+        str(item.get("model") or "").strip().casefold(): item
+        for item in models
+        if str(item.get("model") or "").strip()
+    }
+
+    sale_price = _sale_commission_base_price(sale or {})
+    plant_incentive = _to_non_negative_float((sale or {}).get("plant_incentive"), 0.0)
+    model_name = str((sale or {}).get("model") or (vehicle or {}).get("model") or "").strip()
+    model_rule = model_map.get(model_name.casefold()) if model_name else None
+
+    total = 0.0
+    effective_percentage = _to_non_negative_float(general.get("global_percentage"), 0.0)
+    if model_rule and model_rule.get("model_percentage") is not None:
+        effective_percentage = _to_non_negative_float(model_rule.get("model_percentage"), effective_percentage)
+    total += sale_price * (effective_percentage / 100.0)
+    total += general["global_per_unit_bonus"]
+    total += _resolve_matrix_volume_bonus_per_unit(general.get("volume_tiers"), seller_month_units)
+    if model_rule:
+        total += _to_non_negative_float(model_rule.get("model_bonus"), 0.0)
+
+    reference_sale_date = _coerce_utc_datetime(sale_date) or datetime.now(timezone.utc)
+    entry_date = _coerce_utc_datetime((vehicle or {}).get("entry_date"))
+    aging_days = 0
+    if entry_date and reference_sale_date > entry_date:
+        aging_days = max(0, int((reference_sale_date - entry_date).days))
+
+    if 61 <= aging_days <= 90:
+        total += general["global_aged_61_90_bonus"]
+        if model_rule:
+            total += _to_non_negative_float(model_rule.get("aged_61_90_bonus"), 0.0)
+    elif aging_days > 90:
+        total += general["global_aged_90_plus_bonus"]
+        if model_rule:
+            total += _to_non_negative_float(model_rule.get("aged_90_plus_bonus"), 0.0)
+
+    plant_share_pct = (
+        min(100.0, _to_non_negative_float(model_rule.get("plant_incentive_share_pct"), COMMISSION_MATRIX_DEFAULT_PLANT_SHARE_PCT))
+        if model_rule
+        else COMMISSION_MATRIX_DEFAULT_PLANT_SHARE_PCT
+    )
+    total += plant_incentive * (plant_share_pct / 100.0)
+
+    return round(total, 2)
+
+async def calculate_commission(
+    sale: dict,
+    agency_id: str,
+    seller_id: str,
+    *,
+    vehicle: Optional[Dict[str, Any]] = None,
+    sale_date: Optional[datetime] = None,
+) -> float:
+    """Calculate commission using legacy rules + model matrix incentives."""
     rules = await db.commission_rules.find({
         "agency_id": agency_id,
         "$or": [
@@ -4651,30 +5834,40 @@ async def calculate_commission(sale: dict, agency_id: str, seller_id: str) -> fl
             {"approval_status": COMMISSION_APPROVED},
         ],
     }).to_list(100)
-    
-    # Get seller's monthly sales count
-    now = datetime.now(timezone.utc)
-    start_of_month = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+
+    # Get seller's monthly sales count for volume rules.
+    reference_date = _coerce_utc_datetime(sale_date) or datetime.now(timezone.utc)
+    start_of_month = datetime(reference_date.year, reference_date.month, 1, tzinfo=timezone.utc)
     seller_sales = await db.sales.count_documents({
         "seller_id": seller_id,
         "agency_id": agency_id,
         "sale_date": {"$gte": start_of_month}
     })
-    
-    total_commission = 0
-    
+
+    total_commission = 0.0
+
     for rule in rules:
         if rule["rule_type"] == "per_unit":
             total_commission += rule["value"]
         elif rule["rule_type"] == "percentage":
-            total_commission += sale["sale_price"] * (rule["value"] / 100)
+            total_commission += _sale_commission_base_price(sale) * (rule["value"] / 100)
         elif rule["rule_type"] == "volume_bonus":
             if rule.get("min_units") and seller_sales >= rule["min_units"]:
                 if not rule.get("max_units") or seller_sales <= rule["max_units"]:
                     total_commission += rule["value"]
         elif rule["rule_type"] == "fi_bonus":
             total_commission += sale.get("fi_revenue", 0) * (rule["value"] / 100)
-    
+
+    matrix_doc = await db.commission_matrices.find_one({"agency_id": agency_id})
+    seller_month_units = int(seller_sales or 0) + 1
+    total_commission += _calculate_matrix_commission_for_sale(
+        matrix_doc,
+        sale=sale,
+        vehicle=vehicle,
+        sale_date=reference_date,
+        seller_month_units=seller_month_units,
+    )
+
     return round(total_commission, 2)
 
 @api_router.post("/sales")
@@ -4706,12 +5899,38 @@ async def create_sale(sale_data: SaleCreate, request: Request):
         sale_date = datetime.fromisoformat(sale_date.replace("Z", "+00:00"))
     else:
         sale_date = datetime.now(timezone.utc)
+
+    reference_date_ymd = sale_date.date().isoformat() if sale_date else None
+    configured_pricing = await _resolve_effective_sale_pricing_for_model(
+        group_id=vehicle.get("group_id"),
+        brand_id=vehicle.get("brand_id"),
+        agency_id=vehicle.get("agency_id"),
+        model=vehicle.get("model"),
+        version=vehicle.get("version") or vehicle.get("trim"),
+        reference_date_ymd=reference_date_ymd,
+        fallback_msrp=_to_non_negative_float(sale_data.sale_price, _to_non_negative_float(vehicle.get("msrp"), 0.0)),
+    )
+    effective_pricing = _apply_manual_sale_price_override(configured_pricing, sale_data.sale_price)
+    resolved_sale_price = _to_non_negative_float(effective_pricing.get("transaction_price"), 0.0)
+    if resolved_sale_price <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Sale price is required. Configure Precio Boletín/Incentivos in Precios or provide sale_price.",
+        )
     
     # Calculate commission
     commission = await calculate_commission(
-        {"sale_price": sale_data.sale_price, "fi_revenue": sale_data.fi_revenue},
+        {
+            "sale_price": resolved_sale_price,
+            "commission_base_price": _to_non_negative_float(effective_pricing.get("commission_base_price"), resolved_sale_price),
+            "fi_revenue": sale_data.fi_revenue,
+            "plant_incentive": sale_data.plant_incentive,
+            "model": vehicle.get("model"),
+        },
         vehicle["agency_id"],
-        sale_data.seller_id
+        sale_data.seller_id,
+        vehicle=vehicle,
+        sale_date=sale_date,
     )
     
     sale_doc = {
@@ -4720,9 +5939,18 @@ async def create_sale(sale_data: SaleCreate, request: Request):
         "agency_id": vehicle["agency_id"],
         "brand_id": vehicle.get("brand_id"),
         "group_id": vehicle.get("group_id"),
-        "sale_price": sale_data.sale_price,
+        "sale_price": resolved_sale_price,
+        "commission_base_price": round(_to_non_negative_float(effective_pricing.get("commission_base_price"), resolved_sale_price), 2),
+        "effective_revenue": round(_to_non_negative_float(effective_pricing.get("effective_revenue"), resolved_sale_price), 2),
+        "brand_incentive_amount": round(_to_non_negative_float(effective_pricing.get("brand_incentive_amount"), 0.0), 2),
+        "dealer_incentive_amount": round(_to_non_negative_float(effective_pricing.get("dealer_incentive_amount"), 0.0), 2),
+        "undocumented_dealer_incentive_amount": round(_to_non_negative_float(effective_pricing.get("undocumented_dealer_incentive_amount"), 0.0), 2),
         "sale_date": sale_date,
         "fi_revenue": sale_data.fi_revenue,
+        "plant_incentive": sale_data.plant_incentive,
+        "model": vehicle.get("model"),
+        "version": vehicle.get("version") or vehicle.get("trim"),
+        "price_source": str(effective_pricing.get("price_source") or "price_bulletin"),
         "commission": commission,
         "created_at": datetime.now(timezone.utc)
     }
@@ -4746,8 +5974,14 @@ async def create_sale(sale_data: SaleCreate, request: Request):
         details={
             "vehicle_id": sale_data.vehicle_id,
             "seller_id": sale_data.seller_id,
-            "sale_price": sale_data.sale_price,
+            "sale_price": resolved_sale_price,
+            "commission_base_price": round(_to_non_negative_float(effective_pricing.get("commission_base_price"), resolved_sale_price), 2),
+            "effective_revenue": round(_to_non_negative_float(effective_pricing.get("effective_revenue"), resolved_sale_price), 2),
+            "brand_incentive_amount": round(_to_non_negative_float(effective_pricing.get("brand_incentive_amount"), 0.0), 2),
+            "dealer_incentive_amount": round(_to_non_negative_float(effective_pricing.get("dealer_incentive_amount"), 0.0), 2),
+            "undocumented_dealer_incentive_amount": round(_to_non_negative_float(effective_pricing.get("undocumented_dealer_incentive_amount"), 0.0), 2),
             "fi_revenue": sale_data.fi_revenue,
+            "plant_incentive": sale_data.plant_incentive,
             "commission": commission,
         },
     )
@@ -5145,7 +6379,7 @@ async def get_dashboard_kpis(
     monthly_sales = await db.sales.find(sales_query).to_list(10000)
     
     units_sold_month = len(monthly_sales)
-    revenue_month = sum(s.get("sale_price", 0) for s in monthly_sales)
+    revenue_month = sum(_sale_effective_revenue(s) for s in monthly_sales)
     commissions_month = sum(s.get("commission", 0) for s in monthly_sales)
 
     vehicle_cost_month = 0.0
@@ -5504,7 +6738,7 @@ async def get_sales_trends(
         objectives = await db.sales_objectives.find(objective_scope_query).to_list(5000)
         approved_objectives = [
             obj for obj in objectives
-            if (obj.get("approval_status") or OBJECTIVE_APPROVED) == OBJECTIVE_APPROVED
+            if str(obj.get("approval_status") or OBJECTIVE_APPROVED).strip().lower() in {OBJECTIVE_APPROVED, OBJECTIVE_PENDING}
         ]
 
         if role_scoped_to_seller:
@@ -5525,7 +6759,7 @@ async def get_sales_trends(
                 continue
             day = sale_date.day
             units_by_day[day] = units_by_day.get(day, 0) + 1
-            revenue_by_day[day] = revenue_by_day.get(day, 0.0) + float(sale.get("sale_price", 0) or 0)
+            revenue_by_day[day] = revenue_by_day.get(day, 0.0) + _sale_effective_revenue(sale)
             commission_by_day[day] = commission_by_day.get(day, 0.0) + float(sale.get("commission", 0) or 0)
 
         last_year_units_by_day: Dict[int, int] = {}
@@ -5686,7 +6920,7 @@ async def get_sales_trends(
         objectives = await db.sales_objectives.find(objective_scope_query).to_list(5000)
         approved_objectives = [
             obj for obj in objectives
-            if (obj.get("approval_status") or OBJECTIVE_APPROVED) == OBJECTIVE_APPROVED
+            if str(obj.get("approval_status") or OBJECTIVE_APPROVED).strip().lower() in {OBJECTIVE_APPROVED, OBJECTIVE_PENDING}
         ]
 
         if role_scoped_to_seller:
@@ -5719,7 +6953,7 @@ async def get_sales_trends(
             "configured_objective_units": float(objective_units or 0),
             "objective_source": objective_source,
             "weighted_objective_units": weighted_objective_units,
-            "revenue": round(sum(s.get("sale_price", 0) for s in sales), 2),
+            "revenue": round(sum(_sale_effective_revenue(s) for s in sales), 2),
             "commission": round(sum(s.get("commission", 0) for s in sales), 2),
         })
 
@@ -5783,7 +7017,7 @@ async def get_seller_performance(request: Request, agency_id: Optional[str] = No
                 "commission": 0
             }
         seller_stats[seller_id]["units"] += 1
-        seller_stats[seller_id]["revenue"] += sale.get("sale_price", 0)
+        seller_stats[seller_id]["revenue"] += _sale_effective_revenue(sale)
         seller_stats[seller_id]["commission"] += sale.get("commission", 0)
     
     # Get seller names
@@ -6400,11 +7634,36 @@ async def import_sales(request: Request, file: UploadFile = File(...)):
                 sale_date = datetime.fromisoformat(sale_date.replace("Z", "+00:00"))
             
             fi_revenue = float(row.get('fi_revenue', 0)) if not pd.isna(row.get('fi_revenue')) else 0
-            
+            plant_incentive = float(row.get('plant_incentive', 0)) if not pd.isna(row.get('plant_incentive')) else 0
+
+            reference_date_ymd = sale_date.date().isoformat() if isinstance(sale_date, datetime) else None
+            configured_pricing = await _resolve_effective_sale_pricing_for_model(
+                group_id=vehicle.get("group_id"),
+                brand_id=vehicle.get("brand_id"),
+                agency_id=vehicle.get("agency_id"),
+                model=vehicle.get("model"),
+                version=vehicle.get("version") or vehicle.get("trim"),
+                reference_date_ymd=reference_date_ymd,
+                fallback_msrp=_to_non_negative_float(row.get('sale_price'), _to_non_negative_float(vehicle.get("msrp"), 0.0)),
+            )
+            effective_pricing = _apply_manual_sale_price_override(configured_pricing, row.get('sale_price'))
+            resolved_sale_price = _to_non_negative_float(effective_pricing.get("transaction_price"), 0.0)
+            if resolved_sale_price <= 0:
+                errors.append(f"Row {idx + 2}: unable to resolve effective sale price")
+                continue
+
             commission = await calculate_commission(
-                {"sale_price": float(row['sale_price']), "fi_revenue": fi_revenue},
+                {
+                    "sale_price": float(resolved_sale_price),
+                    "commission_base_price": _to_non_negative_float(effective_pricing.get("commission_base_price"), resolved_sale_price),
+                    "fi_revenue": fi_revenue,
+                    "plant_incentive": plant_incentive,
+                    "model": vehicle.get("model"),
+                },
                 vehicle["agency_id"],
-                str(row['seller_id'])
+                str(row['seller_id']),
+                vehicle=vehicle,
+                sale_date=sale_date,
             )
             
             sale_doc = {
@@ -6413,9 +7672,18 @@ async def import_sales(request: Request, file: UploadFile = File(...)):
                 "agency_id": vehicle["agency_id"],
                 "brand_id": vehicle.get("brand_id"),
                 "group_id": vehicle.get("group_id"),
-                "sale_price": float(row['sale_price']),
+                "sale_price": float(resolved_sale_price),
+                "commission_base_price": round(_to_non_negative_float(effective_pricing.get("commission_base_price"), resolved_sale_price), 2),
+                "effective_revenue": round(_to_non_negative_float(effective_pricing.get("effective_revenue"), resolved_sale_price), 2),
+                "brand_incentive_amount": round(_to_non_negative_float(effective_pricing.get("brand_incentive_amount"), 0.0), 2),
+                "dealer_incentive_amount": round(_to_non_negative_float(effective_pricing.get("dealer_incentive_amount"), 0.0), 2),
+                "undocumented_dealer_incentive_amount": round(_to_non_negative_float(effective_pricing.get("undocumented_dealer_incentive_amount"), 0.0), 2),
                 "sale_date": sale_date,
                 "fi_revenue": fi_revenue,
+                "plant_incentive": plant_incentive,
+                "model": vehicle.get("model"),
+                "version": vehicle.get("version") or vehicle.get("trim"),
+                "price_source": str(effective_pricing.get("price_source") or "price_bulletin"),
                 "commission": commission,
                 "created_at": datetime.now(timezone.utc)
             }

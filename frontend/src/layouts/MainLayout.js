@@ -30,12 +30,13 @@ const NAV_ITEMS = [
   { path: '/', label: 'Dashboard', icon: ChartBar },
   { path: '/inventory', label: 'Inventario', icon: Warehouse },
   { path: '/financial-rates', label: 'Tasas Financieras', icon: Percent },
+  { path: '/prices', label: 'Precios', icon: List },
   { path: '/objectives', label: 'Objetivos', icon: Target },
   { path: '/commissions', label: 'Comisiones', icon: CurrencyDollar },
   { path: '/settings', label: 'Configuración', icon: Gear }
 ];
 
-const GROUP_FINANCE_ALLOWED_PATHS = new Set(['/', '/inventory', '/financial-rates']);
+const GROUP_FINANCE_ALLOWED_PATHS = new Set(['/', '/inventory', '/financial-rates', '/prices']);
 const AGENCY_SCOPED_ROLES = new Set([
   'agency_admin',
   'agency_sales_manager',

@@ -95,7 +95,13 @@ export const vehicleCatalogApi = {
       ...(options?.allYears ? { all_years: true } : {}),
     }
   }),
-  getVersions: (make, model) => api.get('/catalog/versions', { params: { make, model } })
+  getVersions: (make, model, options = {}) => api.get('/catalog/versions', {
+    params: {
+      make,
+      model,
+      ...(options?.allYears ? { all_years: true } : {}),
+    }
+  })
 };
 
 // Sales Objectives
@@ -124,6 +130,17 @@ export const commissionClosuresApi = {
 
 export const commissionSimulatorApi = {
   simulate: (data) => api.post('/commission-simulator', data)
+};
+
+export const commissionMatrixApi = {
+  get: (agencyId) => api.get('/commission-matrix', { params: { agency_id: agencyId } }),
+  upsert: (data) => api.put('/commission-matrix', data)
+};
+
+export const priceBulletinsApi = {
+  getAll: (params) => api.get('/price-bulletins', { params }),
+  bulkUpsert: (data) => api.put('/price-bulletins/bulk', data),
+  delete: (id) => api.delete(`/price-bulletins/${id}`)
 };
 
 // Sales

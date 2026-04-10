@@ -1361,7 +1361,7 @@ export default function DashboardPage() {
                         {suggestion.vehicle_info.model} {suggestion.vehicle_info.trim}
                       </div>
                       <Badge className="bg-[#E9C46A]/20 text-[#b89830] border-[#E9C46A]/30">
-                        Bono sugerido: {formatCurrency(suggestion.suggested_bonus)}
+                        Incentivo sugerido: {formatCurrency(suggestion.suggested_bonus)}
                       </Badge>
                     </div>
                     <p className="text-sm text-muted-foreground">{suggestion.reason}</p>

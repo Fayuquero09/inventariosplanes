@@ -83,9 +83,23 @@ export function useHierarchicalFilters(options = {}) {
   }, [selectedGroup, isBrandAgencyMode]);
 
   useEffect(() => {
-    setSelectedAgency((prev) => (prev === 'all' ? prev : 'all'));
+    setSelectedAgency((prev) => {
+      if (prev === 'all') return prev;
+      if (selectedBrand === 'all') return 'all';
+      const agency = agencies.find((item) => item.id === prev);
+      if (!agency) return 'all';
+      return agency.brand_id === selectedBrand ? prev : 'all';
+    });
     setSelectedSeller((prev) => (prev === 'all' ? prev : 'all'));
-  }, [selectedBrand]);
+  }, [selectedBrand, agencies]);
+
+  useEffect(() => {
+    if (selectedAgency === 'all') return;
+    const agency = agencies.find((item) => item.id === selectedAgency);
+    const agencyBrandId = agency?.brand_id;
+    if (!agencyBrandId) return;
+    setSelectedBrand((prev) => (prev === agencyBrandId ? prev : agencyBrandId));
+  }, [selectedAgency, agencies]);
 
   useEffect(() => {
     setSelectedSeller((prev) => (prev === 'all' ? prev : 'all'));

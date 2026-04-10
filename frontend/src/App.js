@@ -10,6 +10,7 @@ import InventoryPage from "./pages/InventoryPage";
 import FinancialRatesPage from "./pages/FinancialRatesPage";
 import ObjectivesPage from "./pages/ObjectivesPage";
 import CommissionsPage from "./pages/CommissionsPage";
+import PricesPage from "./pages/PricesPage";
 import SettingsPage from "./pages/SettingsPage";
 
 // Layout
@@ -100,6 +101,7 @@ function AppRoutes() {
         <Route path="/" element={<DashboardPage />} />
         <Route path="/inventory" element={<InventoryPage />} />
         <Route path="/financial-rates" element={<FinancialRatesRoute />} />
+        <Route path="/prices" element={<PricesPage />} />
         <Route path="/objectives" element={<ObjectivesPage />} />
         <Route path="/commissions" element={<CommissionsPage />} />
         <Route path="/settings" element={<SettingsPage />} />
