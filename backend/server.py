@@ -21,6 +21,9 @@ import pandas as pd
 from io import BytesIO
 import json
 from pathlib import Path
+from modules.health_routes import HealthRouteHandlers
+from modules.inventory_routes import InventoryRouteHandlers
+from modules.registry import RouteModuleHandlers, register_route_modules
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -4090,7 +4093,6 @@ async def enrich_vehicle(vehicle: dict) -> dict:
     
     return result
 
-@api_router.post("/vehicles")
 async def create_vehicle(vehicle_data: VehicleCreate, request: Request):
     current_user = await get_current_user(request)
     if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN, UserRole.BRAND_ADMIN, UserRole.AGENCY_ADMIN]:
@@ -4150,7 +4152,6 @@ async def create_vehicle(vehicle_data: VehicleCreate, request: Request):
     )
     return await enrich_vehicle(vehicle_doc)
 
-@api_router.get("/vehicles")
 async def get_vehicles(
     request: Request,
     agency_id: Optional[str] = None,
@@ -4209,7 +4210,6 @@ async def get_vehicles(
     vehicles = await db.vehicles.find(query).to_list(1000)
     return [await enrich_vehicle(v) for v in vehicles]
 
-@api_router.get("/vehicles/{vehicle_id}")
 async def get_vehicle(vehicle_id: str, request: Request):
     current_user = await get_current_user(request)
     vehicle = await db.vehicles.find_one({"_id": ObjectId(vehicle_id)})
@@ -4218,7 +4218,6 @@ async def get_vehicle(vehicle_id: str, request: Request):
     _ensure_doc_scope_access(current_user, vehicle, detail="No tienes acceso a este vehículo")
     return await enrich_vehicle(vehicle)
 
-@api_router.post("/vehicles/{vehicle_id}/aging-incentive")
 async def apply_vehicle_aging_incentive(
     vehicle_id: str,
     payload: VehicleAgingIncentiveApply,
@@ -4307,7 +4306,6 @@ async def apply_vehicle_aging_incentive(
 
     return await enrich_vehicle(updated_vehicle)
 
-@api_router.put("/vehicles/{vehicle_id}")
 async def update_vehicle(vehicle_id: str, request: Request):
     current_user = await get_current_user(request)
     if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN, UserRole.BRAND_ADMIN, UserRole.AGENCY_ADMIN]:
@@ -7926,13 +7924,30 @@ async def import_sales(request: Request, file: UploadFile = File(...)):
 
 # ============== ROOT ROUTE ==============
 
-@api_router.get("/")
 async def root():
     return {"message": "AutoConnect API - Vehicle Inventory Management System"}
 
-@api_router.get("/health")
 async def health():
     return {"status": "healthy"}
+
+register_route_modules(
+    api_router,
+    RouteModuleHandlers(
+        inventory=InventoryRouteHandlers(
+            VehicleCreate=VehicleCreate,
+            VehicleAgingIncentiveApply=VehicleAgingIncentiveApply,
+            create_vehicle=create_vehicle,
+            get_vehicles=get_vehicles,
+            get_vehicle=get_vehicle,
+            apply_vehicle_aging_incentive=apply_vehicle_aging_incentive,
+            update_vehicle=update_vehicle,
+        ),
+        health=HealthRouteHandlers(
+            root=root,
+            health=health,
+        ),
+    ),
+)
 
 # Mount logos directory as static assets so frontend can render brand logos
 _resolved_logo_dir = _resolve_logo_directory()
