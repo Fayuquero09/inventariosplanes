@@ -78,6 +78,15 @@ from repositories.organization_repository import (
     update_group_by_id,
 )
 from repositories.sales_repository import find_vehicle_by_id as find_sales_vehicle_by_id
+from repositories.sales_objectives_repository import (
+    find_agency_by_id as _find_agency_by_id_sales_objectives_repo,
+    find_brand_by_id as _find_brand_by_id_sales_objectives_repo,
+    find_group_by_id as _find_group_by_id_sales_objectives_repo,
+    find_user_by_id as _find_user_by_id_sales_objectives_repo,
+    list_price_bulletins as _list_price_bulletins_sales_objectives_repo,
+    list_sales as _list_sales_sales_objectives_repo,
+    list_sales_objectives as _list_sales_objectives_repo,
+)
 from repositories.user_repository import (
     create_user,
     delete_user_by_id,
@@ -114,6 +123,10 @@ from services.import_service import (
     import_organization_from_excel,
     import_sales_from_file,
     import_vehicles_from_file,
+)
+from services.sales_objectives_service import (
+    build_sales_objective_suggestion as _build_sales_objective_suggestion_service,
+    list_sales_objectives_with_progress as _list_sales_objectives_with_progress_service,
 )
 from services.operational_calendar_service import (
     add_months_ym as _add_months_ym,
@@ -3850,81 +3863,21 @@ async def get_sales_objectives(
             {"seller_id": None},
             {"seller_id": {"$exists": False}},
         ]
-    
-    objectives = await db.sales_objectives.find(query).to_list(1000)
-    
-    # Enrich with progress data
-    result = []
-    for obj in objectives:
-        serialized = serialize_doc(obj)
 
-        if not serialized.get("approval_status"):
-            serialized["approval_status"] = OBJECTIVE_APPROVED
-
-        # Get seller name
-        if obj.get("seller_id"):
-            seller = await db.users.find_one({"_id": ObjectId(obj["seller_id"])})
-            if seller:
-                serialized["seller_name"] = seller["name"]
-        
-        # Get agency name
-        if obj.get("agency_id"):
-            agency = await db.agencies.find_one({"_id": ObjectId(obj["agency_id"])})
-            if agency:
-                serialized["agency_name"] = agency["name"]
-        
-        # Get brand name
-        if obj.get("brand_id"):
-            brand = await db.brands.find_one({"_id": ObjectId(obj["brand_id"])})
-            if brand:
-                serialized["brand_name"] = brand["name"]
-        
-        # Get group name
-        if obj.get("group_id"):
-            group = await db.groups.find_one({"_id": ObjectId(obj["group_id"])})
-            if group:
-                serialized["group_name"] = group["name"]
-
-        # Get actor names for approval workflow
-        if obj.get("created_by") and ObjectId.is_valid(obj["created_by"]):
-            creator = await db.users.find_one({"_id": ObjectId(obj["created_by"])})
-            if creator:
-                serialized["created_by_name"] = creator.get("name")
-        if obj.get("approved_by") and ObjectId.is_valid(obj["approved_by"]):
-            approver = await db.users.find_one({"_id": ObjectId(obj["approved_by"])})
-            if approver:
-                serialized["approved_by_name"] = approver.get("name")
-        if obj.get("rejected_by") and ObjectId.is_valid(obj["rejected_by"]):
-            rejector = await db.users.find_one({"_id": ObjectId(obj["rejected_by"])})
-            if rejector:
-                serialized["rejected_by_name"] = rejector.get("name")
-        
-        # Calculate progress
-        start_date = datetime(obj["year"], obj["month"], 1, tzinfo=timezone.utc)
-        if obj["month"] == 12:
-            end_date = datetime(obj["year"] + 1, 1, 1, tzinfo=timezone.utc)
-        else:
-            end_date = datetime(obj["year"], obj["month"] + 1, 1, tzinfo=timezone.utc)
-        
-        sales_query = {"sale_date": {"$gte": start_date, "$lt": end_date}}
-        if obj.get("seller_id"):
-            sales_query["seller_id"] = obj["seller_id"]
-        elif obj.get("agency_id"):
-            sales_query["agency_id"] = obj["agency_id"]
-        model_scope = str(obj.get("vehicle_line") or "").strip()
-        if model_scope:
-            sales_query["model"] = {"$regex": f"^{re.escape(model_scope)}$", "$options": "i"}
-
-        sales = await db.sales.find(sales_query).to_list(1000)
-        serialized["units_sold"] = len(sales)
-        serialized["revenue_achieved"] = sum(_sale_effective_revenue(s) for s in sales)
-        serialized["commissions_achieved"] = sum(s.get("commission", 0) for s in sales)
-        serialized["progress_units"] = round((serialized["units_sold"] / obj["units_target"] * 100) if obj["units_target"] > 0 else 0, 1)
-        serialized["progress_revenue"] = round((serialized["revenue_achieved"] / obj["revenue_target"] * 100) if obj["revenue_target"] > 0 else 0, 1)
-        
-        result.append(serialized)
-    
-    return result
+    return await _list_sales_objectives_with_progress_service(
+        db,
+        objectives_query=query,
+        objective_approved=OBJECTIVE_APPROVED,
+        objective_pending=OBJECTIVE_PENDING,
+        serialize_doc=serialize_doc,
+        sale_effective_revenue=_sale_effective_revenue,
+        list_sales_objectives=_list_sales_objectives_repo,
+        find_user_by_id=_find_user_by_id_sales_objectives_repo,
+        find_agency_by_id=_find_agency_by_id_sales_objectives_repo,
+        find_brand_by_id=_find_brand_by_id_sales_objectives_repo,
+        find_group_by_id=_find_group_by_id_sales_objectives_repo,
+        list_sales=_list_sales_sales_objectives_repo,
+    )
 
 async def get_sales_objective_suggestion(
     request: Request,
@@ -3949,12 +3902,12 @@ async def get_sales_objective_suggestion(
     if not ObjectId.is_valid(seller_id):
         raise HTTPException(status_code=400, detail="Invalid seller_id")
 
-    agency = await db.agencies.find_one({"_id": ObjectId(agency_id)})
+    agency = await _find_agency_by_id_sales_objectives_repo(db, agency_id)
     if not agency:
         raise HTTPException(status_code=404, detail="Agency not found")
     _ensure_doc_scope_access(current_user, agency, agency_field="_id", detail="No tienes acceso a esta agencia")
 
-    seller = await db.users.find_one({"_id": ObjectId(seller_id)})
+    seller = await _find_user_by_id_sales_objectives_repo(db, seller_id)
     if not seller:
         raise HTTPException(status_code=404, detail="Seller not found")
     _ensure_doc_scope_access(current_user, seller, detail="No tienes acceso a este vendedor")
@@ -3963,222 +3916,26 @@ async def get_sales_objective_suggestion(
     if str(seller.get("agency_id") or "") != agency_id:
         raise HTTPException(status_code=400, detail="Seller does not belong to selected agency")
 
-    def _month_bounds(y: int, m: int) -> Tuple[datetime, datetime]:
-        start = datetime(y, m, 1, tzinfo=timezone.utc)
-        if m == 12:
-            end = datetime(y + 1, 1, 1, tzinfo=timezone.utc)
-        else:
-            end = datetime(y, m + 1, 1, tzinfo=timezone.utc)
-        return start, end
-
-    query_base = {
-        "agency_id": agency_id,
-        "seller_id": seller_id,
-    }
-
-    prev_start, prev_end = _month_bounds(target_year - 1, target_month)
-    previous_year_sales = await db.sales.find({
-        **query_base,
-        "sale_date": {"$gte": prev_start, "$lt": prev_end},
-    }).to_list(20000)
-
-    month_totals_recent: List[int] = []
-    model_recent_totals: Dict[str, int] = {}
-    model_previous_year_totals: Dict[str, int] = {}
-    model_price_totals: Dict[str, float] = {}
-    model_price_counts: Dict[str, int] = {}
-
-    for sale in previous_year_sales:
-        model_name = str(sale.get("model") or "").strip()
-        if model_name:
-            model_previous_year_totals[model_name] = model_previous_year_totals.get(model_name, 0) + 1
-        sale_price = _sale_effective_revenue(sale)
-        if model_name and sale_price > 0:
-            model_price_totals[model_name] = model_price_totals.get(model_name, 0.0) + sale_price
-            model_price_counts[model_name] = model_price_counts.get(model_name, 0) + 1
-
-    for offset in range(-safe_lookback, 0):
-        cursor_year, cursor_month = _add_months_ym(target_year, target_month, offset)
-        recent_start, recent_end = _month_bounds(cursor_year, cursor_month)
-        sales_in_month = await db.sales.find({
-            **query_base,
-            "sale_date": {"$gte": recent_start, "$lt": recent_end},
-        }).to_list(20000)
-        month_totals_recent.append(len(sales_in_month))
-        for sale in sales_in_month:
-            model_name = str(sale.get("model") or "").strip()
-            if model_name:
-                model_recent_totals[model_name] = model_recent_totals.get(model_name, 0) + 1
-            sale_price = _sale_effective_revenue(sale)
-            if model_name and sale_price > 0:
-                model_price_totals[model_name] = model_price_totals.get(model_name, 0.0) + sale_price
-                model_price_counts[model_name] = model_price_counts.get(model_name, 0) + 1
-
-    previous_year_units = len(previous_year_sales)
-    recent_avg_units = (sum(month_totals_recent) / safe_lookback) if safe_lookback > 0 else 0.0
-    suggested_total_units = int(round((previous_year_units * 0.6) + (recent_avg_units * 0.4)))
-    if suggested_total_units <= 0:
-        blended_hist = previous_year_units + sum(month_totals_recent)
-        suggested_total_units = int(round(blended_hist / max(1, safe_lookback + 1))) if blended_hist > 0 else 0
-
-    brand_name = str(agency.get("brand_name") or "").strip()
-    if not brand_name and agency.get("brand_id") and ObjectId.is_valid(str(agency.get("brand_id"))):
-        brand_doc = await db.brands.find_one({"_id": ObjectId(str(agency.get("brand_id")))})
-        if brand_doc:
-            brand_name = str(brand_doc.get("name") or "").strip()
-
-    catalog_min_msrp_by_model: Dict[str, float] = {}
-    if brand_name:
-        try:
-            catalog = _build_catalog_tree_from_source(all_years=True)
-            make_entry = _find_catalog_make(catalog, brand_name)
-            if make_entry:
-                for model_entry in make_entry.get("models", []):
-                    model_name = str(model_entry.get("name") or "").strip()
-                    min_msrp = _parse_catalog_price(model_entry.get("min_msrp"))
-                    if model_name and min_msrp:
-                        catalog_min_msrp_by_model[model_name.casefold()] = float(min_msrp)
-        except Exception:
-            # Best-effort enhancement only; suggestions can still be computed without catalog.
-            pass
-
-    bulletin_price_by_model: Dict[str, float] = {}
-    agency_group_id = str(agency.get("group_id") or "").strip()
-    agency_brand_id = str(agency.get("brand_id") or "").strip()
-    reference_date_ymd = f"{target_year:04d}-{target_month:02d}-01"
-    if agency_group_id and agency_brand_id:
-        bulletin_docs = await db.price_bulletins.find({
-            "group_id": agency_group_id,
-            "brand_id": agency_brand_id,
-            "$or": [
-                {"agency_id": agency_id},
-                {"agency_id": None},
-            ],
-        }).sort([
-            ("effective_from", -1),
-            ("updated_at", -1),
-            ("created_at", -1),
-        ]).to_list(3000)
-
-        for doc in bulletin_docs:
-            if not _is_price_bulletin_active(doc, reference_date_ymd):
-                continue
-            model_name = str(doc.get("model") or "").strip()
-            if not model_name:
-                continue
-            key = model_name.casefold()
-            is_agency_specific = str(doc.get("agency_id") or "") == agency_id
-            existing_price = bulletin_price_by_model.get(key)
-            if existing_price is not None and not is_agency_specific:
-                continue
-
-            transaction_price = _to_non_negative_float(doc.get("transaction_price"), 0.0)
-            msrp_price = _to_non_negative_float(doc.get("msrp"), 0.0)
-            effective_price = transaction_price if transaction_price > 0 else msrp_price
-            if effective_price <= 0:
-                continue
-            bulletin_price_by_model[key] = effective_price
-
-    model_keys = set(model_previous_year_totals.keys()) | set(model_recent_totals.keys())
-    model_scores: List[Dict[str, Any]] = []
-    for model_name in model_keys:
-        previous_units_model = int(model_previous_year_totals.get(model_name, 0) or 0)
-        recent_avg_model = float(model_recent_totals.get(model_name, 0) or 0) / safe_lookback
-        blended_score = (previous_units_model * 0.65) + (recent_avg_model * 0.35)
-        if blended_score <= 0:
-            continue
-        model_scores.append({
-            "model": model_name,
-            "score": blended_score,
-            "previous_year_units": previous_units_model,
-            "recent_avg_units": round(recent_avg_model, 2),
-        })
-
-    score_total = sum(float(item["score"]) for item in model_scores)
-    if suggested_total_units <= 0 and score_total > 0:
-        suggested_total_units = int(round(score_total))
-
-    raw_allocations: List[Dict[str, Any]] = []
-    for item in model_scores:
-        if score_total > 0 and suggested_total_units > 0:
-            raw_units = (float(item["score"]) / score_total) * suggested_total_units
-        else:
-            raw_units = float(item["score"])
-        floor_units = int(raw_units)
-        raw_allocations.append({
-            **item,
-            "raw_units": raw_units,
-            "units": floor_units,
-            "fraction": raw_units - floor_units,
-        })
-
-    target_total_units = max(0, suggested_total_units)
-    current_total_units = sum(int(item["units"]) for item in raw_allocations)
-    if target_total_units > current_total_units:
-        pending = target_total_units - current_total_units
-        ranked = sorted(raw_allocations, key=lambda x: (x["fraction"], x["score"]), reverse=True)
-        if ranked:
-            idx = 0
-            while pending > 0:
-                ranked[idx % len(ranked)]["units"] += 1
-                pending -= 1
-                idx += 1
-    elif current_total_units > target_total_units:
-        overflow = current_total_units - target_total_units
-        ranked = sorted(raw_allocations, key=lambda x: (x["units"], x["fraction"]), reverse=True)
-        for item in ranked:
-            if overflow <= 0:
-                break
-            removable = min(item["units"], overflow)
-            item["units"] -= removable
-            overflow -= removable
-
-    suggestion_items: List[Dict[str, Any]] = []
-    suggestion_total_revenue = 0.0
-    for item in sorted(raw_allocations, key=lambda x: (x["units"], x["score"]), reverse=True):
-        units = int(item["units"])
-        if units <= 0:
-            continue
-        model_name = str(item["model"])
-        avg_sale_price = (
-            (model_price_totals.get(model_name, 0.0) / model_price_counts.get(model_name, 1))
-            if model_price_counts.get(model_name, 0) > 0
-            else 0.0
-        )
-        bulletin_price = float(bulletin_price_by_model.get(model_name.casefold(), 0.0) or 0.0)
-        catalog_min_msrp = float(catalog_min_msrp_by_model.get(model_name.casefold(), 0.0) or 0.0)
-        effective_price = avg_sale_price if avg_sale_price > 0 else (bulletin_price if bulletin_price > 0 else catalog_min_msrp)
-        suggested_revenue = round(units * effective_price, 2) if effective_price > 0 else 0.0
-        suggestion_total_revenue += suggested_revenue
-        suggestion_items.append({
-            "model": model_name,
-            "suggested_units": units,
-            "suggested_revenue": suggested_revenue,
-            "previous_year_units": int(item["previous_year_units"]),
-            "recent_avg_units": float(item["recent_avg_units"]),
-            "avg_sale_price": round(avg_sale_price, 2) if avg_sale_price > 0 else None,
-            "min_msrp": round(catalog_min_msrp, 2) if catalog_min_msrp > 0 else None,
-        })
-
-    return {
-        "agency_id": agency_id,
-        "agency_name": agency.get("name"),
-        "seller_id": seller_id,
-        "seller_name": seller.get("name"),
-        "month": target_month,
-        "year": target_year,
-        "lookback_months": safe_lookback,
-        "baseline": {
-            "previous_year_same_month_units": int(previous_year_units),
-            "recent_avg_units": round(recent_avg_units, 2),
-            "suggested_total_units": int(sum(item["suggested_units"] for item in suggestion_items)),
-        },
-        "totals": {
-            "suggested_units": int(sum(item["suggested_units"] for item in suggestion_items)),
-            "suggested_revenue": round(suggestion_total_revenue, 2),
-        },
-        "items": suggestion_items,
-    }
+    return await _build_sales_objective_suggestion_service(
+        db,
+        agency_id=agency_id,
+        seller_id=seller_id,
+        target_month=target_month,
+        target_year=target_year,
+        safe_lookback=safe_lookback,
+        agency=agency,
+        seller=seller,
+        add_months_ym=_add_months_ym,
+        sale_effective_revenue=_sale_effective_revenue,
+        to_non_negative_float=_to_non_negative_float,
+        is_price_bulletin_active=_is_price_bulletin_active,
+        build_catalog_tree_from_source=_build_catalog_tree_from_source,
+        find_catalog_make=_find_catalog_make,
+        parse_catalog_price=_parse_catalog_price,
+        list_sales=_list_sales_sales_objectives_repo,
+        list_price_bulletins=_list_price_bulletins_sales_objectives_repo,
+        find_brand_by_id=_find_brand_by_id_sales_objectives_repo,
+    )
 
 async def update_sales_objective(objective_id: str, objective_data: SalesObjectiveCreate, request: Request):
     current_user = await get_current_user(request)
