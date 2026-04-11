@@ -11,7 +11,6 @@ from repositories.import_repository import (
     insert_agency,
     insert_brand,
     insert_group,
-    insert_sale,
     insert_user,
     insert_vehicle,
     list_agencies,
@@ -22,8 +21,8 @@ from repositories.import_repository import (
     update_brand_fields,
     update_group_fields,
     update_user_fields,
-    update_vehicle_fields,
 )
+from services.sales_service import create_sale_record
 
 
 IMPORT_VALID_USER_ROLES = {
@@ -532,75 +531,24 @@ async def import_sales_from_file(
             fi_revenue = float(row.get("fi_revenue", 0)) if not pd.isna(row.get("fi_revenue")) else 0
             plant_incentive = float(row.get("plant_incentive", 0)) if not pd.isna(row.get("plant_incentive")) else 0
 
-            reference_date_ymd = sale_date.date().isoformat() if isinstance(sale_date, datetime) else None
-            configured_pricing = await resolve_effective_sale_pricing_for_model(
-                group_id=vehicle.get("group_id"),
-                brand_id=vehicle.get("brand_id"),
-                agency_id=vehicle.get("agency_id"),
-                model=vehicle.get("model"),
-                version=vehicle.get("version") or vehicle.get("trim"),
-                reference_date_ymd=reference_date_ymd,
-                fallback_msrp=to_non_negative_float(row.get("sale_price"), to_non_negative_float(vehicle.get("msrp"), 0.0)),
-            )
-            effective_pricing = apply_manual_sale_price_override(configured_pricing, row.get("sale_price"))
-            aging_plan = extract_active_aging_incentive_plan(vehicle)
-            effective_pricing, applied_aging = apply_aging_plan_to_effective_pricing(effective_pricing, aging_plan)
-            resolved_sale_price = to_non_negative_float(effective_pricing.get("transaction_price"), 0.0)
-            if resolved_sale_price <= 0:
-                errors.append(f"Row {row_number}: unable to resolve effective sale price")
-                continue
-
-            base_commission = await calculate_commission(
-                {
-                    "sale_price": float(resolved_sale_price),
-                    "commission_base_price": to_non_negative_float(effective_pricing.get("commission_base_price"), resolved_sale_price),
+            await create_sale_record(
+                db,
+                sale_data={
+                    "vehicle_id": str(row["vehicle_id"]),
+                    "seller_id": str(row["seller_id"]),
+                    "sale_price": row.get("sale_price"),
+                    "sale_date": sale_date,
                     "fi_revenue": fi_revenue,
                     "plant_incentive": plant_incentive,
-                    "model": vehicle.get("model"),
                 },
-                vehicle["agency_id"],
-                str(row["seller_id"]),
                 vehicle=vehicle,
-                sale_date=sale_date,
+                calculate_commission=calculate_commission,
+                resolve_effective_sale_pricing_for_model=resolve_effective_sale_pricing_for_model,
+                apply_manual_sale_price_override=apply_manual_sale_price_override,
+                extract_active_aging_incentive_plan=extract_active_aging_incentive_plan,
+                apply_aging_plan_to_effective_pricing=apply_aging_plan_to_effective_pricing,
+                to_non_negative_float=to_non_negative_float,
             )
-            commission = round(base_commission + to_non_negative_float(applied_aging.get("seller_bonus_amount"), 0.0), 2)
-
-            sale_doc = {
-                "vehicle_id": str(row["vehicle_id"]),
-                "seller_id": str(row["seller_id"]),
-                "agency_id": vehicle["agency_id"],
-                "brand_id": vehicle.get("brand_id"),
-                "group_id": vehicle.get("group_id"),
-                "sale_price": float(resolved_sale_price),
-                "commission_base_price": round(to_non_negative_float(effective_pricing.get("commission_base_price"), resolved_sale_price), 2),
-                "effective_revenue": round(to_non_negative_float(effective_pricing.get("effective_revenue"), resolved_sale_price), 2),
-                "brand_incentive_amount": round(to_non_negative_float(effective_pricing.get("brand_incentive_amount"), 0.0), 2),
-                "dealer_incentive_amount": round(to_non_negative_float(effective_pricing.get("dealer_incentive_amount"), 0.0), 2),
-                "undocumented_dealer_incentive_amount": round(to_non_negative_float(effective_pricing.get("undocumented_dealer_incentive_amount"), 0.0), 2),
-                "aging_incentive_sale_discount_amount": round(to_non_negative_float(applied_aging.get("sale_discount_amount"), 0.0), 2),
-                "aging_incentive_seller_bonus_amount": round(to_non_negative_float(applied_aging.get("seller_bonus_amount"), 0.0), 2),
-                "aging_incentive_total_amount": round(to_non_negative_float(applied_aging.get("total_amount"), 0.0), 2),
-                "sale_date": sale_date,
-                "fi_revenue": fi_revenue,
-                "plant_incentive": plant_incentive,
-                "model": vehicle.get("model"),
-                "version": vehicle.get("version") or vehicle.get("trim"),
-                "price_source": str(effective_pricing.get("price_source") or "price_bulletin"),
-                "commission": commission,
-                "created_at": datetime.now(timezone.utc),
-            }
-            sale_id = await insert_sale(db, sale_doc)
-
-            vehicle_update: Dict[str, Any] = {"status": "sold", "exit_date": sale_date}
-            if aging_plan:
-                vehicle_update.update({
-                    "aging_incentive_plan.active": False,
-                    "aging_incentive_plan.applied_sale_id": sale_id,
-                    "aging_incentive_plan.applied_at": datetime.now(timezone.utc),
-                    "aging_incentive_plan.applied_sale_discount_amount": round(to_non_negative_float(applied_aging.get("sale_discount_amount"), 0.0), 2),
-                    "aging_incentive_plan.applied_seller_bonus_amount": round(to_non_negative_float(applied_aging.get("seller_bonus_amount"), 0.0), 2),
-                })
-            await update_vehicle_fields(db, row.get("vehicle_id"), vehicle_update)
 
             imported += 1
         except Exception as exc:
