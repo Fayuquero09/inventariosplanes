@@ -99,3 +99,68 @@ async def upsert_global_monthly_close(
     )
     return await db.dashboard_monthly_closes.find_one(query)
 
+
+def _safe_limit(limit: int, default: int, max_limit: int) -> int:
+    return max(1, min(int(limit or default), max_limit))
+
+
+async def list_vehicles(db: Any, *, query: Dict[str, Any], limit: int = 10000) -> List[Dict[str, Any]]:
+    safe_limit = _safe_limit(limit, 10000, 50000)
+    return await db.vehicles.find(query).to_list(safe_limit)
+
+
+async def list_sales(db: Any, *, query: Dict[str, Any], limit: int = 10000) -> List[Dict[str, Any]]:
+    safe_limit = _safe_limit(limit, 10000, 50000)
+    return await db.sales.find(query).to_list(safe_limit)
+
+
+async def count_sales(db: Any, *, query: Dict[str, Any]) -> int:
+    return int(await db.sales.count_documents(query))
+
+
+async def list_vehicles_by_ids(db: Any, *, vehicle_ids: List[str], limit: int = 10000) -> List[Dict[str, Any]]:
+    object_ids = [ObjectId(str(vehicle_id)) for vehicle_id in vehicle_ids if ObjectId.is_valid(str(vehicle_id))]
+    if not object_ids:
+        return []
+    safe_limit = _safe_limit(limit, 10000, 50000)
+    return await db.vehicles.find({"_id": {"$in": object_ids}}).to_list(safe_limit)
+
+
+async def list_agencies_by_brand_id(db: Any, *, brand_id: str, limit: int = 5000) -> List[Dict[str, Any]]:
+    safe_limit = _safe_limit(limit, 5000, 20000)
+    return await db.agencies.find({"brand_id": brand_id}).to_list(safe_limit)
+
+
+async def list_agencies_by_group_id(db: Any, *, group_id: str, limit: int = 10000) -> List[Dict[str, Any]]:
+    safe_limit = _safe_limit(limit, 10000, 50000)
+    return await db.agencies.find({"group_id": group_id}).to_list(safe_limit)
+
+
+async def count_users(db: Any, *, query: Dict[str, Any]) -> int:
+    return int(await db.users.count_documents(query))
+
+
+async def find_user_by_id(db: Any, user_id: str) -> Optional[Dict[str, Any]]:
+    if not ObjectId.is_valid(str(user_id)):
+        return None
+    return await db.users.find_one({"_id": ObjectId(str(user_id))})
+
+
+async def list_similar_sold_vehicles(
+    db: Any,
+    *,
+    model: Any,
+    trim: Any,
+    color: Any,
+    group_id: Any,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    safe_limit = _safe_limit(limit, 100, 1000)
+    query = {
+        "model": model,
+        "trim": trim,
+        "color": color,
+        "status": "sold",
+        "group_id": group_id,
+    }
+    return await db.vehicles.find(query).to_list(safe_limit)

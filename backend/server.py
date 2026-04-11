@@ -33,10 +33,19 @@ from modules.sales_routes import SalesRouteHandlers
 from modules.sales_objectives_routes import SalesObjectivesRouteHandlers
 from repositories.commission_repository import list_active_rules_by_agency
 from repositories.dashboard_repository import (
+    count_sales as _count_sales_dashboard_repo,
+    count_users as _count_users_dashboard_repo,
     find_agency_group_id,
     find_brand_group_id,
+    find_user_by_id as _find_user_by_id_dashboard_repo,
     find_monthly_close,
+    list_agencies_by_brand_id as _list_agencies_by_brand_id_dashboard_repo,
+    list_agencies_by_group_id as _list_agencies_by_group_id_dashboard_repo,
     list_global_monthly_closes_by_year,
+    list_sales as _list_sales_dashboard_repo,
+    list_similar_sold_vehicles as _list_similar_sold_vehicles_dashboard_repo,
+    list_vehicles as _list_vehicles_dashboard_repo,
+    list_vehicles_by_ids as _list_vehicles_by_ids_dashboard_repo,
     upsert_global_monthly_close,
 )
 from repositories.financial_rates_repository import (
@@ -88,6 +97,16 @@ from services.financial_rates_service import (
     extract_rate_components_from_doc as _extract_rate_components_from_doc_service,
     monthly_to_annual as _monthly_to_annual_service,
     resolve_effective_rate_components as _resolve_effective_rate_components_service,
+)
+from services.dashboard_service import (
+    build_dashboard_monthly_close_calendar as _build_dashboard_monthly_close_calendar_service,
+    build_dashboard_monthly_close_response as _build_dashboard_monthly_close_response_service,
+    build_vehicle_aging_suggestion as _build_vehicle_aging_suggestion_service,
+    collect_vehicle_suggestions as _collect_vehicle_suggestions_service,
+    compute_dashboard_kpis as _compute_dashboard_kpis_service,
+    compute_seller_performance as _compute_seller_performance_service,
+    empty_dashboard_kpis_response as _empty_dashboard_kpis_response_service,
+    resolve_dashboard_scope_group_id as _resolve_dashboard_scope_group_id_service,
 )
 from services.import_service import (
     import_organization_from_excel,
@@ -5362,20 +5381,12 @@ async def get_sales(
 # ============== DASHBOARD / ANALYTICS ROUTES ==============
 
 async def _resolve_dashboard_scope_group_id(scope_query: Dict[str, Any]) -> Optional[str]:
-    if scope_query.get("group_id"):
-        return str(scope_query.get("group_id"))
-
-    if scope_query.get("brand_id"):
-        brand_group_id = await find_brand_group_id(db, str(scope_query.get("brand_id")))
-        if brand_group_id:
-            return brand_group_id
-
-    if scope_query.get("agency_id"):
-        agency_group_id = await find_agency_group_id(db, str(scope_query.get("agency_id")))
-        if agency_group_id:
-            return agency_group_id
-
-    return None
+    return await _resolve_dashboard_scope_group_id_service(
+        db,
+        scope_query=scope_query,
+        find_brand_group_id=find_brand_group_id,
+        find_agency_group_id=find_agency_group_id,
+    )
 
 
 async def _find_dashboard_monthly_close(
@@ -5417,16 +5428,13 @@ async def get_dashboard_monthly_close(
         group_id=effective_group_id,
     )
 
-    return {
-        "year": target_year,
-        "month": target_month,
-        "group_id": effective_group_id,
-        "scope": close_scope,
-        "fiscal_close_day": close_doc.get("fiscal_close_day") if close_doc else None,
-        "industry_close_day": close_doc.get("industry_close_day") if close_doc else None,
-        "industry_close_month_offset": int(close_doc.get("industry_close_month_offset") or 0) if close_doc else 0,
-        "updated_at": close_doc.get("updated_at") if close_doc else None,
-    }
+    return _build_dashboard_monthly_close_response_service(
+        target_year=target_year,
+        target_month=target_month,
+        effective_group_id=effective_group_id,
+        close_doc=close_doc,
+        close_scope=close_scope,
+    )
 
 
 async def get_dashboard_monthly_close_calendar(
@@ -5445,36 +5453,12 @@ async def get_dashboard_monthly_close_calendar(
     holidays_by_month = _mexico_lft_holidays_by_month(target_year)
 
     docs = await list_global_monthly_closes_by_year(db, year=target_year, limit=1000)
-    docs_by_month = {int(doc.get("month")): doc for doc in docs if doc.get("month")}
-
-    items: List[Dict[str, Any]] = []
-    for month in range(start_month, 13):
-        days_in_month = monthrange(target_year, month)[1]
-        month_doc = docs_by_month.get(month) or {}
-
-        sundays: List[int] = [
-            day
-            for day in range(1, days_in_month + 1)
-            if datetime(target_year, month, day, tzinfo=timezone.utc).weekday() == 6
-        ]
-
-        items.append({
-            "year": target_year,
-            "month": month,
-            "days_in_month": days_in_month,
-            "fiscal_close_day": month_doc.get("fiscal_close_day"),
-            "industry_close_day": month_doc.get("industry_close_day"),
-            "industry_close_month_offset": int(month_doc.get("industry_close_month_offset") or 0),
-            "holidays": holidays_by_month.get(month, []),
-            "sundays": sundays,
-            "updated_at": month_doc.get("updated_at"),
-        })
-
-    return {
-        "year": target_year,
-        "start_month": start_month,
-        "items": items,
-    }
+    return _build_dashboard_monthly_close_calendar_service(
+        target_year=target_year,
+        start_month=start_month,
+        docs=docs,
+        holidays_by_month=holidays_by_month,
+    )
 
 
 async def upsert_dashboard_monthly_close(payload: DashboardMonthlyCloseUpsert, request: Request):
@@ -5556,22 +5540,7 @@ async def get_dashboard_kpis(
         seller_id = current_seller_id
     query = _build_scope_query(current_user)
     if not _scope_query_has_access(query):
-        return {
-            "total_vehicles": 0, "total_value": 0, "total_financial_cost": 0,
-            "avg_aging_days": 0, "aging_buckets": {"0-30": 0, "31-60": 0, "61-90": 0, "90+": 0},
-            "units_sold_month": 0, "revenue_month": 0, "commissions_month": 0,
-            "vehicle_cost_month": 0, "financial_expenses_month": 0,
-            "gross_profit_month": 0, "gross_margin_pct_month": 0,
-            "new_vehicles": 0, "used_vehicles": 0,
-            "seller_count": 0,
-            "avg_units_per_seller_month": 0,
-            "benchmark_avg_units_per_seller_month": 0,
-            "avg_units_per_seller_vs_benchmark_pct": None,
-            "seller_challenge_tier": "Sin benchmark",
-            "fiscal_close_day": None,
-            "industry_close_day": None,
-            "industry_close_month_offset": 0,
-        }
+        return _empty_dashboard_kpis_response_service()
 
     _validate_scope_filters(current_user, group_id=group_id, brand_id=brand_id, agency_id=agency_id)
     if agency_id:
@@ -5580,175 +5549,26 @@ async def get_dashboard_kpis(
         query["brand_id"] = brand_id
     elif group_id:
         query["group_id"] = group_id
-    
-    # Get vehicles in stock
-    in_stock_query = {**query, "status": "in_stock"}
-    vehicles_in_stock = await db.vehicles.find(in_stock_query).to_list(10000)
-    now = datetime.now(timezone.utc)
-    start_of_month = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
-    
-    total_vehicles = len(vehicles_in_stock)
-    total_value = sum(v.get("purchase_price", 0) for v in vehicles_in_stock)
-    
-    # Calculate total financial cost and average aging
-    total_financial_cost = 0
-    total_aging = 0
-    aging_buckets = {"0-30": 0, "31-60": 0, "61-90": 0, "90+": 0}
-    
-    for v in vehicles_in_stock:
-        enriched = await enrich_vehicle(v)
-        total_financial_cost += await calculate_vehicle_financial_cost_in_period(v, start_of_month, now)
-        aging = enriched.get("aging_days", 0)
-        total_aging += aging
-        
-        if aging <= 30:
-            aging_buckets["0-30"] += 1
-        elif aging <= 60:
-            aging_buckets["31-60"] += 1
-        elif aging <= 90:
-            aging_buckets["61-90"] += 1
-        else:
-            aging_buckets["90+"] += 1
-    
-    avg_aging = round(total_aging / total_vehicles, 1) if total_vehicles > 0 else 0
-    
-    # Get current month sales
-    sales_query = {**query, "sale_date": {"$gte": start_of_month, "$lt": now}}
-    if seller_id:
-        sales_query["seller_id"] = seller_id
-    monthly_sales = await db.sales.find(sales_query).to_list(10000)
-    
-    units_sold_month = len(monthly_sales)
-    revenue_month = sum(_sale_effective_revenue(s) for s in monthly_sales)
-    commissions_month = sum(s.get("commission", 0) for s in monthly_sales)
 
-    vehicle_cost_month = 0.0
-    financial_expenses_month = 0.0
-    sold_vehicle_ids: List[str] = []
-    for sale in monthly_sales:
-        vehicle_id = sale.get("vehicle_id")
-        if vehicle_id and ObjectId.is_valid(vehicle_id):
-            sold_vehicle_ids.append(vehicle_id)
-
-    if sold_vehicle_ids:
-        unique_vehicle_ids = list(dict.fromkeys(sold_vehicle_ids))
-        sold_vehicles = await db.vehicles.find({"_id": {"$in": [ObjectId(v_id) for v_id in unique_vehicle_ids]}}).to_list(10000)
-        sold_vehicle_map = {str(v["_id"]): v for v in sold_vehicles}
-
-        for sale in monthly_sales:
-            vehicle_id = sale.get("vehicle_id")
-            if not vehicle_id:
-                continue
-            vehicle = sold_vehicle_map.get(vehicle_id)
-            if not vehicle:
-                continue
-            vehicle_cost_month += float(vehicle.get("purchase_price", 0) or 0)
-            financial_expenses_month += float(await calculate_vehicle_financial_cost_in_period(vehicle, start_of_month, now) or 0)
-
-    gross_profit_month = revenue_month - financial_expenses_month - commissions_month - vehicle_cost_month
-    gross_margin_pct_month = (gross_profit_month / revenue_month * 100) if revenue_month > 0 else 0.0
-
-    # Seller benchmarks (same month-to-date last year).
-    if seller_id:
-        seller_count = 1
-    else:
-        seller_scope_query: Dict[str, Any] = {"role": UserRole.SELLER}
-        agency_scope_ids: List[str] = []
-        if query.get("agency_id"):
-            seller_scope_query["agency_id"] = query["agency_id"]
-        elif query.get("brand_id"):
-            brand_agencies = await db.agencies.find({"brand_id": query["brand_id"]}).to_list(5000)
-            agency_scope_ids = [str(a["_id"]) for a in brand_agencies]
-            brand_or_filters: List[Dict[str, Any]] = [{"brand_id": query["brand_id"]}]
-            if agency_scope_ids:
-                brand_or_filters.append({"agency_id": {"$in": agency_scope_ids}})
-            seller_scope_query["$or"] = brand_or_filters
-        elif query.get("group_id"):
-            group_agencies = await db.agencies.find({"group_id": query["group_id"]}).to_list(10000)
-            agency_scope_ids = [str(a["_id"]) for a in group_agencies]
-            group_or_filters: List[Dict[str, Any]] = [{"group_id": query["group_id"]}]
-            if agency_scope_ids:
-                group_or_filters.append({"agency_id": {"$in": agency_scope_ids}})
-            seller_scope_query["$or"] = group_or_filters
-
-        seller_count = await db.users.count_documents(seller_scope_query)
-
-    avg_units_per_seller_month = round((units_sold_month / seller_count), 2) if seller_count > 0 else 0.0
-
-    previous_year = now.year - 1
-    previous_start = datetime(previous_year, now.month, 1, tzinfo=timezone.utc)
-    if now.month == 12:
-        previous_month_end = datetime(previous_year + 1, 1, 1, tzinfo=timezone.utc)
-    else:
-        previous_month_end = datetime(previous_year, now.month + 1, 1, tzinfo=timezone.utc)
-
-    elapsed_seconds = max((now - start_of_month).total_seconds(), 0)
-    previous_period_end = previous_start + timedelta(seconds=elapsed_seconds)
-    if previous_period_end > previous_month_end:
-        previous_period_end = previous_month_end
-
-    previous_sales_query = {**query, "sale_date": {"$gte": previous_start, "$lt": previous_period_end}}
-    if seller_id:
-        previous_sales_query["seller_id"] = seller_id
-    previous_units_sold_month = await db.sales.count_documents(previous_sales_query)
-
-    benchmark_avg_units_per_seller_month = (
-        round((previous_units_sold_month / seller_count), 2) if seller_count > 0 else 0.0
+    return await _compute_dashboard_kpis_service(
+        db,
+        query=query,
+        seller_id=seller_id,
+        now=datetime.now(timezone.utc),
+        user_role_seller=UserRole.SELLER,
+        list_vehicles=_list_vehicles_dashboard_repo,
+        list_sales=_list_sales_dashboard_repo,
+        list_vehicles_by_ids=_list_vehicles_by_ids_dashboard_repo,
+        list_agencies_by_brand_id=_list_agencies_by_brand_id_dashboard_repo,
+        list_agencies_by_group_id=_list_agencies_by_group_id_dashboard_repo,
+        count_users=_count_users_dashboard_repo,
+        count_sales=_count_sales_dashboard_repo,
+        enrich_vehicle=enrich_vehicle,
+        calculate_vehicle_financial_cost_in_period=calculate_vehicle_financial_cost_in_period,
+        sale_effective_revenue=_sale_effective_revenue,
+        resolve_dashboard_scope_group_id=_resolve_dashboard_scope_group_id,
+        find_dashboard_monthly_close=_find_dashboard_monthly_close,
     )
-    avg_units_per_seller_vs_benchmark_pct = None
-    if benchmark_avg_units_per_seller_month > 0:
-        avg_units_per_seller_vs_benchmark_pct = round(
-            ((avg_units_per_seller_month - benchmark_avg_units_per_seller_month) / benchmark_avg_units_per_seller_month) * 100,
-            1,
-        )
-
-    if benchmark_avg_units_per_seller_month <= 0:
-        seller_challenge_tier = "Sin benchmark"
-    else:
-        benchmark_ratio = avg_units_per_seller_month / benchmark_avg_units_per_seller_month
-        if benchmark_ratio >= 1.2:
-            seller_challenge_tier = "Oro"
-        elif benchmark_ratio >= 1.0:
-            seller_challenge_tier = "Plata"
-        elif benchmark_ratio >= 0.8:
-            seller_challenge_tier = "Bronce"
-        else:
-            seller_challenge_tier = "Impulso"
-
-    dashboard_scope_group_id = await _resolve_dashboard_scope_group_id(query)
-    close_doc, _ = await _find_dashboard_monthly_close(
-        year=now.year,
-        month=now.month,
-        group_id=dashboard_scope_group_id,
-    )
-    fiscal_close_day = close_doc.get("fiscal_close_day") if close_doc else None
-    industry_close_day = close_doc.get("industry_close_day") if close_doc else None
-    industry_close_month_offset = int(close_doc.get("industry_close_month_offset") or 0) if close_doc else 0
-    
-    return {
-        "total_vehicles": total_vehicles,
-        "total_value": round(total_value, 2),
-        "total_financial_cost": round(total_financial_cost, 2),
-        "avg_aging_days": avg_aging,
-        "aging_buckets": aging_buckets,
-        "units_sold_month": units_sold_month,
-        "revenue_month": round(revenue_month, 2),
-        "commissions_month": round(commissions_month, 2),
-        "vehicle_cost_month": round(vehicle_cost_month, 2),
-        "financial_expenses_month": round(financial_expenses_month, 2),
-        "gross_profit_month": round(gross_profit_month, 2),
-        "gross_margin_pct_month": round(gross_margin_pct_month, 2),
-        "new_vehicles": len([v for v in vehicles_in_stock if v.get("vehicle_type") == "new"]),
-        "used_vehicles": len([v for v in vehicles_in_stock if v.get("vehicle_type") == "used"]),
-        "seller_count": int(seller_count),
-        "avg_units_per_seller_month": avg_units_per_seller_month,
-        "benchmark_avg_units_per_seller_month": benchmark_avg_units_per_seller_month,
-        "avg_units_per_seller_vs_benchmark_pct": avg_units_per_seller_vs_benchmark_pct,
-        "seller_challenge_tier": seller_challenge_tier,
-        "fiscal_close_day": fiscal_close_day,
-        "industry_close_day": industry_close_day,
-        "industry_close_month_offset": industry_close_month_offset,
-    }
 
 async def get_sales_trends(
     request: Request, 
@@ -6182,36 +6002,14 @@ async def get_seller_performance(request: Request, agency_id: Optional[str] = No
     _validate_scope_filters(current_user, agency_id=agency_id)
     if agency_id:
         query["agency_id"] = agency_id
-    
-    sales = await db.sales.find(query).to_list(10000)
-    
-    # Group by seller
-    seller_stats = {}
-    for sale in sales:
-        seller_id = sale.get("seller_id")
-        if seller_id not in seller_stats:
-            seller_stats[seller_id] = {
-                "units": 0,
-                "revenue": 0,
-                "commission": 0
-            }
-        seller_stats[seller_id]["units"] += 1
-        seller_stats[seller_id]["revenue"] += _sale_effective_revenue(sale)
-        seller_stats[seller_id]["commission"] += sale.get("commission", 0)
-    
-    # Get seller names
-    result = []
-    for seller_id, stats in seller_stats.items():
-        seller = await db.users.find_one({"_id": ObjectId(seller_id)})
-        result.append({
-            "seller_id": seller_id,
-            "seller_name": seller["name"] if seller else "Unknown",
-            "units": stats["units"],
-            "revenue": round(stats["revenue"], 2),
-            "commission": round(stats["commission"], 2)
-        })
-    
-    return sorted(result, key=lambda x: x["units"], reverse=True)
+
+    return await _compute_seller_performance_service(
+        db,
+        query=query,
+        list_sales=_list_sales_dashboard_repo,
+        find_user_by_id=_find_user_by_id_dashboard_repo,
+        sale_effective_revenue=_sale_effective_revenue,
+    )
 
 
 async def _build_vehicle_aging_suggestion(
@@ -6219,59 +6017,16 @@ async def _build_vehicle_aging_suggestion(
     *,
     enriched_vehicle: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
-    enriched = enriched_vehicle or await enrich_vehicle(vehicle)
-    aging = int(enriched.get("aging_days", 0) or 0)
-
-    similar_query = {
-        "model": vehicle.get("model"),
-        "trim": vehicle.get("trim"),
-        "color": vehicle.get("color"),
-        "status": "sold",
-        "group_id": vehicle.get("group_id"),
-    }
-    similar_sold = await db.vehicles.find(similar_query).to_list(100)
-
-    if similar_sold:
-        avg_days = sum(
-            (v.get("exit_date", datetime.now(timezone.utc)) - v.get("entry_date", datetime.now(timezone.utc))).days
-            if isinstance(v.get("exit_date"), datetime) and isinstance(v.get("entry_date"), datetime)
-            else 60
-            for v in similar_sold
-        ) / len(similar_sold)
-    else:
-        avg_days = 60  # fallback when no historical similar sales exist
-
-    # Suggest only after exceeding expected average days-to-sell.
-    if aging <= avg_days:
-        return None
-
-    extra_aging_days = float(aging) - float(avg_days)
-
-    purchase_price = _to_non_negative_float(vehicle.get("purchase_price"), 0.0)
-    if purchase_price <= 0:
-        return None
-
-    projected_additional_cost = extra_aging_days * (purchase_price * 0.12 / 365)
-    suggested_bonus = min(projected_additional_cost * 0.5, purchase_price * 0.02)
-    if suggested_bonus <= 0:
-        return None
-
-    return {
-        "vehicle_id": enriched["id"],
-        "vehicle_info": {
-            "model": vehicle.get("model"),
-            "year": vehicle.get("year"),
-            "trim": vehicle.get("trim"),
-            "color": vehicle.get("color"),
-            "vin": vehicle.get("vin"),
-            "purchase_price": purchase_price,
-        },
-        "avg_days_to_sell": round(avg_days),
-        "current_aging": aging,
-        "financial_cost": _to_non_negative_float(enriched.get("financial_cost"), 0.0),
-        "suggested_bonus": round(suggested_bonus, 2),
-        "reason": f"Este vehículo lleva {aging} días en inventario. Vehículos similares se venden en promedio en {round(avg_days)} días.",
-    }
+    if enriched_vehicle is None:
+        enriched_vehicle = await enrich_vehicle(vehicle)
+    return await _build_vehicle_aging_suggestion_service(
+        db,
+        vehicle=vehicle,
+        enriched_vehicle=enriched_vehicle,
+        list_similar_sold_vehicles=_list_similar_sold_vehicles_dashboard_repo,
+        to_non_negative_float=_to_non_negative_float,
+        now=datetime.now(timezone.utc),
+    )
 
 async def get_vehicle_suggestions(
     request: Request,
@@ -6297,17 +6052,14 @@ async def get_vehicle_suggestions(
     if agency_id:
         query["agency_id"] = agency_id
     
-    vehicles = await db.vehicles.find(query).to_list(1000)
-    suggestions = []
-    
-    for vehicle in vehicles:
-        enriched = await enrich_vehicle(vehicle)
-        suggestion = await _build_vehicle_aging_suggestion(vehicle, enriched_vehicle=enriched)
-        if suggestion:
-            suggestions.append(suggestion)
-    
-    safe_limit = max(1, min(int(limit or 20), 1000))
-    return sorted(suggestions, key=lambda x: x["current_aging"], reverse=True)[:safe_limit]
+    return await _collect_vehicle_suggestions_service(
+        db,
+        query=query,
+        limit=limit,
+        list_vehicles=_list_vehicles_dashboard_repo,
+        enrich_vehicle=enrich_vehicle,
+        build_vehicle_aging_suggestion=_build_vehicle_aging_suggestion,
+    )
 
 # ============== IMPORT ROUTES ==============
 
