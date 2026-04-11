@@ -24,9 +24,11 @@ from modules.commissions_routes import CommissionsRouteHandlers
 from modules.dashboard_routes import DashboardRouteHandlers
 from modules.financial_rates_routes import FinancialRatesRouteHandlers
 from modules.health_routes import HealthRouteHandlers
+from modules.import_routes import ImportRouteHandlers
 from modules.inventory_routes import InventoryRouteHandlers
 from modules.organization_catalog_routes import OrganizationCatalogRouteHandlers
 from modules.registry import RouteModuleHandlers, register_route_modules
+from modules.sales_routes import SalesRouteHandlers
 from modules.sales_objectives_routes import SalesObjectivesRouteHandlers
 from repositories.commission_repository import list_active_rules_by_agency
 from repositories.dashboard_repository import (
@@ -5894,7 +5896,6 @@ def _apply_aging_plan_to_effective_pricing(
         "total_amount": round(applied_sale_discount + applied_seller_bonus, 2),
     }
 
-@api_router.post("/sales")
 async def create_sale(sale_data: SaleCreate, request: Request):
     current_user = await get_current_user(request)
     if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN, UserRole.BRAND_ADMIN, UserRole.AGENCY_ADMIN, UserRole.SELLER]:
@@ -5966,7 +5967,6 @@ async def create_sale(sale_data: SaleCreate, request: Request):
     sale_doc["id"] = str(sale_id)
     return serialize_doc(sale_doc)
 
-@api_router.get("/sales")
 async def get_sales(
     request: Request,
     agency_id: Optional[str] = None,
@@ -6961,7 +6961,6 @@ async def get_vehicle_suggestions(
 
 # ============== IMPORT ROUTES ==============
 
-@api_router.post("/import/organization")
 async def import_organization(request: Request, file: UploadFile = File(...)):
     """
     Import organizational structure from an Excel file with optional sheets:
@@ -6998,7 +6997,6 @@ async def import_organization(request: Request, file: UploadFile = File(...)):
     )
     return response
 
-@api_router.post("/import/vehicles")
 async def import_vehicles(request: Request, file: UploadFile = File(...)):
     current_user = await get_current_user(request)
     if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN, UserRole.BRAND_ADMIN, UserRole.AGENCY_ADMIN]:
@@ -7027,7 +7025,6 @@ async def import_vehicles(request: Request, file: UploadFile = File(...)):
     )
     return response
 
-@api_router.post("/import/sales")
 async def import_sales(request: Request, file: UploadFile = File(...)):
     current_user = await get_current_user(request)
     if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN, UserRole.BRAND_ADMIN, UserRole.AGENCY_ADMIN]:
@@ -7120,6 +7117,16 @@ register_route_modules(
         health=HealthRouteHandlers(
             root=root,
             health=health,
+        ),
+        imports=ImportRouteHandlers(
+            import_organization=import_organization,
+            import_vehicles=import_vehicles,
+            import_sales=import_sales,
+        ),
+        sales=SalesRouteHandlers(
+            SaleCreate=SaleCreate,
+            create_sale=create_sale,
+            get_sales=get_sales,
         ),
         sales_objectives=SalesObjectivesRouteHandlers(
             SalesObjectiveCreate=SalesObjectiveCreate,
