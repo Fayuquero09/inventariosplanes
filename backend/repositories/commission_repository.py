@@ -1,4 +1,5 @@
-from typing import Any, Dict, List
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 
 async def list_active_rules_by_agency(
@@ -19,3 +20,24 @@ async def list_active_rules_by_agency(
         }
     ).to_list(safe_limit)
 
+
+async def find_commission_matrix_by_agency(db: Any, *, agency_id: str) -> Optional[Dict[str, Any]]:
+    return await db.commission_matrices.find_one({"agency_id": agency_id})
+
+
+async def count_seller_sales_since(
+    db: Any,
+    *,
+    seller_id: str,
+    agency_id: str,
+    since: datetime,
+) -> int:
+    return int(
+        await db.sales.count_documents(
+            {
+                "seller_id": seller_id,
+                "agency_id": agency_id,
+                "sale_date": {"$gte": since},
+            }
+        )
+    )

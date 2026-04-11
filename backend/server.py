@@ -67,6 +67,9 @@ from repositories.user_repository import (
     update_user_password_hash,
 )
 from services.commission_service import calculate_commission_from_rules as _calculate_commission_from_rules
+from services.commission_calculation_service import (
+    calculate_commission as _calculate_commission_service,
+)
 from services.import_service import (
     import_organization_from_excel,
     import_sales_from_file,
@@ -5735,64 +5738,6 @@ async def approve_commission_closure(
 
 # ============== SALES ROUTES ==============
 
-def _calculate_matrix_commission_for_sale(
-    matrix_doc: Optional[Dict[str, Any]],
-    *,
-    sale: Dict[str, Any],
-    vehicle: Optional[Dict[str, Any]],
-    sale_date: Optional[datetime],
-    seller_month_units: int = 0,
-) -> float:
-    if not matrix_doc:
-        return 0.0
-
-    general = _normalize_commission_matrix_general((matrix_doc or {}).get("general"))
-    models = _normalize_commission_matrix_models((matrix_doc or {}).get("models"))
-    model_map: Dict[str, Dict[str, Any]] = {
-        str(item.get("model") or "").strip().casefold(): item
-        for item in models
-        if str(item.get("model") or "").strip()
-    }
-
-    sale_price = _sale_commission_base_price(sale or {})
-    plant_incentive = _to_non_negative_float((sale or {}).get("plant_incentive"), 0.0)
-    model_name = str((sale or {}).get("model") or (vehicle or {}).get("model") or "").strip()
-    model_rule = model_map.get(model_name.casefold()) if model_name else None
-
-    total = 0.0
-    effective_percentage = _to_non_negative_float(general.get("global_percentage"), 0.0)
-    if model_rule and model_rule.get("model_percentage") is not None:
-        effective_percentage = _to_non_negative_float(model_rule.get("model_percentage"), effective_percentage)
-    total += sale_price * (effective_percentage / 100.0)
-    total += general["global_per_unit_bonus"]
-    total += _resolve_matrix_volume_bonus_per_unit(general.get("volume_tiers"), seller_month_units)
-    if model_rule:
-        total += _to_non_negative_float(model_rule.get("model_bonus"), 0.0)
-
-    reference_sale_date = _coerce_utc_datetime(sale_date) or datetime.now(timezone.utc)
-    entry_date = _coerce_utc_datetime((vehicle or {}).get("entry_date"))
-    aging_days = 0
-    if entry_date and reference_sale_date > entry_date:
-        aging_days = max(0, int((reference_sale_date - entry_date).days))
-
-    if 61 <= aging_days <= 90:
-        total += general["global_aged_61_90_bonus"]
-        if model_rule:
-            total += _to_non_negative_float(model_rule.get("aged_61_90_bonus"), 0.0)
-    elif aging_days > 90:
-        total += general["global_aged_90_plus_bonus"]
-        if model_rule:
-            total += _to_non_negative_float(model_rule.get("aged_90_plus_bonus"), 0.0)
-
-    plant_share_pct = (
-        min(100.0, _to_non_negative_float(model_rule.get("plant_incentive_share_pct"), COMMISSION_MATRIX_DEFAULT_PLANT_SHARE_PCT))
-        if model_rule
-        else COMMISSION_MATRIX_DEFAULT_PLANT_SHARE_PCT
-    )
-    total += plant_incentive * (plant_share_pct / 100.0)
-
-    return round(total, 2)
-
 async def calculate_commission(
     sale: dict,
     agency_id: str,
@@ -5801,49 +5746,22 @@ async def calculate_commission(
     vehicle: Optional[Dict[str, Any]] = None,
     sale_date: Optional[datetime] = None,
 ) -> float:
-    """Calculate commission using legacy rules + model matrix incentives."""
-    rules = await db.commission_rules.find({
-        "agency_id": agency_id,
-        "$or": [
-            {"approval_status": {"$exists": False}},
-            {"approval_status": COMMISSION_APPROVED},
-        ],
-    }).to_list(100)
-
-    # Get seller's monthly sales count for volume rules.
-    reference_date = _coerce_utc_datetime(sale_date) or datetime.now(timezone.utc)
-    start_of_month = datetime(reference_date.year, reference_date.month, 1, tzinfo=timezone.utc)
-    seller_sales = await db.sales.count_documents({
-        "seller_id": seller_id,
-        "agency_id": agency_id,
-        "sale_date": {"$gte": start_of_month}
-    })
-
-    total_commission = 0.0
-
-    for rule in rules:
-        if rule["rule_type"] == "per_unit":
-            total_commission += rule["value"]
-        elif rule["rule_type"] == "percentage":
-            total_commission += _sale_commission_base_price(sale) * (rule["value"] / 100)
-        elif rule["rule_type"] == "volume_bonus":
-            if rule.get("min_units") and seller_sales >= rule["min_units"]:
-                if not rule.get("max_units") or seller_sales <= rule["max_units"]:
-                    total_commission += rule["value"]
-        elif rule["rule_type"] == "fi_bonus":
-            total_commission += sale.get("fi_revenue", 0) * (rule["value"] / 100)
-
-    matrix_doc = await db.commission_matrices.find_one({"agency_id": agency_id})
-    seller_month_units = int(seller_sales or 0) + 1
-    total_commission += _calculate_matrix_commission_for_sale(
-        matrix_doc,
+    return await _calculate_commission_service(
+        db,
         sale=sale,
+        agency_id=agency_id,
+        seller_id=seller_id,
         vehicle=vehicle,
-        sale_date=reference_date,
-        seller_month_units=seller_month_units,
+        sale_date=sale_date,
+        approved_status=COMMISSION_APPROVED,
+        normalize_general=_normalize_commission_matrix_general,
+        normalize_models=_normalize_commission_matrix_models,
+        resolve_volume_bonus_per_unit=_resolve_matrix_volume_bonus_per_unit,
+        to_non_negative_float=_to_non_negative_float,
+        sale_commission_base_price=_sale_commission_base_price,
+        coerce_utc_datetime=_coerce_utc_datetime,
+        default_plant_share_pct=COMMISSION_MATRIX_DEFAULT_PLANT_SHARE_PCT,
     )
-
-    return round(total_commission, 2)
 
 def _extract_active_aging_incentive_plan(vehicle: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     plan = (vehicle or {}).get("aging_incentive_plan")
