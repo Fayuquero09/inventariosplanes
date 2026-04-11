@@ -202,6 +202,19 @@ from services.price_bulletins_service import (
     upsert_price_bulletins_items as _upsert_price_bulletins_items_service,
 )
 from services.sales_service import create_sale_record, list_sales_with_enrichment
+from services.user_management_service import (
+    apply_register_scope_constraints as _apply_register_scope_constraints_service,
+    build_user_document as _build_user_document_service,
+    build_user_update_audit_changes as _build_user_update_audit_changes_service,
+    enforce_delete_scope_permissions as _enforce_delete_scope_permissions_service,
+    enforce_update_scope_permissions as _enforce_update_scope_permissions_service,
+    ensure_user_management_role as _ensure_user_management_role_service,
+    extract_new_password_and_payload as _extract_new_password_and_payload_service,
+    normalize_optional_position as _normalize_optional_position_service,
+    normalize_user_email as _normalize_user_email_service,
+    sanitize_user_update_data as _sanitize_user_update_data_service,
+    validate_role_scope_requirements as _validate_role_scope_requirements_service,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -1594,40 +1607,26 @@ def _ensure_allowed_model_year(year: int) -> None:
 async def register(user_data: UserCreate, request: Request):
     current_user = await get_current_user(request)
     actor_role = current_user.get("role")
-    if actor_role not in {UserRole.APP_ADMIN, UserRole.GROUP_ADMIN} and not _is_dealer_user_manager_role(actor_role):
-        raise HTTPException(status_code=403, detail="Not authorized")
+    try:
+        _ensure_user_management_role_service(
+            actor_role=actor_role,
+            app_admin_role=UserRole.APP_ADMIN,
+            group_admin_role=UserRole.GROUP_ADMIN,
+            is_dealer_user_manager_role=_is_dealer_user_manager_role,
+        )
+        _apply_register_scope_constraints_service(
+            current_user=current_user,
+            user_data=user_data,
+            app_admin_role=UserRole.APP_ADMIN,
+            app_user_role=UserRole.APP_USER,
+            group_admin_role=UserRole.GROUP_ADMIN,
+            is_dealer_user_manager_role=_is_dealer_user_manager_role,
+            get_dealer_assignable_roles=_get_dealer_assignable_roles,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
-    if actor_role == UserRole.GROUP_ADMIN:
-        if user_data.role in [UserRole.APP_ADMIN, UserRole.APP_USER]:
-            raise HTTPException(status_code=403, detail="Group admin cannot create app-level users")
-
-        if not current_user.get("group_id"):
-            raise HTTPException(status_code=403, detail="Group admin has no assigned group")
-
-        # Group admins can only create users inside their own group.
-        if user_data.group_id and user_data.group_id != current_user["group_id"]:
-            raise HTTPException(status_code=403, detail="Cannot create users outside your group")
-        user_data.group_id = current_user["group_id"]
-    elif _is_dealer_user_manager_role(actor_role):
-        assignable_roles = _get_dealer_assignable_roles(actor_role)
-        if user_data.role not in assignable_roles:
-            raise HTTPException(status_code=403, detail="Role is not assignable for this dealer manager")
-        if not current_user.get("agency_id"):
-            raise HTTPException(status_code=403, detail="Dealer manager has no assigned agency")
-
-        if user_data.group_id and user_data.group_id != current_user.get("group_id"):
-            raise HTTPException(status_code=403, detail="Cannot create users outside your group")
-        if user_data.brand_id and user_data.brand_id != current_user.get("brand_id"):
-            raise HTTPException(status_code=403, detail="Cannot create users outside your brand")
-        if user_data.agency_id and user_data.agency_id != current_user.get("agency_id"):
-            raise HTTPException(status_code=403, detail="Cannot create users outside your agency")
-
-        # Dealer managers can only create users inside their own agency scope.
-        user_data.group_id = current_user.get("group_id")
-        user_data.brand_id = current_user.get("brand_id")
-        user_data.agency_id = current_user.get("agency_id")
-
-    email = str(user_data.email).strip().lower()
+    email = _normalize_user_email_service(user_data.email)
     existing = await find_user_by_email(db, email)
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -1654,31 +1653,37 @@ async def register(user_data: UserCreate, request: Request):
         if not user_data.brand_id:
             user_data.brand_id = agency.get("brand_id")
 
-    if user_data.role in [UserRole.BRAND_ADMIN, UserRole.BRAND_USER] and not user_data.brand_id:
-        raise HTTPException(status_code=400, detail="Brand role requires brand_id")
-    if user_data.role in [
-        UserRole.AGENCY_ADMIN,
-        UserRole.AGENCY_SALES_MANAGER,
-        UserRole.AGENCY_GENERAL_MANAGER,
-        UserRole.AGENCY_COMMERCIAL_MANAGER,
-        UserRole.AGENCY_USER,
-        UserRole.SELLER,
-    ] and not user_data.agency_id:
-        raise HTTPException(status_code=400, detail="Agency role requires agency_id")
+    try:
+        _validate_role_scope_requirements_service(
+            role=user_data.role,
+            brand_id=user_data.brand_id,
+            agency_id=user_data.agency_id,
+            brand_scoped_roles=[UserRole.BRAND_ADMIN, UserRole.BRAND_USER],
+            agency_scoped_roles=[
+                UserRole.AGENCY_ADMIN,
+                UserRole.AGENCY_SALES_MANAGER,
+                UserRole.AGENCY_GENERAL_MANAGER,
+                UserRole.AGENCY_COMMERCIAL_MANAGER,
+                UserRole.AGENCY_USER,
+                UserRole.SELLER,
+            ],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    normalized_position = str(user_data.position or "").strip() or None
+    normalized_position = _normalize_optional_position_service(user_data.position)
 
-    user_doc = {
-        "email": email,
-        "password_hash": hash_password(user_data.password),
-        "name": user_data.name,
-        "position": normalized_position,
-        "role": user_data.role,
-        "group_id": user_data.group_id,
-        "brand_id": user_data.brand_id,
-        "agency_id": user_data.agency_id,
-        "created_at": datetime.now(timezone.utc)
-    }
+    user_doc = _build_user_document_service(
+        email=email,
+        password_hash=hash_password(user_data.password),
+        name=user_data.name,
+        position=normalized_position,
+        role=user_data.role,
+        group_id=user_data.group_id,
+        brand_id=user_data.brand_id,
+        agency_id=user_data.agency_id,
+        created_at=datetime.now(timezone.utc),
+    )
     user_id = await create_user(db, user_doc)
 
     await log_audit_event(
@@ -1841,8 +1846,15 @@ async def google_auth(request: Request, response: Response):
 async def get_users(request: Request):
     current_user = await get_current_user(request)
     actor_role = current_user.get("role")
-    if actor_role not in {UserRole.APP_ADMIN, UserRole.GROUP_ADMIN} and not _is_dealer_user_manager_role(actor_role):
-        raise HTTPException(status_code=403, detail="Not authorized")
+    try:
+        _ensure_user_management_role_service(
+            actor_role=actor_role,
+            app_admin_role=UserRole.APP_ADMIN,
+            group_admin_role=UserRole.GROUP_ADMIN,
+            is_dealer_user_manager_role=_is_dealer_user_manager_role,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     
     query = {}
     if actor_role == UserRole.GROUP_ADMIN and current_user.get("group_id"):
@@ -1858,71 +1870,42 @@ async def get_users(request: Request):
 async def update_user(user_id: str, request: Request):
     current_user = await get_current_user(request)
     actor_role = current_user.get("role")
-    if actor_role not in {UserRole.APP_ADMIN, UserRole.GROUP_ADMIN} and not _is_dealer_user_manager_role(actor_role):
-        raise HTTPException(status_code=403, detail="Not authorized")
+    try:
+        _ensure_user_management_role_service(
+            actor_role=actor_role,
+            app_admin_role=UserRole.APP_ADMIN,
+            group_admin_role=UserRole.GROUP_ADMIN,
+            is_dealer_user_manager_role=_is_dealer_user_manager_role,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     
     data = await request.json()
-    raw_new_password = data.pop("new_password", None)
-    if raw_new_password is not None:
-        new_password = str(raw_new_password)
-        if len(new_password) < 8:
-            raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
-    else:
-        new_password = None
-
-    update_data = {
-        k: v for k, v in data.items()
-        if k not in ["id", "_id", "password_hash", "password", "email", "confirm_new_password"]
-    }
-
-    if "position" in update_data:
-        update_data["position"] = str(update_data.get("position") or "").strip() or None
+    try:
+        new_password, payload_without_password = _extract_new_password_and_payload_service(data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    update_data = _sanitize_user_update_data_service(payload_without_password)
 
     if not ObjectId.is_valid(user_id):
         raise HTTPException(status_code=400, detail="Invalid user_id")
     existing_user = await find_user_by_id(db, user_id, include_password_hash=False)
     if not existing_user:
         raise HTTPException(status_code=404, detail="User not found")
-    if str(existing_user.get("_id")) == str(current_user.get("id")) and actor_role != UserRole.APP_ADMIN:
-        raise HTTPException(status_code=403, detail="Self-edit is only allowed for app admin")
-    if existing_user.get("role") == UserRole.APP_ADMIN and actor_role != UserRole.APP_ADMIN:
-        raise HTTPException(status_code=403, detail="Cannot edit app admin users")
-
-    if actor_role == UserRole.GROUP_ADMIN:
-        current_group_id = current_user.get("group_id")
-        if not current_group_id:
-            raise HTTPException(status_code=403, detail="Group admin has no assigned group")
-        if not _same_scope_id(existing_user.get("group_id"), current_group_id):
-            raise HTTPException(status_code=403, detail="Cannot edit users outside your group")
-        if update_data.get("group_id") and not _same_scope_id(update_data["group_id"], current_group_id):
-            raise HTTPException(status_code=403, detail="Cannot move users outside your group")
-        requested_role = update_data.get("role")
-        if requested_role == UserRole.APP_ADMIN:
-            raise HTTPException(status_code=403, detail="Group admin cannot assign app admin role")
-        if requested_role == UserRole.APP_USER and existing_user.get("role") != UserRole.APP_USER:
-            raise HTTPException(status_code=403, detail="Group admin cannot assign app user role")
-
-    if _is_dealer_user_manager_role(actor_role):
-        current_agency_id = current_user.get("agency_id")
-        if not current_agency_id:
-            raise HTTPException(status_code=403, detail="Dealer manager has no assigned agency")
-        if not _same_scope_id(existing_user.get("agency_id"), current_agency_id):
-            raise HTTPException(status_code=403, detail="Cannot edit users outside your agency")
-
-        assignable_roles = _get_dealer_assignable_roles(actor_role)
-        existing_role = existing_user.get("role")
-        if existing_role not in assignable_roles:
-            raise HTTPException(status_code=403, detail="Cannot edit this user role from your dealer scope")
-
-        if update_data.get("role") and update_data["role"] not in assignable_roles:
-            raise HTTPException(status_code=403, detail="Role is not assignable for this dealer manager")
-        if update_data.get("agency_id") and not _same_scope_id(update_data["agency_id"], current_agency_id):
-            raise HTTPException(status_code=403, detail="Cannot move users outside your agency")
-
-        # Keep updated user locked to manager agency scope.
-        update_data["group_id"] = current_user.get("group_id")
-        update_data["brand_id"] = current_user.get("brand_id")
-        update_data["agency_id"] = current_agency_id
+    try:
+        update_data = _enforce_update_scope_permissions_service(
+            current_user=current_user,
+            existing_user=existing_user,
+            update_data=update_data,
+            app_admin_role=UserRole.APP_ADMIN,
+            app_user_role=UserRole.APP_USER,
+            group_admin_role=UserRole.GROUP_ADMIN,
+            is_dealer_user_manager_role=_is_dealer_user_manager_role,
+            get_dealer_assignable_roles=_get_dealer_assignable_roles,
+            same_scope_id=_same_scope_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     
     if new_password:
         update_data["password_hash"] = hash_password(new_password)
@@ -1931,9 +1914,7 @@ async def update_user(user_id: str, request: Request):
         await update_user_by_id(db, user_id, update_data)
     user = await find_user_by_id(db, user_id, include_password_hash=False)
 
-    audit_changes = {k: v for k, v in update_data.items() if k != "password_hash"}
-    if "password_hash" in update_data:
-        audit_changes["password_updated"] = True
+    audit_changes = _build_user_update_audit_changes_service(update_data)
 
     await log_audit_event(
         request=request,
@@ -1955,8 +1936,15 @@ async def update_user(user_id: str, request: Request):
 async def delete_user(user_id: str, request: Request):
     current_user = await get_current_user(request)
     actor_role = current_user.get("role")
-    if actor_role not in {UserRole.APP_ADMIN, UserRole.GROUP_ADMIN} and not _is_dealer_user_manager_role(actor_role):
-        raise HTTPException(status_code=403, detail="Not authorized")
+    try:
+        _ensure_user_management_role_service(
+            actor_role=actor_role,
+            app_admin_role=UserRole.APP_ADMIN,
+            group_admin_role=UserRole.GROUP_ADMIN,
+            is_dealer_user_manager_role=_is_dealer_user_manager_role,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     if not ObjectId.is_valid(user_id):
         raise HTTPException(status_code=400, detail="Invalid user_id")
@@ -1964,28 +1952,20 @@ async def delete_user(user_id: str, request: Request):
     existing_user = await find_user_by_id(db, user_id, include_password_hash=False)
     if not existing_user:
         raise HTTPException(status_code=404, detail="User not found")
-    if existing_user.get("role") == UserRole.APP_ADMIN and actor_role != UserRole.APP_ADMIN:
-        raise HTTPException(status_code=403, detail="Cannot delete app admin users")
-
-    if str(existing_user["_id"]) == current_user.get("id"):
-        raise HTTPException(status_code=400, detail="Cannot delete your own user")
-
-    if actor_role == UserRole.GROUP_ADMIN:
-        current_group_id = current_user.get("group_id")
-        if not current_group_id:
-            raise HTTPException(status_code=403, detail="Group admin has no assigned group")
-        if not _same_scope_id(existing_user.get("group_id"), current_group_id):
-            raise HTTPException(status_code=403, detail="Cannot delete users outside your group")
-
-    if _is_dealer_user_manager_role(actor_role):
-        current_agency_id = current_user.get("agency_id")
-        if not current_agency_id:
-            raise HTTPException(status_code=403, detail="Dealer manager has no assigned agency")
-        if not _same_scope_id(existing_user.get("agency_id"), current_agency_id):
-            raise HTTPException(status_code=403, detail="Cannot delete users outside your agency")
-        assignable_roles = _get_dealer_assignable_roles(actor_role)
-        if existing_user.get("role") not in assignable_roles:
-            raise HTTPException(status_code=403, detail="Cannot delete this user role from your dealer scope")
+    try:
+        _enforce_delete_scope_permissions_service(
+            current_user=current_user,
+            existing_user=existing_user,
+            app_admin_role=UserRole.APP_ADMIN,
+            group_admin_role=UserRole.GROUP_ADMIN,
+            is_dealer_user_manager_role=_is_dealer_user_manager_role,
+            get_dealer_assignable_roles=_get_dealer_assignable_roles,
+            same_scope_id=_same_scope_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     await delete_user_by_id(db, user_id)
 
