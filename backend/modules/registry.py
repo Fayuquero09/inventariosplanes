@@ -10,6 +10,7 @@ from .health_routes import HealthRouteHandlers, register_health_routes
 from .import_routes import ImportRouteHandlers, register_import_routes
 from .inventory_routes import InventoryRouteHandlers, register_inventory_routes
 from .organization_catalog_routes import OrganizationCatalogRouteHandlers, register_organization_catalog_routes
+from .price_bulletins_routes import PriceBulletinsRouteHandlers, register_price_bulletins_routes
 from .sales_routes import SalesRouteHandlers, register_sales_routes
 from .sales_objectives_routes import SalesObjectivesRouteHandlers, register_sales_objectives_routes
 
@@ -22,6 +23,7 @@ class RouteModuleHandlers:
     health: HealthRouteHandlers
     imports: ImportRouteHandlers
     sales: SalesRouteHandlers
+    price_bulletins: PriceBulletinsRouteHandlers
     sales_objectives: SalesObjectivesRouteHandlers
     dashboard: DashboardRouteHandlers
     financial_rates: FinancialRatesRouteHandlers
@@ -35,6 +37,7 @@ def register_route_modules(router: APIRouter, handlers: RouteModuleHandlers) -> 
     register_health_routes(router, handlers.health)
     register_import_routes(router, handlers.imports)
     register_sales_routes(router, handlers.sales)
+    register_price_bulletins_routes(router, handlers.price_bulletins)
     register_sales_objectives_routes(router, handlers.sales_objectives)
     register_dashboard_routes(router, handlers.dashboard)
     register_financial_rates_routes(router, handlers.financial_rates)

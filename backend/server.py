@@ -27,6 +27,7 @@ from modules.health_routes import HealthRouteHandlers
 from modules.import_routes import ImportRouteHandlers
 from modules.inventory_routes import InventoryRouteHandlers
 from modules.organization_catalog_routes import OrganizationCatalogRouteHandlers
+from modules.price_bulletins_routes import PriceBulletinsRouteHandlers
 from modules.registry import RouteModuleHandlers, register_route_modules
 from modules.sales_routes import SalesRouteHandlers
 from modules.sales_objectives_routes import SalesObjectivesRouteHandlers
@@ -2923,7 +2924,6 @@ async def _reprice_sales_for_price_bulletin(
 
     return {"checked": checked, "repriced": repriced}
 
-@api_router.get("/price-bulletins")
 async def get_price_bulletins(
     request: Request,
     group_id: Optional[str] = None,
@@ -3020,7 +3020,6 @@ async def get_price_bulletins(
 
     return output
 
-@api_router.put("/price-bulletins/bulk")
 async def upsert_price_bulletins_bulk(payload: PriceBulletinBulkUpsert, request: Request):
     current_user = await get_current_user(request)
     if current_user.get("role") not in PRICE_BULLETIN_EDITOR_ROLES:
@@ -3144,7 +3143,6 @@ async def upsert_price_bulletins_bulk(payload: PriceBulletinBulkUpsert, request:
         "repricing": repricing_summary,
     }
 
-@api_router.delete("/price-bulletins/{bulletin_id}")
 async def delete_price_bulletin(bulletin_id: str, request: Request):
     current_user = await get_current_user(request)
     if current_user.get("role") not in PRICE_BULLETIN_EDITOR_ROLES:
@@ -6932,6 +6930,12 @@ register_route_modules(
             SaleCreate=SaleCreate,
             create_sale=create_sale,
             get_sales=get_sales,
+        ),
+        price_bulletins=PriceBulletinsRouteHandlers(
+            PriceBulletinBulkUpsert=PriceBulletinBulkUpsert,
+            get_price_bulletins=get_price_bulletins,
+            upsert_price_bulletins_bulk=upsert_price_bulletins_bulk,
+            delete_price_bulletin=delete_price_bulletin,
         ),
         sales_objectives=SalesObjectivesRouteHandlers(
             SalesObjectiveCreate=SalesObjectiveCreate,
