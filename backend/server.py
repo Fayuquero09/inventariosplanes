@@ -53,6 +53,7 @@ from repositories.organization_repository import (
     update_brand_by_id,
     update_group_by_id,
 )
+from repositories.sales_repository import find_vehicle_by_id as find_sales_vehicle_by_id
 from repositories.user_repository import (
     create_user,
     delete_user_by_id,
@@ -85,6 +86,7 @@ from services.organization_cleanup_service import (
     summarize_brand_dependencies,
     summarize_group_dependencies,
 )
+from services.sales_service import create_sale_record, list_sales_with_enrichment
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -5898,8 +5900,7 @@ async def create_sale(sale_data: SaleCreate, request: Request):
     if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN, UserRole.BRAND_ADMIN, UserRole.AGENCY_ADMIN, UserRole.SELLER]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    # Get vehicle and mark as sold
-    vehicle = await db.vehicles.find_one({"_id": ObjectId(sale_data.vehicle_id)})
+    vehicle = await find_sales_vehicle_by_id(db, sale_data.vehicle_id)
     if not vehicle:
         raise HTTPException(status_code=404, detail="Vehicle not found")
     _ensure_doc_scope_access(current_user, vehicle, detail="No tienes acceso a este vehículo")
@@ -5907,7 +5908,7 @@ async def create_sale(sale_data: SaleCreate, request: Request):
     if current_user["role"] == UserRole.SELLER and sale_data.seller_id != current_user.get("id"):
         raise HTTPException(status_code=403, detail="Seller can only register own sales")
     if sale_data.seller_id:
-        target_seller = await db.users.find_one({"_id": ObjectId(sale_data.seller_id)})
+        target_seller = await find_user_by_id(db, sale_data.seller_id)
         if not target_seller:
             raise HTTPException(status_code=404, detail="Seller not found")
         _ensure_doc_scope_access(
@@ -5915,96 +5916,31 @@ async def create_sale(sale_data: SaleCreate, request: Request):
             target_seller,
             detail="No tienes acceso a este vendedor",
         )
-    
-    sale_date = sale_data.sale_date
-    if sale_date:
-        sale_date = datetime.fromisoformat(sale_date.replace("Z", "+00:00"))
-    else:
-        sale_date = datetime.now(timezone.utc)
-
-    reference_date_ymd = sale_date.date().isoformat() if sale_date else None
-    configured_pricing = await _resolve_effective_sale_pricing_for_model(
-        group_id=vehicle.get("group_id"),
-        brand_id=vehicle.get("brand_id"),
-        agency_id=vehicle.get("agency_id"),
-        model=vehicle.get("model"),
-        version=vehicle.get("version") or vehicle.get("trim"),
-        reference_date_ymd=reference_date_ymd,
-        fallback_msrp=_to_non_negative_float(sale_data.sale_price, _to_non_negative_float(vehicle.get("msrp"), 0.0)),
-    )
-    effective_pricing = _apply_manual_sale_price_override(configured_pricing, sale_data.sale_price)
-    aging_plan = _extract_active_aging_incentive_plan(vehicle)
-    effective_pricing, applied_aging = _apply_aging_plan_to_effective_pricing(effective_pricing, aging_plan)
-    resolved_sale_price = _to_non_negative_float(effective_pricing.get("transaction_price"), 0.0)
-    if resolved_sale_price <= 0:
-        raise HTTPException(
-            status_code=400,
-            detail="Sale price is required. Configure Precio Boletín/Incentivos in Precios or provide sale_price.",
-        )
-    
-    # Calculate commission
-    base_commission = await calculate_commission(
-        {
-            "sale_price": resolved_sale_price,
-            "commission_base_price": _to_non_negative_float(effective_pricing.get("commission_base_price"), resolved_sale_price),
-            "fi_revenue": sale_data.fi_revenue,
-            "plant_incentive": sale_data.plant_incentive,
-            "model": vehicle.get("model"),
-        },
-        vehicle["agency_id"],
-        sale_data.seller_id,
+    creation_result = await create_sale_record(
+        db,
+        sale_data=sale_data.model_dump(),
         vehicle=vehicle,
-        sale_date=sale_date,
+        calculate_commission=calculate_commission,
+        resolve_effective_sale_pricing_for_model=_resolve_effective_sale_pricing_for_model,
+        apply_manual_sale_price_override=_apply_manual_sale_price_override,
+        extract_active_aging_incentive_plan=_extract_active_aging_incentive_plan,
+        apply_aging_plan_to_effective_pricing=_apply_aging_plan_to_effective_pricing,
+        to_non_negative_float=_to_non_negative_float,
     )
-    commission = round(base_commission + _to_non_negative_float(applied_aging.get("seller_bonus_amount"), 0.0), 2)
-    
-    sale_doc = {
-        "vehicle_id": sale_data.vehicle_id,
-        "seller_id": sale_data.seller_id,
-        "agency_id": vehicle["agency_id"],
-        "brand_id": vehicle.get("brand_id"),
-        "group_id": vehicle.get("group_id"),
-        "sale_price": resolved_sale_price,
-        "commission_base_price": round(_to_non_negative_float(effective_pricing.get("commission_base_price"), resolved_sale_price), 2),
-        "effective_revenue": round(_to_non_negative_float(effective_pricing.get("effective_revenue"), resolved_sale_price), 2),
-        "brand_incentive_amount": round(_to_non_negative_float(effective_pricing.get("brand_incentive_amount"), 0.0), 2),
-        "dealer_incentive_amount": round(_to_non_negative_float(effective_pricing.get("dealer_incentive_amount"), 0.0), 2),
-        "undocumented_dealer_incentive_amount": round(_to_non_negative_float(effective_pricing.get("undocumented_dealer_incentive_amount"), 0.0), 2),
-        "aging_incentive_sale_discount_amount": round(_to_non_negative_float(applied_aging.get("sale_discount_amount"), 0.0), 2),
-        "aging_incentive_seller_bonus_amount": round(_to_non_negative_float(applied_aging.get("seller_bonus_amount"), 0.0), 2),
-        "aging_incentive_total_amount": round(_to_non_negative_float(applied_aging.get("total_amount"), 0.0), 2),
-        "sale_date": sale_date,
-        "fi_revenue": sale_data.fi_revenue,
-        "plant_incentive": sale_data.plant_incentive,
-        "model": vehicle.get("model"),
-        "version": vehicle.get("version") or vehicle.get("trim"),
-        "price_source": str(effective_pricing.get("price_source") or "price_bulletin"),
-        "commission": commission,
-        "created_at": datetime.now(timezone.utc)
-    }
-    result = await db.sales.insert_one(sale_doc)
-    
-    # Mark vehicle as sold
-    vehicle_update = {"status": "sold", "exit_date": sale_date}
-    if aging_plan:
-        vehicle_update.update({
-            "aging_incentive_plan.active": False,
-            "aging_incentive_plan.applied_sale_id": str(result.inserted_id),
-            "aging_incentive_plan.applied_at": datetime.now(timezone.utc),
-            "aging_incentive_plan.applied_sale_discount_amount": round(_to_non_negative_float(applied_aging.get("sale_discount_amount"), 0.0), 2),
-            "aging_incentive_plan.applied_seller_bonus_amount": round(_to_non_negative_float(applied_aging.get("seller_bonus_amount"), 0.0), 2),
-        })
-    await db.vehicles.update_one(
-        {"_id": ObjectId(sale_data.vehicle_id)},
-        {"$set": vehicle_update}
-    )
+    sale_doc = creation_result["sale_doc"]
+    sale_id = creation_result["sale_id"]
+    effective_pricing = creation_result["effective_pricing"]
+    applied_aging = creation_result["applied_aging"]
+    resolved_sale_price = creation_result["resolved_sale_price"]
+    base_commission = creation_result["base_commission"]
+    commission = sale_doc.get("commission", 0)
 
     await log_audit_event(
         request=request,
         current_user=current_user,
         action="create_sale",
         entity_type="sale",
-        entity_id=str(result.inserted_id),
+        entity_id=str(sale_id),
         group_id=sale_doc.get("group_id"),
         brand_id=sale_doc.get("brand_id"),
         agency_id=sale_doc.get("agency_id"),
@@ -6027,7 +5963,7 @@ async def create_sale(sale_data: SaleCreate, request: Request):
         },
     )
 
-    sale_doc["id"] = str(result.inserted_id)
+    sale_doc["id"] = str(sale_id)
     return serialize_doc(sale_doc)
 
 @api_router.get("/sales")
@@ -6065,35 +6001,13 @@ async def get_sales(
         else:
             end_date = datetime(year, month + 1, 1, tzinfo=timezone.utc)
         query["sale_date"] = {"$gte": start_date, "$lt": end_date}
-    
-    sales = await db.sales.find(query).to_list(1000)
-    
-    # Enrich with vehicle and seller info
-    result = []
-    for sale in sales:
-        serialized = serialize_doc(sale)
-        
-        # Get vehicle info
-        if sale.get("vehicle_id"):
-            vehicle = await db.vehicles.find_one({"_id": ObjectId(sale["vehicle_id"])})
-            if vehicle:
-                serialized["vehicle_info"] = {
-                    "model": vehicle["model"],
-                    "year": vehicle["year"],
-                    "trim": vehicle["trim"],
-                    "color": vehicle["color"],
-                    "vin": vehicle["vin"]
-                }
-        
-        # Get seller name
-        if sale.get("seller_id"):
-            seller = await db.users.find_one({"_id": ObjectId(sale["seller_id"])})
-            if seller:
-                serialized["seller_name"] = seller["name"]
-        
-        result.append(serialized)
-    
-    return result
+
+    return await list_sales_with_enrichment(
+        db,
+        query=query,
+        serialize_doc=serialize_doc,
+        limit=1000,
+    )
 
 # ============== DASHBOARD / ANALYTICS ROUTES ==============
 
