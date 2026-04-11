@@ -114,6 +114,11 @@ async def list_sales(db: Any, *, query: Dict[str, Any], limit: int = 10000) -> L
     return await db.sales.find(query).to_list(safe_limit)
 
 
+async def list_sales_objectives(db: Any, *, query: Dict[str, Any], limit: int = 5000) -> List[Dict[str, Any]]:
+    safe_limit = _safe_limit(limit, 5000, 20000)
+    return await db.sales_objectives.find(query).to_list(safe_limit)
+
+
 async def count_sales(db: Any, *, query: Dict[str, Any]) -> int:
     return int(await db.sales.count_documents(query))
 

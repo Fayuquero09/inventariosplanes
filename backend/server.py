@@ -43,6 +43,7 @@ from repositories.dashboard_repository import (
     list_agencies_by_group_id as _list_agencies_by_group_id_dashboard_repo,
     list_global_monthly_closes_by_year,
     list_sales as _list_sales_dashboard_repo,
+    list_sales_objectives as _list_sales_objectives_dashboard_repo,
     list_similar_sold_vehicles as _list_similar_sold_vehicles_dashboard_repo,
     list_vehicles as _list_vehicles_dashboard_repo,
     list_vehicles_by_ids as _list_vehicles_by_ids_dashboard_repo,
@@ -104,6 +105,7 @@ from services.dashboard_service import (
     build_vehicle_aging_suggestion as _build_vehicle_aging_suggestion_service,
     collect_vehicle_suggestions as _collect_vehicle_suggestions_service,
     compute_dashboard_kpis as _compute_dashboard_kpis_service,
+    compute_sales_trends as _compute_sales_trends_service,
     compute_seller_performance as _compute_seller_performance_service,
     empty_dashboard_kpis_response as _empty_dashboard_kpis_response_service,
     resolve_dashboard_scope_group_id as _resolve_dashboard_scope_group_id_service,
@@ -5579,95 +5581,6 @@ async def get_sales_trends(
     months: int = 6,
     granularity: str = "month"
 ):
-    async def _compute_history_cumulative_profile(
-        scope_query: Dict[str, Any],
-        target_year: int,
-        target_month: int,
-        target_days: int,
-        lookback_months: int = 18,
-    ) -> Dict[str, Any]:
-        cumulative_weighted_sum: Dict[int, float] = {
-            day: 0.0 for day in range(1, target_days + 1)
-        }
-        cumulative_weight: Dict[int, float] = {
-            day: 0.0 for day in range(1, target_days + 1)
-        }
-
-        months_used = 0
-        total_history_units = 0
-        cursor_year, cursor_month = _decrement_month(target_year, target_month)
-
-        for _ in range(max(1, lookback_months)):
-            month_start = datetime(cursor_year, cursor_month, 1, tzinfo=timezone.utc)
-            if cursor_month == 12:
-                month_end = datetime(cursor_year + 1, 1, 1, tzinfo=timezone.utc)
-            else:
-                month_end = datetime(cursor_year, cursor_month + 1, 1, tzinfo=timezone.utc)
-
-            monthly_query = {**scope_query, "sale_date": {"$gte": month_start, "$lt": month_end}}
-            month_sales = await db.sales.find(monthly_query).to_list(25000)
-            if not month_sales:
-                cursor_year, cursor_month = _decrement_month(cursor_year, cursor_month)
-                continue
-
-            units_by_day: Dict[int, int] = {}
-            valid_units = 0
-            for sale in month_sales:
-                sale_date = _coerce_utc_datetime(sale.get("sale_date"))
-                if not sale_date or sale_date < month_start or sale_date >= month_end:
-                    continue
-                day = sale_date.day
-                units_by_day[day] = units_by_day.get(day, 0) + 1
-                valid_units += 1
-
-            if valid_units <= 0:
-                cursor_year, cursor_month = _decrement_month(cursor_year, cursor_month)
-                continue
-
-            hist_days_in_month = (month_end - month_start).days or 1
-            running_units = 0
-            cumulative_share_for_month: Dict[int, float] = {}
-            for day in range(1, hist_days_in_month + 1):
-                running_units += units_by_day.get(day, 0)
-                cumulative_share_for_month[day] = min(1.0, running_units / valid_units)
-
-            for target_day in range(1, target_days + 1):
-                source_day = min(target_day, hist_days_in_month)
-                share = cumulative_share_for_month.get(source_day, 1.0)
-                cumulative_weighted_sum[target_day] += share * valid_units
-                cumulative_weight[target_day] += valid_units
-
-            months_used += 1
-            total_history_units += valid_units
-            cursor_year, cursor_month = _decrement_month(cursor_year, cursor_month)
-
-        if months_used == 0:
-            return {
-                "available": False,
-                "months_used": 0,
-                "history_total_units": 0,
-                "cumulative_shares": {},
-            }
-
-        cumulative_shares: Dict[int, float] = {}
-        previous_share = 0.0
-        for day in range(1, target_days + 1):
-            if cumulative_weight[day] > 0:
-                raw_share = cumulative_weighted_sum[day] / cumulative_weight[day]
-            else:
-                raw_share = previous_share
-            normalized_share = max(previous_share, min(1.0, raw_share))
-            cumulative_shares[day] = round(normalized_share, 6)
-            previous_share = normalized_share
-
-        cumulative_shares[target_days] = 1.0
-        return {
-            "available": True,
-            "months_used": months_used,
-            "history_total_units": total_history_units,
-            "cumulative_shares": cumulative_shares,
-        }
-
     current_user = await get_current_user(request)
     query = _build_scope_query(current_user)
     if not _scope_query_has_access(query):
@@ -5690,293 +5603,23 @@ async def get_sales_trends(
         query["seller_id"] = current_seller_id
     elif seller_id:
         query["seller_id"] = seller_id
-    
-    now = datetime.now(timezone.utc)
-    safe_months = max(1, min(int(months), 24))
-    granularity_mode = (granularity or "month").strip().lower()
-    if granularity_mode not in {"month", "day", "daily"}:
-        granularity_mode = "month"
-    trends = []
 
-    # Daily mode for current month-to-date (useful when UI requests months=1).
-    if granularity_mode in {"day", "daily"} and safe_months == 1:
-        year = now.year
-        month = now.month
-        start_date = datetime(year, month, 1, tzinfo=timezone.utc)
-        if month == 12:
-            month_end = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
-        else:
-            month_end = datetime(year, month + 1, 1, tzinfo=timezone.utc)
-
-        sales_query = {**query, "sale_date": {"$gte": start_date, "$lt": now}}
-        sales = await db.sales.find(sales_query).to_list(20000)
-
-        prev_year = year - 1
-        prev_start_date = datetime(prev_year, month, 1, tzinfo=timezone.utc)
-        if month == 12:
-            prev_month_end = datetime(prev_year + 1, 1, 1, tzinfo=timezone.utc)
-        else:
-            prev_month_end = datetime(prev_year, month + 1, 1, tzinfo=timezone.utc)
-        elapsed_seconds = max((now - start_date).total_seconds(), 0)
-        prev_period_end = prev_start_date + timedelta(seconds=elapsed_seconds)
-        if prev_period_end > prev_month_end:
-            prev_period_end = prev_month_end
-
-        previous_year_sales_query = {**query, "sale_date": {"$gte": prev_start_date, "$lt": prev_period_end}}
-        previous_year_sales = await db.sales.find(previous_year_sales_query).to_list(20000)
-
-        # Objective baseline for current month.
-        objective_scope_query: Dict[str, Any] = {"month": month, "year": year}
-        for scope_key in ("group_id", "brand_id", "agency_id"):
-            if query.get(scope_key):
-                objective_scope_query[scope_key] = query[scope_key]
-
-        role_scoped_to_seller = "seller_id" in query
-        if role_scoped_to_seller:
-            objective_scope_query["seller_id"] = query["seller_id"]
-
-        objectives = await db.sales_objectives.find(objective_scope_query).to_list(5000)
-        approved_objectives = [
-            obj for obj in objectives
-            if str(obj.get("approval_status") or OBJECTIVE_APPROVED).strip().lower() in {OBJECTIVE_APPROVED, OBJECTIVE_PENDING}
-        ]
-
-        if role_scoped_to_seller:
-            objective_units = sum(int(obj.get("units_target", 0) or 0) for obj in approved_objectives)
-        else:
-            objective_units = sum(
-                int(obj.get("units_target", 0) or 0)
-                for obj in approved_objectives
-                if not obj.get("seller_id")
-            )
-
-        units_by_day: Dict[int, int] = {}
-        revenue_by_day: Dict[int, float] = {}
-        commission_by_day: Dict[int, float] = {}
-        for sale in sales:
-            sale_date = _coerce_utc_datetime(sale.get("sale_date"))
-            if not sale_date or sale_date < start_date or sale_date >= now:
-                continue
-            day = sale_date.day
-            units_by_day[day] = units_by_day.get(day, 0) + 1
-            revenue_by_day[day] = revenue_by_day.get(day, 0.0) + _sale_effective_revenue(sale)
-            commission_by_day[day] = commission_by_day.get(day, 0.0) + float(sale.get("commission", 0) or 0)
-
-        last_year_units_by_day: Dict[int, int] = {}
-        for sale in previous_year_sales:
-            sale_date = _coerce_utc_datetime(sale.get("sale_date"))
-            if not sale_date or sale_date < prev_start_date or sale_date >= prev_period_end:
-                continue
-            day = sale_date.day
-            last_year_units_by_day[day] = last_year_units_by_day.get(day, 0) + 1
-
-        days_in_month = (month_end - start_date).days or 1
-        elapsed_days = max(min(now.day, days_in_month), 1)
-        actual_units_to_date = sum(units_by_day.values())
-        objective_units_effective, objective_source = _resolve_effective_objective_units(
-            configured_units=float(objective_units or 0),
-            previous_year_units_observed=len(previous_year_sales),
-            days_in_month=days_in_month,
-            elapsed_days=elapsed_days,
-        )
-
-        operational_profile = _compute_operational_day_profile(year, month)
-        history_profile = await _compute_history_cumulative_profile(
-            scope_query=query,
-            target_year=year,
-            target_month=month,
-            target_days=days_in_month,
-            lookback_months=18,
-        )
-
-        if history_profile.get("available"):
-            blended_cumulative_shares: Dict[int, float] = {}
-            prev_blended = 0.0
-            history_shares = history_profile.get("cumulative_shares", {})
-            operational_shares = operational_profile.get("cumulative_shares", {})
-
-            for day in range(1, days_in_month + 1):
-                history_share = float(history_shares.get(day, 0.0))
-                operational_share = float(operational_shares.get(day, day / days_in_month))
-                raw_share = (history_share * 0.8) + (operational_share * 0.2)
-                normalized_share = max(prev_blended, min(1.0, raw_share))
-                blended_cumulative_shares[day] = round(normalized_share, 6)
-                prev_blended = normalized_share
-
-            blended_cumulative_shares[days_in_month] = 1.0
-            projection_cumulative_shares = blended_cumulative_shares
-            projection_profile_source = "history_blended_operational"
-        else:
-            projection_cumulative_shares = operational_profile.get("cumulative_shares", {})
-            projection_profile_source = "operational_days_only"
-
-        elapsed_share = float(projection_cumulative_shares.get(elapsed_days, 0.0) or 0.0)
-        if elapsed_share <= 0:
-            elapsed_share = max(elapsed_days / days_in_month, 1.0 / days_in_month)
-
-        projected_month_units = round(actual_units_to_date / elapsed_share, 2)
-
-        cumulative_units = 0
-        cumulative_last_year = 0
-        cumulative_revenue = 0.0
-        cumulative_commission = 0.0
-        for day in range(1, days_in_month + 1):
-            is_elapsed_day = day <= elapsed_days
-            if is_elapsed_day:
-                cumulative_units += units_by_day.get(day, 0)
-                cumulative_last_year += last_year_units_by_day.get(day, 0)
-                cumulative_revenue += revenue_by_day.get(day, 0.0)
-                cumulative_commission += commission_by_day.get(day, 0.0)
-
-            cumulative_share = float(projection_cumulative_shares.get(day, day / days_in_month))
-            previous_share = float(projection_cumulative_shares.get(day - 1, 0.0)) if day > 1 else 0.0
-            daily_share = max(0.0, cumulative_share - previous_share)
-
-            weighted_objective_units = round(objective_units_effective * cumulative_share, 2)
-            daily_objective_units = round(objective_units_effective * daily_share, 2)
-            forecast_units = round(projected_month_units * cumulative_share, 2)
-
-            trends.append({
-                "month": f"{year}-{month:02d}",
-                "date": f"{year}-{month:02d}-{day:02d}",
-                "day_of_month": day,
-                "day_label": f"{day:02d}",
-                "is_elapsed_day": is_elapsed_day,
-                "units": cumulative_units if is_elapsed_day else None,
-                "last_year_units": cumulative_last_year if is_elapsed_day else None,
-                "objective_units": objective_units_effective,
-                "configured_objective_units": float(objective_units or 0),
-                "objective_source": objective_source,
-                "weighted_objective_units": weighted_objective_units,
-                "daily_objective_units": daily_objective_units,
-                "revenue": round(cumulative_revenue, 2) if is_elapsed_day else None,
-                "commission": round(cumulative_commission, 2) if is_elapsed_day else None,
-                "forecast_units": forecast_units,
-                "operational_day_weight": float(operational_profile.get("day_weights", {}).get(day, 1.0)),
-                "operational_cumulative_share": float(
-                    operational_profile.get("cumulative_shares", {}).get(day, day / days_in_month)
-                ),
-                "projection_cumulative_share": cumulative_share,
-                "projection_profile_source": projection_profile_source,
-                "projection_months_used": int(history_profile.get("months_used", 0) or 0),
-            })
-
-        return trends
-
-    # Build a stable month window (instead of fixed 30-day jumps) so each point
-    # always maps to a real calendar month.
-    cursor = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
-    month_window: List[Tuple[int, int]] = []
-    for _ in range(safe_months):
-        month_window.append((cursor.year, cursor.month))
-        if cursor.month == 1:
-            cursor = datetime(cursor.year - 1, 12, 1, tzinfo=timezone.utc)
-        else:
-            cursor = datetime(cursor.year, cursor.month - 1, 1, tzinfo=timezone.utc)
-    month_window.reverse()
-
-    for year, month in month_window:
-        start_date = datetime(year, month, 1, tzinfo=timezone.utc)
-        if month == 12:
-            end_date = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
-        else:
-            end_date = datetime(year, month + 1, 1, tzinfo=timezone.utc)
-
-        current_period_end = end_date
-        if year == now.year and month == now.month:
-            current_period_end = now
-
-        sales_query = {**query, "sale_date": {"$gte": start_date, "$lt": current_period_end}}
-        sales = await db.sales.find(sales_query).to_list(10000)
-
-        # Same month last year baseline (for YoY visual comparison).
-        prev_year = year - 1
-        prev_start_date = datetime(prev_year, month, 1, tzinfo=timezone.utc)
-        if month == 12:
-            prev_end_date = datetime(prev_year + 1, 1, 1, tzinfo=timezone.utc)
-        else:
-            prev_end_date = datetime(prev_year, month + 1, 1, tzinfo=timezone.utc)
-        if year == now.year and month == now.month:
-            elapsed_seconds = max((current_period_end - start_date).total_seconds(), 0)
-            prev_period_end = prev_start_date + timedelta(seconds=elapsed_seconds)
-            if prev_period_end > prev_end_date:
-                prev_period_end = prev_end_date
-        else:
-            prev_period_end = prev_end_date
-
-        previous_year_sales_query = {**query, "sale_date": {"$gte": prev_start_date, "$lt": prev_period_end}}
-        previous_year_sales = await db.sales.find(previous_year_sales_query).to_list(10000)
-
-        # Objective baseline for this month.
-        objective_scope_query: Dict[str, Any] = {"month": month, "year": year}
-        for scope_key in ("group_id", "brand_id", "agency_id"):
-            if query.get(scope_key):
-                objective_scope_query[scope_key] = query[scope_key]
-
-        role_scoped_to_seller = "seller_id" in query
-        if role_scoped_to_seller:
-            objective_scope_query["seller_id"] = query["seller_id"]
-
-        objectives = await db.sales_objectives.find(objective_scope_query).to_list(5000)
-        approved_objectives = [
-            obj for obj in objectives
-            if str(obj.get("approval_status") or OBJECTIVE_APPROVED).strip().lower() in {OBJECTIVE_APPROVED, OBJECTIVE_PENDING}
-        ]
-
-        if role_scoped_to_seller:
-            objective_units = sum(int(obj.get("units_target", 0) or 0) for obj in approved_objectives)
-        else:
-            objective_units = sum(
-                int(obj.get("units_target", 0) or 0)
-                for obj in approved_objectives
-                if not obj.get("seller_id")
-            )
-
-        days_in_month = (end_date - start_date).days or 1
-        elapsed_days_for_objective = now.day if (year == now.year and month == now.month) else None
-        objective_units_effective, objective_source = _resolve_effective_objective_units(
-            configured_units=float(objective_units or 0),
-            previous_year_units_observed=len(previous_year_sales),
-            days_in_month=days_in_month,
-            elapsed_days=elapsed_days_for_objective,
-        )
-        if year == now.year and month == now.month:
-            weighted_objective_units = round(objective_units_effective * (now.day / days_in_month), 2)
-        else:
-            weighted_objective_units = float(objective_units_effective)
-
-        trends.append({
-            "month": f"{year}-{month:02d}",
-            "units": len(sales),
-            "last_year_units": len(previous_year_sales),
-            "objective_units": objective_units_effective,
-            "configured_objective_units": float(objective_units or 0),
-            "objective_source": objective_source,
-            "weighted_objective_units": weighted_objective_units,
-            "revenue": round(sum(_sale_effective_revenue(s) for s in sales), 2),
-            "commission": round(sum(s.get("commission", 0) for s in sales), 2),
-        })
-
-    # Forecast units using simple linear trendline over actual units.
-    if trends:
-        points = len(trends)
-        units_series = [float(point.get("units", 0)) for point in trends]
-        if points == 1:
-            forecast_series = units_series
-        else:
-            sum_x = sum(range(points))
-            sum_y = sum(units_series)
-            sum_xx = sum(idx * idx for idx in range(points))
-            sum_xy = sum(idx * units_series[idx] for idx in range(points))
-            denominator = points * sum_xx - (sum_x * sum_x)
-            slope = ((points * sum_xy - sum_x * sum_y) / denominator) if denominator else 0.0
-            intercept = (sum_y - slope * sum_x) / points if points else 0.0
-            forecast_series = [max(0.0, round(intercept + slope * idx, 2)) for idx in range(points)]
-
-        for idx, point in enumerate(trends):
-            point["forecast_units"] = forecast_series[idx]
-
-    return trends
+    return await _compute_sales_trends_service(
+        db,
+        query=query,
+        now=datetime.now(timezone.utc),
+        months=months,
+        granularity=granularity,
+        objective_approved=OBJECTIVE_APPROVED,
+        objective_pending=OBJECTIVE_PENDING,
+        list_sales=_list_sales_dashboard_repo,
+        list_sales_objectives=_list_sales_objectives_dashboard_repo,
+        coerce_utc_datetime=_coerce_utc_datetime,
+        sale_effective_revenue=_sale_effective_revenue,
+        decrement_month=_decrement_month,
+        compute_operational_day_profile=_compute_operational_day_profile,
+        resolve_effective_objective_units=_resolve_effective_objective_units,
+    )
 
 async def get_seller_performance(request: Request, agency_id: Optional[str] = None, month: Optional[int] = None, year: Optional[int] = None):
     current_user = await get_current_user(request)
