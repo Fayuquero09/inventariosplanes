@@ -39,6 +39,17 @@ from repositories.dashboard_repository import (
     list_global_monthly_closes_by_year,
     upsert_global_monthly_close,
 )
+from repositories.financial_rates_repository import (
+    delete_financial_rate_by_id as _delete_financial_rate_by_id_repo,
+    find_financial_rate_by_id as _find_financial_rate_by_id_repo,
+    find_latest_financial_rate as _find_latest_financial_rate_repo,
+    insert_financial_rate as _insert_financial_rate_repo,
+    insert_many_financial_rates as _insert_many_financial_rates_repo,
+    list_brand_financial_rates_for_group as _list_brand_financial_rates_for_group_repo,
+    list_brands_for_group as _list_brands_for_group_repo,
+    list_financial_rates as _list_financial_rates_repo,
+    update_financial_rate_by_id as _update_financial_rate_by_id_repo,
+)
 from repositories.organization_repository import (
     delete_brand_by_id,
     delete_group_by_id,
@@ -70,6 +81,13 @@ from repositories.user_repository import (
 from services.commission_service import calculate_commission_from_rules as _calculate_commission_from_rules
 from services.commission_calculation_service import (
     calculate_commission as _calculate_commission_service,
+)
+from services.financial_rates_service import (
+    build_default_financial_rate_name as _build_default_financial_rate_name_service,
+    enrich_financial_rate as _enrich_financial_rate_service,
+    extract_rate_components_from_doc as _extract_rate_components_from_doc_service,
+    monthly_to_annual as _monthly_to_annual_service,
+    resolve_effective_rate_components as _resolve_effective_rate_components_service,
 )
 from services.import_service import (
     import_organization_from_excel,
@@ -2904,139 +2922,36 @@ async def delete_price_bulletin(bulletin_id: str, request: Request):
 DAYS_PER_MONTH_FOR_RATE = 30
 
 
-def _annual_to_monthly(rate_annual_pct: float) -> float:
-    return float(rate_annual_pct) / 12.0
-
-
 def _monthly_to_annual(rate_monthly_pct: float) -> float:
-    return float(rate_monthly_pct) * 12.0
-
-
-def _parse_optional_float(value: Any) -> Optional[float]:
-    try:
-        if value is None:
-            return None
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed
+    return _monthly_to_annual_service(rate_monthly_pct)
 
 
 def _extract_rate_components_from_doc(rate_doc: Optional[Dict[str, Any]]) -> Dict[str, Optional[float]]:
-    if not rate_doc:
-        return {
-            "tiie_rate_monthly": None,
-            "spread_monthly": None,
-            "grace_days": None,
-        }
+    return _extract_rate_components_from_doc_service(rate_doc)
 
-    rate_period = str(rate_doc.get("rate_period") or "").strip().lower()
 
-    raw_tiie = rate_doc.get("tiie_rate")
-    raw_spread = rate_doc.get("spread")
-    raw_tiie_annual = rate_doc.get("tiie_rate_annual")
-    raw_spread_annual = rate_doc.get("spread_annual")
-
-    tiie_monthly: Optional[float] = None
-    spread_monthly: Optional[float] = None
-
-    if raw_tiie_annual is not None:
-        tiie_annual_value = _parse_optional_float(raw_tiie_annual)
-        tiie_monthly = _annual_to_monthly(tiie_annual_value) if tiie_annual_value is not None else None
-    elif raw_tiie is not None:
-        tiie_value = _parse_optional_float(raw_tiie)
-        if tiie_value is not None:
-            if rate_period == "monthly":
-                tiie_monthly = tiie_value
-            elif rate_period == "annual":
-                tiie_monthly = _annual_to_monthly(tiie_value)
-            else:
-                tiie_monthly = tiie_value if tiie_value <= 3.0 else _annual_to_monthly(tiie_value)
-
-    if raw_spread_annual is not None:
-        spread_annual_value = _parse_optional_float(raw_spread_annual)
-        spread_monthly = _annual_to_monthly(spread_annual_value) if spread_annual_value is not None else None
-    elif raw_spread is not None:
-        spread_value = _parse_optional_float(raw_spread)
-        if spread_value is not None:
-            if rate_period == "monthly":
-                spread_monthly = spread_value
-            elif rate_period == "annual":
-                spread_monthly = _annual_to_monthly(spread_value)
-            else:
-                spread_monthly = spread_value if spread_value <= 3.0 else _annual_to_monthly(spread_value)
-
-    grace_days_value = rate_doc.get("grace_days")
-    grace_days = int(grace_days_value) if grace_days_value is not None else None
-
-    return {
-        "tiie_rate_monthly": tiie_monthly,
-        "spread_monthly": spread_monthly,
-        "grace_days": grace_days,
-    }
+async def _resolve_effective_rate_components_for_scope(
+    *,
+    group_id: Any,
+    brand_id: Any,
+    agency_id: Any,
+) -> Dict[str, float]:
+    return await _resolve_effective_rate_components_service(
+        db,
+        group_id=group_id,
+        brand_id=brand_id,
+        agency_id=agency_id,
+        find_latest_financial_rate=_find_latest_financial_rate_repo,
+        extract_rate_components_from_doc=_extract_rate_components_from_doc,
+    )
 
 
 async def _resolve_effective_rate_components_for_vehicle(vehicle: Dict[str, Any]) -> Dict[str, float]:
-    group_id = vehicle.get("group_id")
-    brand_id = vehicle.get("brand_id")
-    agency_id = vehicle.get("agency_id")
-
-    group_rate = await db.financial_rates.find_one(
-        {"group_id": group_id, "brand_id": None, "agency_id": None},
-        sort=[("created_at", -1)],
+    return await _resolve_effective_rate_components_for_scope(
+        group_id=vehicle.get("group_id"),
+        brand_id=vehicle.get("brand_id"),
+        agency_id=vehicle.get("agency_id"),
     )
-    brand_rate = None
-    if brand_id:
-        brand_rate = await db.financial_rates.find_one(
-            {"group_id": group_id, "brand_id": brand_id, "agency_id": None},
-            sort=[("created_at", -1)],
-        )
-    agency_rate = None
-    if agency_id:
-        agency_rate = await db.financial_rates.find_one(
-            {"group_id": group_id, "agency_id": agency_id},
-            sort=[("created_at", -1)],
-        )
-
-    group_components = _extract_rate_components_from_doc(group_rate)
-    brand_components = _extract_rate_components_from_doc(brand_rate)
-    agency_components = _extract_rate_components_from_doc(agency_rate)
-
-    tiie_monthly = (
-        agency_components["tiie_rate_monthly"]
-        if agency_components["tiie_rate_monthly"] is not None
-        else brand_components["tiie_rate_monthly"]
-        if brand_components["tiie_rate_monthly"] is not None
-        else group_components["tiie_rate_monthly"]
-        if group_components["tiie_rate_monthly"] is not None
-        else None
-    )
-    spread_monthly = (
-        agency_components["spread_monthly"]
-        if agency_components["spread_monthly"] is not None
-        else brand_components["spread_monthly"]
-        if brand_components["spread_monthly"] is not None
-        else group_components["spread_monthly"]
-        if group_components["spread_monthly"] is not None
-        else None
-    )
-    grace_days = (
-        agency_components["grace_days"]
-        if agency_components["grace_days"] is not None
-        else brand_components["grace_days"]
-        if brand_components["grace_days"] is not None
-        else group_components["grace_days"]
-        if group_components["grace_days"] is not None
-        else 0
-    )
-
-    total_monthly = (tiie_monthly + spread_monthly) if tiie_monthly is not None and spread_monthly is not None else None
-    return {
-        "tiie_rate_monthly": tiie_monthly,
-        "spread_monthly": spread_monthly,
-        "total_rate_monthly": total_monthly,
-        "grace_days": int(grace_days),
-    }
 
 
 async def _build_default_financial_rate_name(
@@ -3044,34 +2959,15 @@ async def _build_default_financial_rate_name(
     brand_id: Optional[str] = None,
     agency_id: Optional[str] = None,
 ) -> str:
-    group_name = "Grupo"
-    brand_name = None
-    agency_name = None
-
-    if group_id and ObjectId.is_valid(group_id):
-        group = await db.groups.find_one({"_id": ObjectId(group_id)})
-        if group:
-            group_name = str(group.get("name") or group_name)
-
-    if brand_id and ObjectId.is_valid(brand_id):
-        brand = await db.brands.find_one({"_id": ObjectId(brand_id)})
-        if brand:
-            brand_name = str(brand.get("name") or "").strip() or None
-
-    if agency_id and ObjectId.is_valid(agency_id):
-        agency = await db.agencies.find_one({"_id": ObjectId(agency_id)})
-        if agency:
-            agency_name = str(agency.get("name") or "").strip() or None
-            if not brand_name and agency.get("brand_id") and ObjectId.is_valid(agency["brand_id"]):
-                agency_brand = await db.brands.find_one({"_id": ObjectId(agency["brand_id"])})
-                if agency_brand:
-                    brand_name = str(agency_brand.get("name") or "").strip() or None
-
-    if agency_name:
-        return f"Tasa {group_name} - {agency_name}"
-    if brand_name:
-        return f"Tasa {group_name} - {brand_name}"
-    return f"Tasa General {group_name}"
+    return await _build_default_financial_rate_name_service(
+        db,
+        group_id=group_id,
+        brand_id=brand_id,
+        agency_id=agency_id,
+        find_group_by_id=find_group_by_id,
+        find_brand_by_id=find_brand_by_id,
+        find_agency_by_id=find_agency_by_id,
+    )
 
 async def create_financial_rate(rate_data: FinancialRateCreate, request: Request):
     current_user = await get_current_user(request)
@@ -3116,8 +3012,8 @@ async def create_financial_rate(rate_data: FinancialRateCreate, request: Request
         "name": rate_name,
         "created_at": datetime.now(timezone.utc)
     }
-    result = await db.financial_rates.insert_one(rate_doc)
-    rate_doc["id"] = str(result.inserted_id)
+    created_rate_id = await _insert_financial_rate_repo(db, rate_doc)
+    rate_doc["id"] = created_rate_id
     rate_doc["total_rate"] = (
         (tiie_monthly + spread_monthly)
         if tiie_monthly is not None and spread_monthly is not None
@@ -3129,7 +3025,7 @@ async def create_financial_rate(rate_data: FinancialRateCreate, request: Request
         current_user=current_user,
         action="create_financial_rate",
         entity_type="financial_rate",
-        entity_id=str(result.inserted_id),
+        entity_id=created_rate_id,
         group_id=scope["group_id"],
         brand_id=scope["brand_id"],
         agency_id=scope["agency_id"],
@@ -3161,9 +3057,11 @@ async def apply_group_default_financial_rate(
     )
 
     group_id = scope["group_id"]
-    group_base_rate = await db.financial_rates.find_one(
-        {"group_id": group_id, "brand_id": None, "agency_id": None},
-        sort=[("created_at", -1)],
+    group_base_rate = await _find_latest_financial_rate_repo(
+        db,
+        group_id=group_id,
+        brand_id=None,
+        agency_id=None,
     )
     if not group_base_rate:
         raise HTTPException(
@@ -3180,7 +3078,7 @@ async def apply_group_default_financial_rate(
             detail="La tasa general del grupo no tiene TIIE/Spread configurados.",
         )
 
-    brands = await db.brands.find({"group_id": group_id}).to_list(1000)
+    brands = await _list_brands_for_group_repo(db, group_id=group_id, limit=1000)
     if not brands:
         return {
             "group_id": group_id,
@@ -3189,16 +3087,18 @@ async def apply_group_default_financial_rate(
             "message": "El grupo no tiene marcas para aplicar la tasa.",
         }
 
-    existing_brand_rates = await db.financial_rates.find(
-        {"group_id": group_id, "agency_id": None, "brand_id": {"$ne": None}}
-    ).to_list(5000)
+    existing_brand_rates = await _list_brand_financial_rates_for_group_repo(
+        db,
+        group_id=group_id,
+        limit=5000,
+    )
     existing_brand_ids = {
         str(rate.get("brand_id"))
         for rate in existing_brand_rates
         if rate.get("brand_id")
     }
 
-    group_doc = await db.groups.find_one({"_id": ObjectId(group_id)})
+    group_doc = await find_group_by_id(db, group_id)
     group_name = str(group_doc.get("name") or "Grupo") if group_doc else "Grupo"
 
     now = datetime.now(timezone.utc)
@@ -3226,8 +3126,7 @@ async def apply_group_default_financial_rate(
 
     created_count = 0
     if docs_to_insert:
-        insert_result = await db.financial_rates.insert_many(docs_to_insert)
-        created_count = len(insert_result.inserted_ids)
+        created_count = await _insert_many_financial_rates_repo(db, docs_to_insert)
 
     await log_audit_event(
         request=request,
@@ -3274,72 +3173,23 @@ async def get_financial_rates(
         query["brand_id"] = brand_id
     elif group_id:
         query["group_id"] = group_id
-    
-    rates = await db.financial_rates.find(query).to_list(1000)
-    
-    # Enrich with total_rate and names
-    result = []
-    for r in rates:
-        rate = serialize_doc(r)
-        configured_components = _extract_rate_components_from_doc(r)
-        rate["tiie_rate"] = (
-            round(configured_components["tiie_rate_monthly"], 4)
-            if configured_components["tiie_rate_monthly"] is not None
-            else None
-        )
-        rate["spread"] = (
-            round(configured_components["spread_monthly"], 4)
-            if configured_components["spread_monthly"] is not None
-            else None
-        )
-        rate["total_rate"] = (
-            round((rate["tiie_rate"] + rate["spread"]), 4)
-            if rate["tiie_rate"] is not None and rate["spread"] is not None
-            else None
-        )
-        rate["rate_period"] = "monthly"
-        rate["tiie_rate_annual"] = round(_monthly_to_annual(rate["tiie_rate"]), 4) if rate["tiie_rate"] is not None else None
-        rate["spread_annual"] = round(_monthly_to_annual(rate["spread"]), 4) if rate["spread"] is not None else None
-        rate["total_rate_annual"] = round(_monthly_to_annual(rate["total_rate"]), 4) if rate["total_rate"] is not None else None
 
-        effective_components = await _resolve_effective_rate_components_for_vehicle({
-            "group_id": r.get("group_id"),
-            "brand_id": r.get("brand_id"),
-            "agency_id": r.get("agency_id"),
-        })
-        rate["effective_tiie_rate"] = (
-            round(effective_components["tiie_rate_monthly"], 4)
-            if effective_components["tiie_rate_monthly"] is not None
-            else None
+    rates = await _list_financial_rates_repo(db, query=query, limit=1000)
+    result = []
+    for rate_doc in rates:
+        enriched_rate = await _enrich_financial_rate_service(
+            db,
+            rate_doc=rate_doc,
+            serialize_doc=serialize_doc,
+            extract_rate_components_from_doc=_extract_rate_components_from_doc,
+            monthly_to_annual=_monthly_to_annual,
+            resolve_effective_rate_components_for_scope=_resolve_effective_rate_components_for_scope,
+            find_group_by_id=find_group_by_id,
+            find_brand_by_id=find_brand_by_id,
+            find_agency_by_id=find_agency_by_id,
         )
-        rate["effective_spread"] = (
-            round(effective_components["spread_monthly"], 4)
-            if effective_components["spread_monthly"] is not None
-            else None
-        )
-        rate["effective_total_rate"] = (
-            round(effective_components["total_rate_monthly"], 4)
-            if effective_components["total_rate_monthly"] is not None
-            else None
-        )
-        rate["effective_grace_days"] = int(effective_components["grace_days"])
-        
-        # Get brand/agency names
-        if r.get("brand_id"):
-            brand = await db.brands.find_one({"_id": ObjectId(r["brand_id"])})
-            if brand:
-                rate["brand_name"] = brand["name"]
-        if r.get("agency_id"):
-            agency = await db.agencies.find_one({"_id": ObjectId(r["agency_id"])})
-            if agency:
-                rate["agency_name"] = agency["name"]
-        if r.get("group_id"):
-            group = await db.groups.find_one({"_id": ObjectId(r["group_id"])})
-            if group:
-                rate["group_name"] = group["name"]
-        
-        result.append(rate)
-    
+        result.append(enriched_rate)
+
     return result
 
 async def update_financial_rate(rate_id: str, rate_data: FinancialRateCreate, request: Request):
@@ -3350,7 +3200,7 @@ async def update_financial_rate(rate_id: str, rate_data: FinancialRateCreate, re
     if not ObjectId.is_valid(rate_id):
         raise HTTPException(status_code=400, detail="Invalid rate_id")
 
-    previous = await db.financial_rates.find_one({"_id": ObjectId(rate_id)})
+    previous = await _find_financial_rate_by_id_repo(db, rate_id)
     if not previous:
         raise HTTPException(status_code=404, detail="Rate not found")
     _ensure_doc_scope_access(current_user, previous, detail="No tienes acceso a esta tasa")
@@ -3379,64 +3229,37 @@ async def update_financial_rate(rate_id: str, rate_data: FinancialRateCreate, re
     tiie_monthly = float(rate_data.tiie_rate) if rate_data.tiie_rate is not None else None
     spread_monthly = float(rate_data.spread) if rate_data.spread is not None else None
 
-    await db.financial_rates.update_one({"_id": ObjectId(rate_id)}, {"$set": {
-        "group_id": scope["group_id"],
-        "brand_id": scope["brand_id"],
-        "agency_id": scope["agency_id"],
-        "tiie_rate": tiie_monthly,
-        "spread": spread_monthly,
-        "rate_period": "monthly",
-        "tiie_rate_annual": _monthly_to_annual(tiie_monthly) if tiie_monthly is not None else None,
-        "spread_annual": _monthly_to_annual(spread_monthly) if spread_monthly is not None else None,
-        "grace_days": rate_data.grace_days,
-        "name": rate_name
-    }})
-    rate = await db.financial_rates.find_one({"_id": ObjectId(rate_id)})
+    await _update_financial_rate_by_id_repo(
+        db,
+        rate_id=rate_id,
+        set_fields={
+            "group_id": scope["group_id"],
+            "brand_id": scope["brand_id"],
+            "agency_id": scope["agency_id"],
+            "tiie_rate": tiie_monthly,
+            "spread": spread_monthly,
+            "rate_period": "monthly",
+            "tiie_rate_annual": _monthly_to_annual(tiie_monthly) if tiie_monthly is not None else None,
+            "spread_annual": _monthly_to_annual(spread_monthly) if spread_monthly is not None else None,
+            "grace_days": rate_data.grace_days,
+            "name": rate_name,
+        },
+    )
+
+    rate = await _find_financial_rate_by_id_repo(db, rate_id)
     if not rate:
         raise HTTPException(status_code=404, detail="Rate not found")
-    result = serialize_doc(rate)
-    configured_components = _extract_rate_components_from_doc(rate)
-    result["tiie_rate"] = (
-        round(configured_components["tiie_rate_monthly"], 4)
-        if configured_components["tiie_rate_monthly"] is not None
-        else None
+    result = await _enrich_financial_rate_service(
+        db,
+        rate_doc=rate,
+        serialize_doc=serialize_doc,
+        extract_rate_components_from_doc=_extract_rate_components_from_doc,
+        monthly_to_annual=_monthly_to_annual,
+        resolve_effective_rate_components_for_scope=_resolve_effective_rate_components_for_scope,
+        find_group_by_id=find_group_by_id,
+        find_brand_by_id=find_brand_by_id,
+        find_agency_by_id=find_agency_by_id,
     )
-    result["spread"] = (
-        round(configured_components["spread_monthly"], 4)
-        if configured_components["spread_monthly"] is not None
-        else None
-    )
-    result["total_rate"] = (
-        round((result["tiie_rate"] + result["spread"]), 4)
-        if result["tiie_rate"] is not None and result["spread"] is not None
-        else None
-    )
-    result["rate_period"] = "monthly"
-    result["tiie_rate_annual"] = round(_monthly_to_annual(result["tiie_rate"]), 4) if result["tiie_rate"] is not None else None
-    result["spread_annual"] = round(_monthly_to_annual(result["spread"]), 4) if result["spread"] is not None else None
-    result["total_rate_annual"] = round(_monthly_to_annual(result["total_rate"]), 4) if result["total_rate"] is not None else None
-
-    effective_components = await _resolve_effective_rate_components_for_vehicle({
-        "group_id": rate.get("group_id"),
-        "brand_id": rate.get("brand_id"),
-        "agency_id": rate.get("agency_id"),
-    })
-    result["effective_tiie_rate"] = (
-        round(effective_components["tiie_rate_monthly"], 4)
-        if effective_components["tiie_rate_monthly"] is not None
-        else None
-    )
-    result["effective_spread"] = (
-        round(effective_components["spread_monthly"], 4)
-        if effective_components["spread_monthly"] is not None
-        else None
-    )
-    result["effective_total_rate"] = (
-        round(effective_components["total_rate_monthly"], 4)
-        if effective_components["total_rate_monthly"] is not None
-        else None
-    )
-    result["effective_grace_days"] = int(effective_components["grace_days"])
 
     await log_audit_event(
         request=request,
@@ -3478,11 +3301,11 @@ async def delete_financial_rate(rate_id: str, request: Request):
     if not ObjectId.is_valid(rate_id):
         raise HTTPException(status_code=400, detail="Invalid rate_id")
 
-    previous = await db.financial_rates.find_one({"_id": ObjectId(rate_id)})
+    previous = await _find_financial_rate_by_id_repo(db, rate_id)
     if not previous:
         raise HTTPException(status_code=404, detail="Rate not found")
     _ensure_doc_scope_access(current_user, previous, detail="No tienes acceso a esta tasa")
-    await db.financial_rates.delete_one({"_id": ObjectId(rate_id)})
+    await _delete_financial_rate_by_id_repo(db, rate_id=rate_id)
 
     await log_audit_event(
         request=request,
