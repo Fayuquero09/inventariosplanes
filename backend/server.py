@@ -91,6 +91,13 @@ from services.organization_cleanup_service import (
     summarize_brand_dependencies,
     summarize_group_dependencies,
 )
+from services.pricing_service import (
+    apply_manual_sale_price_override as _apply_manual_sale_price_override_service,
+    is_price_bulletin_active as _is_price_bulletin_active_service,
+    price_item_applies_to_sale as _price_item_applies_to_sale_service,
+    resolve_effective_sale_pricing_for_model as _resolve_effective_sale_pricing_for_model_service,
+    resolve_price_bulletin_for_model as _resolve_price_bulletin_for_model_service,
+)
 from services.sales_service import create_sale_record, list_sales_with_enrichment
 
 # Configure logging
@@ -2668,13 +2675,7 @@ async def _resolve_price_bulletin_scope(
     }
 
 def _is_price_bulletin_active(doc: Dict[str, Any], current_date_ymd: str) -> bool:
-    effective_from = str(doc.get("effective_from") or "").strip()
-    effective_to = str(doc.get("effective_to") or "").strip()
-    if effective_from and current_date_ymd < effective_from:
-        return False
-    if effective_to and current_date_ymd > effective_to:
-        return False
-    return True
+    return _is_price_bulletin_active_service(doc, current_date_ymd)
 
 async def _resolve_price_bulletin_for_model(
     *,
@@ -2685,69 +2686,15 @@ async def _resolve_price_bulletin_for_model(
     version: Optional[str] = None,
     reference_date_ymd: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    normalized_group_id = str(group_id or "").strip()
-    normalized_brand_id = str(brand_id or "").strip()
-    normalized_agency_id = str(agency_id or "").strip()
-    normalized_model = str(model or "").strip()
-    normalized_version = str(version or "").strip() or None
-    if not normalized_group_id or not normalized_brand_id or not normalized_model:
-        return None
-
-    query: Dict[str, Any] = {
-        "group_id": normalized_group_id,
-        "brand_id": normalized_brand_id,
-        "model": normalized_model,
-    }
-
-    if normalized_version:
-        query["version"] = {"$in": [normalized_version, None, ""]}
-    else:
-        query["version"] = {"$in": [None, ""]}
-
-    if normalized_agency_id:
-        query["$or"] = [
-            {"agency_id": normalized_agency_id},
-            {"agency_id": None},
-        ]
-    else:
-        query["agency_id"] = None
-
-    docs = await db.price_bulletins.find(query).sort([
-        ("effective_from", -1),
-        ("updated_at", -1),
-        ("created_at", -1),
-    ]).to_list(200)
-    if not docs:
-        return None
-
-    target_date = reference_date_ymd or datetime.now(timezone.utc).date().isoformat()
-    active_docs = [doc for doc in docs if _is_price_bulletin_active(doc, target_date)]
-    source_docs = active_docs if active_docs else docs
-
-    def pick_by_version_preference(candidates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        if not candidates:
-            return None
-        if normalized_version:
-            for doc in candidates:
-                if str(doc.get("version") or "").strip() == normalized_version:
-                    return doc
-            for doc in candidates:
-                if not str(doc.get("version") or "").strip():
-                    return doc
-        return candidates[0]
-
-    if normalized_agency_id:
-        agency_docs = [doc for doc in source_docs if str(doc.get("agency_id") or "") == normalized_agency_id]
-        agency_pick = pick_by_version_preference(agency_docs)
-        if agency_pick:
-            return agency_pick
-
-        brand_default_docs = [doc for doc in source_docs if not str(doc.get("agency_id") or "").strip()]
-        brand_default_pick = pick_by_version_preference(brand_default_docs)
-        if brand_default_pick:
-            return brand_default_pick
-
-    return pick_by_version_preference(source_docs)
+    return await _resolve_price_bulletin_for_model_service(
+        db,
+        group_id=group_id,
+        brand_id=brand_id,
+        agency_id=agency_id,
+        model=model,
+        version=version,
+        reference_date_ymd=reference_date_ymd,
+    )
 
 async def _resolve_effective_sale_pricing_for_model(
     *,
@@ -2759,82 +2706,27 @@ async def _resolve_effective_sale_pricing_for_model(
     reference_date_ymd: Optional[str] = None,
     fallback_msrp: Optional[float] = None,
 ) -> Dict[str, Any]:
-    fallback_price = _to_non_negative_float(fallback_msrp, 0.0)
-    bulletin = await _resolve_price_bulletin_for_model(
+    return await _resolve_effective_sale_pricing_for_model_service(
+        db,
         group_id=group_id,
         brand_id=brand_id,
         agency_id=agency_id,
         model=model,
         version=version,
         reference_date_ymd=reference_date_ymd,
+        fallback_msrp=fallback_msrp,
+        to_non_negative_float=_to_non_negative_float,
     )
-    transaction_price = fallback_price
-    brand_incentive_amount = 0.0
-    dealer_incentive_amount = 0.0
-    if bulletin:
-        brand_incentive_amount = _to_non_negative_float(bulletin.get("brand_bonus_amount"), 0.0)
-        dealer_incentive_amount = _to_non_negative_float(bulletin.get("dealer_bonus_amount"), 0.0)
-        transaction_price_raw = bulletin.get("transaction_price")
-        if transaction_price_raw is not None and _to_non_negative_float(transaction_price_raw, 0.0) > 0:
-            transaction_price = _to_non_negative_float(transaction_price_raw, 0.0)
-        else:
-            msrp = bulletin.get("msrp")
-            if msrp is not None and _to_non_negative_float(msrp, 0.0) > 0:
-                transaction_price = _to_non_negative_float(msrp, 0.0)
-
-    commission_base_price = transaction_price + brand_incentive_amount
-    effective_revenue = transaction_price + brand_incentive_amount
-    return {
-        "configured_transaction_price": round(_to_non_negative_float(transaction_price, 0.0), 2),
-        "transaction_price": round(_to_non_negative_float(transaction_price, 0.0), 2),
-        "brand_incentive_amount": round(brand_incentive_amount, 2),
-        "dealer_incentive_amount": round(dealer_incentive_amount, 2),
-        "commission_base_price": round(_to_non_negative_float(commission_base_price, 0.0), 2),
-        "effective_revenue": round(_to_non_negative_float(effective_revenue, 0.0), 2),
-        "undocumented_dealer_incentive_amount": 0.0,
-        "price_source": "price_bulletin",
-    }
 
 def _apply_manual_sale_price_override(
     pricing: Dict[str, Any],
     supplied_sale_price: Optional[float],
 ) -> Dict[str, Any]:
-    configured_transaction_price = _to_non_negative_float(
-        pricing.get("configured_transaction_price", pricing.get("transaction_price")),
-        0.0,
+    return _apply_manual_sale_price_override_service(
+        pricing=pricing,
+        supplied_sale_price=supplied_sale_price,
+        to_non_negative_float=_to_non_negative_float,
     )
-    supplied_price = _to_non_negative_float(supplied_sale_price, 0.0)
-    brand_incentive_amount = _to_non_negative_float(pricing.get("brand_incentive_amount"), 0.0)
-    documented_dealer_incentive = _to_non_negative_float(pricing.get("dealer_incentive_amount"), 0.0)
-
-    # Regla operativa:
-    # Si factura/transacción capturada viene menor al precio configurado en Precios,
-    # se asume incentivo dealer no documentado y se usa ese precio menor.
-    if configured_transaction_price > 0 and supplied_price > 0 and supplied_price < configured_transaction_price:
-        transaction_price = supplied_price
-        undocumented_dealer_incentive = round(configured_transaction_price - supplied_price, 2)
-        price_source = "dealer_undocumented_incentive"
-    else:
-        transaction_price = configured_transaction_price if configured_transaction_price > 0 else supplied_price
-        undocumented_dealer_incentive = 0.0
-        price_source = pricing.get("price_source") or "price_bulletin"
-
-    transaction_price = round(_to_non_negative_float(transaction_price, 0.0), 2)
-    dealer_incentive_amount = round(documented_dealer_incentive + undocumented_dealer_incentive, 2)
-    commission_base_price = round(transaction_price + brand_incentive_amount, 2)
-    effective_revenue = round(transaction_price + brand_incentive_amount, 2)
-
-    return {
-        **pricing,
-        "configured_transaction_price": round(configured_transaction_price, 2),
-        "transaction_price": transaction_price,
-        "brand_incentive_amount": round(brand_incentive_amount, 2),
-        "dealer_incentive_amount": dealer_incentive_amount,
-        "undocumented_dealer_incentive_amount": round(undocumented_dealer_incentive, 2),
-        "commission_base_price": commission_base_price,
-        "effective_revenue": effective_revenue,
-        "price_source": price_source,
-    }
 
 async def _resolve_effective_transaction_price_for_model(
     *,
@@ -2864,17 +2756,12 @@ def _price_item_applies_to_sale(
     affected_exact_keys: set[str],
     affected_model_keys: set[str],
 ) -> bool:
-    model_name = str(sale_model or "").strip()
-    if not model_name:
-        return False
-    model_key = model_name.casefold()
-    version_key = str(sale_version or "").strip().casefold()
-    exact_key = f"{model_key}::{version_key}"
-    if exact_key in affected_exact_keys:
-        return True
-    if model_key in affected_model_keys:
-        return True
-    return False
+    return _price_item_applies_to_sale_service(
+        sale_model=sale_model,
+        sale_version=sale_version,
+        affected_exact_keys=affected_exact_keys,
+        affected_model_keys=affected_model_keys,
+    )
 
 async def _reprice_sales_for_price_bulletin(
     *,
