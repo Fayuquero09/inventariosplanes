@@ -38,6 +38,33 @@ from repositories.dashboard_repository import (
     list_global_monthly_closes_by_year,
     upsert_global_monthly_close,
 )
+from repositories.organization_repository import (
+    delete_brand_by_id,
+    delete_group_by_id,
+    find_agency_by_id,
+    find_brand_by_id,
+    find_group_by_id,
+    insert_agency,
+    insert_brand,
+    insert_group,
+    list_agencies,
+    list_brands,
+    list_brands_by_ids,
+    list_groups,
+    update_agency_by_id,
+    update_brand_by_id,
+    update_group_by_id,
+)
+from repositories.user_repository import (
+    create_user,
+    delete_user_by_id,
+    find_user_by_email,
+    find_user_by_id,
+    list_audit_logs,
+    list_users,
+    update_user_by_id,
+    update_user_password_hash,
+)
 from services.commission_service import calculate_commission_from_rules as _calculate_commission_from_rules
 from services.operational_calendar_service import (
     add_months_ym as _add_months_ym,
@@ -1472,12 +1499,12 @@ async def register(user_data: UserCreate, request: Request):
         user_data.agency_id = current_user.get("agency_id")
 
     email = str(user_data.email).strip().lower()
-    existing = await db.users.find_one({"email": email})
+    existing = await find_user_by_email(db, email)
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
     
     if user_data.brand_id:
-        brand = await db.brands.find_one({"_id": ObjectId(user_data.brand_id)})
+        brand = await find_brand_by_id(db, user_data.brand_id)
         if not brand:
             raise HTTPException(status_code=404, detail="Brand not found")
         if user_data.group_id and brand.get("group_id") != user_data.group_id:
@@ -1486,7 +1513,7 @@ async def register(user_data: UserCreate, request: Request):
             user_data.group_id = brand.get("group_id")
 
     if user_data.agency_id:
-        agency = await db.agencies.find_one({"_id": ObjectId(user_data.agency_id)})
+        agency = await find_agency_by_id(db, user_data.agency_id)
         if not agency:
             raise HTTPException(status_code=404, detail="Agency not found")
         if user_data.group_id and agency.get("group_id") != user_data.group_id:
@@ -1523,8 +1550,7 @@ async def register(user_data: UserCreate, request: Request):
         "agency_id": user_data.agency_id,
         "created_at": datetime.now(timezone.utc)
     }
-    result = await db.users.insert_one(user_doc)
-    user_id = str(result.inserted_id)
+    user_id = await create_user(db, user_doc)
 
     await log_audit_event(
         request=request,
@@ -1557,7 +1583,7 @@ async def register(user_data: UserCreate, request: Request):
 
 async def login(user_data: UserLogin, response: Response):
     email = str(user_data.email).strip().lower()
-    user = await db.users.find_one({"email": email})
+    user = await find_user_by_email(db, email)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
@@ -1600,14 +1626,11 @@ async def reset_password(payload: PasswordResetRequest):
     if len(payload.new_password or "") < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
 
-    user = await db.users.find_one({"email": email})
+    user = await find_user_by_email(db, email)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    await db.users.update_one(
-        {"_id": user["_id"]},
-        {"$set": {"password_hash": hash_password(payload.new_password)}}
-    )
+    await update_user_password_hash(db, str(user["_id"]), hash_password(payload.new_password))
 
     return {"message": "Password updated successfully"}
 
@@ -1640,7 +1663,7 @@ async def google_auth(request: Request, response: Response):
         name = google_user.get("name", "")
         
         # Check if user exists
-        user = await db.users.find_one({"email": email})
+        user = await find_user_by_email(db, email)
         
         if not user:
             # Create new user
@@ -1656,10 +1679,9 @@ async def google_auth(request: Request, response: Response):
                 "google_id": google_user.get("sub"),
                 "created_at": datetime.now(timezone.utc)
             }
-            result = await db.users.insert_one(user_doc)
-            user_id = str(result.inserted_id)
+            user_id = await create_user(db, user_doc)
             user = user_doc
-            user["_id"] = result.inserted_id
+            user["_id"] = ObjectId(user_id)
         else:
             user_id = str(user["_id"])
         
@@ -1701,7 +1723,7 @@ async def get_users(request: Request):
             return []
         query["agency_id"] = current_user["agency_id"]
     
-    users = await db.users.find(query, {"password_hash": 0}).to_list(1000)
+    users = await list_users(db, query, include_password_hash=False, limit=1000)
     return [serialize_doc(u) for u in users]
 
 async def update_user(user_id: str, request: Request):
@@ -1729,7 +1751,7 @@ async def update_user(user_id: str, request: Request):
 
     if not ObjectId.is_valid(user_id):
         raise HTTPException(status_code=400, detail="Invalid user_id")
-    existing_user = await db.users.find_one({"_id": ObjectId(user_id)}, {"password_hash": 0})
+    existing_user = await find_user_by_id(db, user_id, include_password_hash=False)
     if not existing_user:
         raise HTTPException(status_code=404, detail="User not found")
     if str(existing_user.get("_id")) == str(current_user.get("id")) and actor_role != UserRole.APP_ADMIN:
@@ -1777,8 +1799,8 @@ async def update_user(user_id: str, request: Request):
         update_data["password_hash"] = hash_password(new_password)
 
     if update_data:
-        await db.users.update_one({"_id": ObjectId(user_id)}, {"$set": update_data})
-    user = await db.users.find_one({"_id": ObjectId(user_id)}, {"password_hash": 0})
+        await update_user_by_id(db, user_id, update_data)
+    user = await find_user_by_id(db, user_id, include_password_hash=False)
 
     audit_changes = {k: v for k, v in update_data.items() if k != "password_hash"}
     if "password_hash" in update_data:
@@ -1810,7 +1832,7 @@ async def delete_user(user_id: str, request: Request):
     if not ObjectId.is_valid(user_id):
         raise HTTPException(status_code=400, detail="Invalid user_id")
 
-    existing_user = await db.users.find_one({"_id": ObjectId(user_id)}, {"password_hash": 0})
+    existing_user = await find_user_by_id(db, user_id, include_password_hash=False)
     if not existing_user:
         raise HTTPException(status_code=404, detail="User not found")
     if existing_user.get("role") == UserRole.APP_ADMIN and actor_role != UserRole.APP_ADMIN:
@@ -1836,7 +1858,7 @@ async def delete_user(user_id: str, request: Request):
         if existing_user.get("role") not in assignable_roles:
             raise HTTPException(status_code=403, detail="Cannot delete this user role from your dealer scope")
 
-    await db.users.delete_one({"_id": ObjectId(user_id)})
+    await delete_user_by_id(db, user_id)
 
     await log_audit_event(
         request=request,
@@ -1895,7 +1917,7 @@ async def get_audit_logs(
     if actor_id:
         query["actor_id"] = actor_id
 
-    logs = await db.audit_logs.find(query).sort("created_at", -1).to_list(safe_limit)
+    logs = await list_audit_logs(db, query, limit=safe_limit)
     return [serialize_doc(item) for item in logs]
 
 async def get_sellers(request: Request, agency_id: Optional[str] = None, brand_id: Optional[str] = None, group_id: Optional[str] = None):
@@ -1917,14 +1939,14 @@ async def get_sellers(request: Request, agency_id: Optional[str] = None, brand_i
     if agency_id:
         query["agency_id"] = agency_id
     
-    sellers = await db.users.find(query, {"password_hash": 0}).to_list(1000)
+    sellers = await list_users(db, query, include_password_hash=False, limit=1000)
     
     # Enrich with agency name
     result = []
     for seller in sellers:
         s = serialize_doc(seller)
         if seller.get("agency_id"):
-            agency = await db.agencies.find_one({"_id": ObjectId(seller["agency_id"])})
+            agency = await find_agency_by_id(db, seller["agency_id"])
             if agency:
                 s["agency_name"] = agency["name"]
         result.append(s)
@@ -1943,15 +1965,15 @@ async def create_group(group_data: GroupCreate, request: Request):
         "description": group_data.description,
         "created_at": datetime.now(timezone.utc)
     }
-    result = await db.groups.insert_one(group_doc)
-    group_doc["id"] = str(result.inserted_id)
+    group_id = await insert_group(db, group_doc)
+    group_doc["id"] = group_id
     await log_audit_event(
         request=request,
         current_user=current_user,
         action="create_group",
         entity_type="group",
-        entity_id=str(result.inserted_id),
-        group_id=str(result.inserted_id),
+        entity_id=group_id,
+        group_id=group_id,
         details={"name": group_data.name, "description": group_data.description},
     )
     return serialize_doc(group_doc)
@@ -1969,7 +1991,7 @@ async def get_groups(request: Request):
             # Si no tiene grupo asignado, no ve ninguno
             return []
     
-    groups = await db.groups.find(query).to_list(1000)
+    groups = await list_groups(db, query, limit=1000)
     return [serialize_doc(g) for g in groups]
 
 async def get_group(group_id: str, request: Request):
@@ -1980,7 +2002,7 @@ async def get_group(group_id: str, request: Request):
         if current_user.get("group_id") != group_id:
             raise HTTPException(status_code=403, detail="No tienes acceso a este grupo")
     
-    group = await db.groups.find_one({"_id": ObjectId(group_id)})
+    group = await find_group_by_id(db, group_id)
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
     return serialize_doc(group)
@@ -1990,9 +2012,9 @@ async def update_group(group_id: str, group_data: GroupCreate, request: Request)
     if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    previous = await db.groups.find_one({"_id": ObjectId(group_id)})
-    await db.groups.update_one({"_id": ObjectId(group_id)}, {"$set": {"name": group_data.name, "description": group_data.description}})
-    group = await db.groups.find_one({"_id": ObjectId(group_id)})
+    previous = await find_group_by_id(db, group_id)
+    await update_group_by_id(db, group_id, {"name": group_data.name, "description": group_data.description})
+    group = await find_group_by_id(db, group_id)
     await log_audit_event(
         request=request,
         current_user=current_user,
@@ -2015,7 +2037,7 @@ async def delete_group(group_id: str, request: Request, cascade: bool = Query(Fa
     if not ObjectId.is_valid(group_id):
         raise HTTPException(status_code=400, detail="Invalid group_id")
 
-    group = await db.groups.find_one({"_id": ObjectId(group_id)})
+    group = await find_group_by_id(db, group_id)
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
 
@@ -2107,7 +2129,7 @@ async def delete_group(group_id: str, request: Request, cascade: bool = Query(Fa
         deleted_counts["agencies"] = (await db.agencies.delete_many({"$or": agency_filters})).deleted_count
         deleted_counts["brands"] = (await db.brands.delete_many({"group_id": group_id})).deleted_count
 
-    deleted_counts["groups"] = (await db.groups.delete_one({"_id": ObjectId(group_id)})).deleted_count
+    deleted_counts["groups"] = await delete_group_by_id(db, group_id)
 
     await log_audit_event(
         request=request,
@@ -2139,7 +2161,7 @@ async def create_brand(brand_data: BrandCreate, request: Request):
     if not ObjectId.is_valid(brand_data.group_id):
         raise HTTPException(status_code=400, detail="Invalid group_id")
 
-    group = await db.groups.find_one({"_id": ObjectId(brand_data.group_id)})
+    group = await find_group_by_id(db, brand_data.group_id)
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
 
@@ -2154,14 +2176,14 @@ async def create_brand(brand_data: BrandCreate, request: Request):
         "logo_url": brand_data.logo_url,
         "created_at": datetime.now(timezone.utc)
     }
-    result = await db.brands.insert_one(brand_doc)
-    brand_doc["id"] = str(result.inserted_id)
+    brand_id = await insert_brand(db, brand_doc)
+    brand_doc["id"] = brand_id
     await log_audit_event(
         request=request,
         current_user=current_user,
         action="create_brand",
         entity_type="brand",
-        entity_id=str(result.inserted_id),
+        entity_id=brand_id,
         group_id=brand_data.group_id,
         details={"name": brand_data.name},
     )
@@ -2190,7 +2212,7 @@ async def get_brands(request: Request, group_id: Optional[str] = None):
     if group_id:
         query["group_id"] = group_id
     
-    brands = await db.brands.find(query).to_list(1000)
+    brands = await list_brands(db, query, limit=1000)
     output: List[Dict[str, Any]] = []
     for brand in brands:
         serialized = serialize_doc(brand)
@@ -2211,11 +2233,11 @@ async def update_brand(brand_id: str, brand_data: BrandCreate, request: Request)
     if not ObjectId.is_valid(brand_data.group_id):
         raise HTTPException(status_code=400, detail="Invalid group_id")
 
-    brand = await db.brands.find_one({"_id": ObjectId(brand_id)})
+    brand = await find_brand_by_id(db, brand_id)
     if not brand:
         raise HTTPException(status_code=404, detail="Brand not found")
 
-    target_group = await db.groups.find_one({"_id": ObjectId(brand_data.group_id)})
+    target_group = await find_group_by_id(db, brand_data.group_id)
     if not target_group:
         raise HTTPException(status_code=404, detail="Group not found")
 
@@ -2230,11 +2252,12 @@ async def update_brand(brand_id: str, brand_data: BrandCreate, request: Request)
             raise HTTPException(status_code=403, detail="No tienes acceso para modificar esta marca")
     
     previous = brand
-    await db.brands.update_one(
-        {"_id": ObjectId(brand_id)},
-        {"$set": {"name": brand_data.name, "group_id": brand_data.group_id, "logo_url": brand_data.logo_url}}
+    await update_brand_by_id(
+        db,
+        brand_id,
+        {"name": brand_data.name, "group_id": brand_data.group_id, "logo_url": brand_data.logo_url},
     )
-    brand = await db.brands.find_one({"_id": ObjectId(brand_id)})
+    brand = await find_brand_by_id(db, brand_id)
     await log_audit_event(
         request=request,
         current_user=current_user,
@@ -2270,7 +2293,7 @@ async def delete_brand(brand_id: str, request: Request, cascade: bool = Query(Fa
     if not ObjectId.is_valid(brand_id):
         raise HTTPException(status_code=400, detail="Invalid brand_id")
 
-    brand = await db.brands.find_one({"_id": ObjectId(brand_id)})
+    brand = await find_brand_by_id(db, brand_id)
     if not brand:
         raise HTTPException(status_code=404, detail="Brand not found")
 
@@ -2351,7 +2374,7 @@ async def delete_brand(brand_id: str, request: Request, cascade: bool = Query(Fa
         deleted_counts["users"] = (await db.users.delete_many({"$or": user_filters})).deleted_count
         deleted_counts["agencies"] = (await db.agencies.delete_many({"brand_id": brand_id})).deleted_count
 
-    deleted_counts["brands"] = (await db.brands.delete_one({"_id": ObjectId(brand_id)})).deleted_count
+    deleted_counts["brands"] = await delete_brand_by_id(db, brand_id)
 
     await log_audit_event(
         request=request,
@@ -2382,7 +2405,7 @@ async def create_agency(agency_data: AgencyCreate, request: Request):
         raise HTTPException(status_code=403, detail="Not authorized")
     
     # Get brand to link group_id
-    brand = await db.brands.find_one({"_id": ObjectId(agency_data.brand_id)})
+    brand = await find_brand_by_id(db, agency_data.brand_id)
     if not brand:
         raise HTTPException(status_code=404, detail="Brand not found")
 
@@ -2429,17 +2452,17 @@ async def create_agency(agency_data: AgencyCreate, request: Request):
         "longitude": agency_data.longitude,
         "created_at": datetime.now(timezone.utc)
     }
-    result = await db.agencies.insert_one(agency_doc)
-    agency_doc["id"] = str(result.inserted_id)
+    agency_id = await insert_agency(db, agency_doc)
+    agency_doc["id"] = agency_id
     await log_audit_event(
         request=request,
         current_user=current_user,
         action="create_agency",
         entity_type="agency",
-        entity_id=str(result.inserted_id),
+        entity_id=agency_id,
         group_id=brand.get("group_id"),
         brand_id=agency_data.brand_id,
-        agency_id=str(result.inserted_id),
+        agency_id=agency_id,
         details={
             "name": agency_data.name,
             "city": final_city,
@@ -2472,11 +2495,11 @@ async def get_agencies(request: Request, brand_id: Optional[str] = None, group_i
     if brand_id:
         query["brand_id"] = brand_id
     
-    agencies = await db.agencies.find(query).to_list(1000)
+    agencies = await list_agencies(db, query, limit=1000)
     
     # Enrich with brand names
     brand_ids = list(set(a.get("brand_id") for a in agencies if a.get("brand_id")))
-    brands = await db.brands.find({"_id": {"$in": [ObjectId(b) for b in brand_ids]}}).to_list(1000)
+    brands = await list_brands_by_ids(db, brand_ids, limit=1000)
     brand_map = {str(b["_id"]): b["name"] for b in brands}
     
     result = []
@@ -2496,7 +2519,7 @@ async def update_agency(agency_id: str, agency_data: AgencyCreate, request: Requ
     if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN, UserRole.BRAND_ADMIN, UserRole.AGENCY_ADMIN]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    previous = await db.agencies.find_one({"_id": ObjectId(agency_id)})
+    previous = await find_agency_by_id(db, agency_id)
     if not previous:
         raise HTTPException(status_code=404, detail="Agency not found")
     _ensure_doc_scope_access(current_user, previous, detail="No tienes acceso a esta agencia")
@@ -2530,23 +2553,27 @@ async def update_agency(agency_id: str, agency_data: AgencyCreate, request: Requ
     longitude = _merge_optional_float(agency_data.longitude, previous.get("longitude"))
     google_place_id = _merge_optional_text(agency_data.google_place_id, previous.get("google_place_id"))
 
-    await db.agencies.update_one({"_id": ObjectId(agency_id)}, {"$set": {
-        "name": agency_data.name,
-        "address": address,
-        "city": final_city,
-        "postal_code": final_postal_code,
-        "street": street,
-        "exterior_number": exterior_number,
-        "interior_number": interior_number,
-        "neighborhood": neighborhood,
-        "municipality": municipality,
-        "state": state,
-        "country": country,
-        "google_place_id": google_place_id,
-        "latitude": latitude,
-        "longitude": longitude
-    }})
-    agency = await db.agencies.find_one({"_id": ObjectId(agency_id)})
+    await update_agency_by_id(
+        db,
+        agency_id,
+        {
+            "name": agency_data.name,
+            "address": address,
+            "city": final_city,
+            "postal_code": final_postal_code,
+            "street": street,
+            "exterior_number": exterior_number,
+            "interior_number": interior_number,
+            "neighborhood": neighborhood,
+            "municipality": municipality,
+            "state": state,
+            "country": country,
+            "google_place_id": google_place_id,
+            "latitude": latitude,
+            "longitude": longitude,
+        },
+    )
+    agency = await find_agency_by_id(db, agency_id)
     await log_audit_event(
         request=request,
         current_user=current_user,
