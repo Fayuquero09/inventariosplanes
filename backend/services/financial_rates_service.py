@@ -1,5 +1,7 @@
 from typing import Any, Awaitable, Callable, Dict, Optional
 
+from fastapi import HTTPException
+
 
 def annual_to_monthly(rate_annual_pct: float) -> float:
     return float(rate_annual_pct) / 12.0
@@ -261,3 +263,134 @@ async def enrich_financial_rate(
             result["agency_name"] = agency.get("name")
 
     return result
+
+
+def build_financial_rate_record(
+    *,
+    scope: Dict[str, Optional[str]],
+    tiie_rate: Optional[float],
+    spread: Optional[float],
+    grace_days: int,
+    rate_name: str,
+    now: Any,
+    monthly_to_annual: Callable[[float], float],
+) -> Dict[str, Any]:
+    is_group_level_rate = scope.get("brand_id") is None and scope.get("agency_id") is None
+    if is_group_level_rate and (tiie_rate is None or spread is None):
+        raise HTTPException(
+            status_code=400,
+            detail="Group-level rate requires tiie_rate and spread; brand/agency rates can inherit monthly rates.",
+        )
+
+    tiie_monthly = float(tiie_rate) if tiie_rate is not None else None
+    spread_monthly = float(spread) if spread is not None else None
+    total_rate = (tiie_monthly + spread_monthly) if tiie_monthly is not None and spread_monthly is not None else None
+    rate_doc = {
+        "group_id": scope.get("group_id"),
+        "brand_id": scope.get("brand_id"),
+        "agency_id": scope.get("agency_id"),
+        "tiie_rate": tiie_monthly,
+        "spread": spread_monthly,
+        "rate_period": "monthly",
+        "tiie_rate_annual": monthly_to_annual(tiie_monthly) if tiie_monthly is not None else None,
+        "spread_annual": monthly_to_annual(spread_monthly) if spread_monthly is not None else None,
+        "grace_days": grace_days,
+        "name": rate_name,
+        "created_at": now,
+    }
+    return {
+        "rate_doc": rate_doc,
+        "tiie_monthly": tiie_monthly,
+        "spread_monthly": spread_monthly,
+        "total_rate": total_rate,
+    }
+
+
+def build_financial_rate_update_fields(
+    *,
+    scope: Dict[str, Optional[str]],
+    tiie_rate: Optional[float],
+    spread: Optional[float],
+    grace_days: int,
+    rate_name: str,
+    monthly_to_annual: Callable[[float], float],
+) -> Dict[str, Any]:
+    is_group_level_rate = scope.get("brand_id") is None and scope.get("agency_id") is None
+    if is_group_level_rate and (tiie_rate is None or spread is None):
+        raise HTTPException(
+            status_code=400,
+            detail="Group-level rate requires tiie_rate and spread; brand/agency rates can inherit monthly rates.",
+        )
+
+    tiie_monthly = float(tiie_rate) if tiie_rate is not None else None
+    spread_monthly = float(spread) if spread is not None else None
+    update_fields = {
+        "group_id": scope.get("group_id"),
+        "brand_id": scope.get("brand_id"),
+        "agency_id": scope.get("agency_id"),
+        "tiie_rate": tiie_monthly,
+        "spread": spread_monthly,
+        "rate_period": "monthly",
+        "tiie_rate_annual": monthly_to_annual(tiie_monthly) if tiie_monthly is not None else None,
+        "spread_annual": monthly_to_annual(spread_monthly) if spread_monthly is not None else None,
+        "grace_days": grace_days,
+        "name": rate_name,
+    }
+    return {
+        "update_fields": update_fields,
+        "tiie_monthly": tiie_monthly,
+        "spread_monthly": spread_monthly,
+    }
+
+
+def plan_group_default_rate_docs(
+    *,
+    group_id: str,
+    group_name: str,
+    group_base_rate: Dict[str, Any],
+    brands: list[Dict[str, Any]],
+    existing_brand_ids: set[str],
+    now: Any,
+    extract_rate_components_from_doc: Callable[[Optional[Dict[str, Any]]], Dict[str, Optional[float]]],
+    monthly_to_annual: Callable[[float], float],
+) -> Dict[str, Any]:
+    base_components = extract_rate_components_from_doc(group_base_rate)
+    base_tiie = base_components["tiie_rate_monthly"]
+    base_spread = base_components["spread_monthly"]
+    if base_tiie is None or base_spread is None:
+        raise HTTPException(
+            status_code=400,
+            detail="La tasa general del grupo no tiene TIIE/Spread configurados.",
+        )
+
+    docs_to_insert = []
+    skipped_count = 0
+    for brand in brands:
+        brand_id = str(brand.get("_id"))
+        if brand_id in existing_brand_ids:
+            skipped_count += 1
+            continue
+        brand_name = str(brand.get("name") or "Marca").strip() or "Marca"
+        docs_to_insert.append(
+            {
+                "group_id": group_id,
+                "brand_id": brand_id,
+                "agency_id": None,
+                "tiie_rate": base_tiie,
+                "spread": base_spread,
+                "rate_period": "monthly",
+                "tiie_rate_annual": monthly_to_annual(base_tiie),
+                "spread_annual": monthly_to_annual(base_spread),
+                "grace_days": int(group_base_rate.get("grace_days") or 0),
+                "name": f"Tasa {group_name} - {brand_name}",
+                "created_at": now,
+            }
+        )
+
+    return {
+        "docs_to_insert": docs_to_insert,
+        "skipped_count": skipped_count,
+        "base_tiie": base_tiie,
+        "base_spread": base_spread,
+        "base_grace_days": int(group_base_rate.get("grace_days") or 0),
+    }

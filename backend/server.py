@@ -102,10 +102,13 @@ from services.commission_calculation_service import (
     calculate_commission as _calculate_commission_service,
 )
 from services.financial_rates_service import (
+    build_financial_rate_record as _build_financial_rate_record_service,
+    build_financial_rate_update_fields as _build_financial_rate_update_fields_service,
     build_default_financial_rate_name as _build_default_financial_rate_name_service,
     enrich_financial_rate as _enrich_financial_rate_service,
     extract_rate_components_from_doc as _extract_rate_components_from_doc_service,
     monthly_to_annual as _monthly_to_annual_service,
+    plan_group_default_rate_docs as _plan_group_default_rate_docs_service,
     resolve_effective_rate_components as _resolve_effective_rate_components_service,
 )
 from services.dashboard_service import (
@@ -3023,36 +3026,22 @@ async def create_financial_rate(rate_data: FinancialRateCreate, request: Request
             agency_id=scope["agency_id"],
         )
 
-    is_group_level_rate = scope["brand_id"] is None and scope["agency_id"] is None
-    if is_group_level_rate and (rate_data.tiie_rate is None or rate_data.spread is None):
-        raise HTTPException(
-            status_code=400,
-            detail="Group-level rate requires tiie_rate and spread; brand/agency rates can inherit monthly rates.",
-        )
+    financial_rate_payload = _build_financial_rate_record_service(
+        scope=scope,
+        tiie_rate=rate_data.tiie_rate,
+        spread=rate_data.spread,
+        grace_days=rate_data.grace_days,
+        rate_name=rate_name,
+        now=datetime.now(timezone.utc),
+        monthly_to_annual=_monthly_to_annual,
+    )
+    rate_doc = financial_rate_payload["rate_doc"]
+    tiie_monthly = financial_rate_payload["tiie_monthly"]
+    spread_monthly = financial_rate_payload["spread_monthly"]
 
-    tiie_monthly = float(rate_data.tiie_rate) if rate_data.tiie_rate is not None else None
-    spread_monthly = float(rate_data.spread) if rate_data.spread is not None else None
-
-    rate_doc = {
-        "group_id": scope["group_id"],
-        "brand_id": scope["brand_id"],
-        "agency_id": scope["agency_id"],
-        "tiie_rate": tiie_monthly,
-        "spread": spread_monthly,
-        "rate_period": "monthly",
-        "tiie_rate_annual": _monthly_to_annual(tiie_monthly) if tiie_monthly is not None else None,
-        "spread_annual": _monthly_to_annual(spread_monthly) if spread_monthly is not None else None,
-        "grace_days": rate_data.grace_days,
-        "name": rate_name,
-        "created_at": datetime.now(timezone.utc)
-    }
     created_rate_id = await _insert_financial_rate_repo(db, rate_doc)
     rate_doc["id"] = created_rate_id
-    rate_doc["total_rate"] = (
-        (tiie_monthly + spread_monthly)
-        if tiie_monthly is not None and spread_monthly is not None
-        else None
-    )
+    rate_doc["total_rate"] = financial_rate_payload["total_rate"]
 
     await log_audit_event(
         request=request,
@@ -3103,15 +3092,6 @@ async def apply_group_default_financial_rate(
             detail="Primero crea una tasa general de grupo para poder aplicarla a marcas.",
         )
 
-    base_components = _extract_rate_components_from_doc(group_base_rate)
-    base_tiie = base_components["tiie_rate_monthly"]
-    base_spread = base_components["spread_monthly"]
-    if base_tiie is None or base_spread is None:
-        raise HTTPException(
-            status_code=400,
-            detail="La tasa general del grupo no tiene TIIE/Spread configurados.",
-        )
-
     brands = await _list_brands_for_group_repo(db, group_id=group_id, limit=1000)
     if not brands:
         return {
@@ -3135,28 +3115,21 @@ async def apply_group_default_financial_rate(
     group_doc = await find_group_by_id(db, group_id)
     group_name = str(group_doc.get("name") or "Grupo") if group_doc else "Grupo"
 
-    now = datetime.now(timezone.utc)
-    docs_to_insert = []
-    skipped_count = 0
-    for brand in brands:
-        brand_id = str(brand["_id"])
-        if brand_id in existing_brand_ids:
-            skipped_count += 1
-            continue
-        brand_name = str(brand.get("name") or "Marca").strip() or "Marca"
-        docs_to_insert.append({
-            "group_id": group_id,
-            "brand_id": brand_id,
-            "agency_id": None,
-            "tiie_rate": base_tiie,
-            "spread": base_spread,
-            "rate_period": "monthly",
-            "tiie_rate_annual": _monthly_to_annual(base_tiie),
-            "spread_annual": _monthly_to_annual(base_spread),
-            "grace_days": int(group_base_rate.get("grace_days") or 0),
-            "name": f"Tasa {group_name} - {brand_name}",
-            "created_at": now,
-        })
+    planned_defaults = _plan_group_default_rate_docs_service(
+        group_id=group_id,
+        group_name=group_name,
+        group_base_rate=group_base_rate,
+        brands=brands,
+        existing_brand_ids=existing_brand_ids,
+        now=datetime.now(timezone.utc),
+        extract_rate_components_from_doc=_extract_rate_components_from_doc,
+        monthly_to_annual=_monthly_to_annual,
+    )
+    docs_to_insert = planned_defaults["docs_to_insert"]
+    skipped_count = planned_defaults["skipped_count"]
+    base_tiie = planned_defaults["base_tiie"]
+    base_spread = planned_defaults["base_spread"]
+    base_grace_days = planned_defaults["base_grace_days"]
 
     created_count = 0
     if docs_to_insert:
@@ -3174,7 +3147,7 @@ async def apply_group_default_financial_rate(
             "group_base_rate_name": group_base_rate.get("name"),
             "base_tiie_rate": base_tiie,
             "base_spread": base_spread,
-            "base_grace_days": int(group_base_rate.get("grace_days") or 0),
+            "base_grace_days": base_grace_days,
             "created_count": created_count,
             "skipped_count": skipped_count,
         },
@@ -3253,31 +3226,19 @@ async def update_financial_rate(rate_id: str, rate_data: FinancialRateCreate, re
             agency_id=scope["agency_id"],
         )
 
-    is_group_level_rate = scope["brand_id"] is None and scope["agency_id"] is None
-    if is_group_level_rate and (rate_data.tiie_rate is None or rate_data.spread is None):
-        raise HTTPException(
-            status_code=400,
-            detail="Group-level rate requires tiie_rate and spread; brand/agency rates can inherit monthly rates.",
-        )
-
-    tiie_monthly = float(rate_data.tiie_rate) if rate_data.tiie_rate is not None else None
-    spread_monthly = float(rate_data.spread) if rate_data.spread is not None else None
+    update_payload = _build_financial_rate_update_fields_service(
+        scope=scope,
+        tiie_rate=rate_data.tiie_rate,
+        spread=rate_data.spread,
+        grace_days=rate_data.grace_days,
+        rate_name=rate_name,
+        monthly_to_annual=_monthly_to_annual,
+    )
 
     await _update_financial_rate_by_id_repo(
         db,
         rate_id=rate_id,
-        set_fields={
-            "group_id": scope["group_id"],
-            "brand_id": scope["brand_id"],
-            "agency_id": scope["agency_id"],
-            "tiie_rate": tiie_monthly,
-            "spread": spread_monthly,
-            "rate_period": "monthly",
-            "tiie_rate_annual": _monthly_to_annual(tiie_monthly) if tiie_monthly is not None else None,
-            "spread_annual": _monthly_to_annual(spread_monthly) if spread_monthly is not None else None,
-            "grace_days": rate_data.grace_days,
-            "name": rate_name,
-        },
+        set_fields=update_payload["update_fields"],
     )
 
     rate = await _find_financial_rate_by_id_repo(db, rate_id)
