@@ -73,6 +73,15 @@ from services.operational_calendar_service import (
     mexico_lft_holidays_by_month as _mexico_lft_holidays_by_month,
     resolve_effective_objective_units as _resolve_effective_objective_units,
 )
+from services.organization_cleanup_service import (
+    build_brand_delete_context,
+    build_group_delete_context,
+    execute_brand_cascade_delete,
+    execute_group_cascade_delete,
+    format_dependency_messages,
+    summarize_brand_dependencies,
+    summarize_group_dependencies,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -2041,64 +2050,9 @@ async def delete_group(group_id: str, request: Request, cascade: bool = Query(Fa
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
 
-    brand_docs = await db.brands.find({"group_id": group_id}, {"_id": 1}).to_list(10000)
-    brand_ids = [str(b["_id"]) for b in brand_docs]
-
-    agency_filters = [{"group_id": group_id}]
-    if brand_ids:
-        agency_filters.append({"brand_id": {"$in": brand_ids}})
-    agency_docs = await db.agencies.find({"$or": agency_filters}, {"_id": 1}).to_list(10000)
-    agency_ids = [str(a["_id"]) for a in agency_docs]
-
-    user_filters = [{"group_id": group_id}]
-    if brand_ids:
-        user_filters.append({"brand_id": {"$in": brand_ids}})
-    if agency_ids:
-        user_filters.append({"agency_id": {"$in": agency_ids}})
-    user_docs = await db.users.find({"$or": user_filters}, {"_id": 1}).to_list(10000)
-    user_ids = [str(u["_id"]) for u in user_docs]
-
-    vehicle_filters = [{"group_id": group_id}]
-    if brand_ids:
-        vehicle_filters.append({"brand_id": {"$in": brand_ids}})
-    if agency_ids:
-        vehicle_filters.append({"agency_id": {"$in": agency_ids}})
-    vehicle_docs = await db.vehicles.find({"$or": vehicle_filters}, {"_id": 1}).to_list(10000)
-    vehicle_ids = [str(v["_id"]) for v in vehicle_docs]
-
-    rates_filters = [{"group_id": group_id}]
-    if brand_ids:
-        rates_filters.append({"brand_id": {"$in": brand_ids}})
-    if agency_ids:
-        rates_filters.append({"agency_id": {"$in": agency_ids}})
-
-    objectives_filters = [{"group_id": group_id}]
-    if brand_ids:
-        objectives_filters.append({"brand_id": {"$in": brand_ids}})
-    if agency_ids:
-        objectives_filters.append({"agency_id": {"$in": agency_ids}})
-    if user_ids:
-        objectives_filters.append({"seller_id": {"$in": user_ids}})
-
-    sales_filters = []
-    if vehicle_ids:
-        sales_filters.append({"vehicle_id": {"$in": vehicle_ids}})
-    if user_ids:
-        sales_filters.append({"seller_id": {"$in": user_ids}})
-    if agency_ids:
-        sales_filters.append({"agency_id": {"$in": agency_ids}})
-
-    dependency_counts = {
-        "marcas": len(brand_ids),
-        "agencias": len(agency_ids),
-        "usuarios": len(user_ids),
-        "tasas financieras": await db.financial_rates.count_documents({"$or": rates_filters}),
-        "objetivos": await db.sales_objectives.count_documents({"$or": objectives_filters}),
-        "vehiculos": len(vehicle_ids),
-        "ventas": await db.sales.count_documents({"$or": sales_filters}) if sales_filters else 0,
-        "reglas de comision": await db.commission_rules.count_documents({"agency_id": {"$in": agency_ids}}) if agency_ids else 0,
-    }
-    dependencies = [f"{count} {name}" for name, count in dependency_counts.items() if count > 0]
+    context = await build_group_delete_context(db, group_id)
+    dependency_counts = await summarize_group_dependencies(db, context)
+    dependencies = format_dependency_messages(dependency_counts)
     if dependencies and not cascade:
         raise HTTPException(
             status_code=409,
@@ -2118,16 +2072,7 @@ async def delete_group(group_id: str, request: Request, cascade: bool = Query(Fa
     }
 
     if cascade:
-        if sales_filters:
-            deleted_counts["sales"] = (await db.sales.delete_many({"$or": sales_filters})).deleted_count
-        if agency_ids:
-            deleted_counts["commission_rules"] = (await db.commission_rules.delete_many({"agency_id": {"$in": agency_ids}})).deleted_count
-        deleted_counts["sales_objectives"] = (await db.sales_objectives.delete_many({"$or": objectives_filters})).deleted_count
-        deleted_counts["financial_rates"] = (await db.financial_rates.delete_many({"$or": rates_filters})).deleted_count
-        deleted_counts["vehicles"] = (await db.vehicles.delete_many({"$or": vehicle_filters})).deleted_count
-        deleted_counts["users"] = (await db.users.delete_many({"$or": user_filters})).deleted_count
-        deleted_counts["agencies"] = (await db.agencies.delete_many({"$or": agency_filters})).deleted_count
-        deleted_counts["brands"] = (await db.brands.delete_many({"group_id": group_id})).deleted_count
+        deleted_counts.update(await execute_group_cascade_delete(db, context))
 
     deleted_counts["groups"] = await delete_group_by_id(db, group_id)
 
@@ -2303,49 +2248,9 @@ async def delete_brand(brand_id: str, request: Request, cascade: bool = Query(Fa
             raise HTTPException(status_code=403, detail="No tienes acceso para borrar esta marca")
 
     brand_group_id = str(brand.get("group_id") or "")
-    agencies = await db.agencies.find({"brand_id": brand_id}, {"_id": 1}).to_list(10000)
-    agency_ids = [str(a["_id"]) for a in agencies]
-
-    user_filters = [{"brand_id": brand_id}]
-    if agency_ids:
-        user_filters.append({"agency_id": {"$in": agency_ids}})
-    user_docs = await db.users.find({"$or": user_filters}, {"_id": 1}).to_list(10000)
-    user_ids = [str(u["_id"]) for u in user_docs]
-
-    vehicle_filters = [{"brand_id": brand_id}]
-    if agency_ids:
-        vehicle_filters.append({"agency_id": {"$in": agency_ids}})
-    vehicle_docs = await db.vehicles.find({"$or": vehicle_filters}, {"_id": 1}).to_list(10000)
-    vehicle_ids = [str(v["_id"]) for v in vehicle_docs]
-
-    rates_filters = [{"brand_id": brand_id}]
-    if agency_ids:
-        rates_filters.append({"agency_id": {"$in": agency_ids}})
-
-    objectives_filters = [{"brand_id": brand_id}]
-    if agency_ids:
-        objectives_filters.append({"agency_id": {"$in": agency_ids}})
-    if user_ids:
-        objectives_filters.append({"seller_id": {"$in": user_ids}})
-
-    sales_filters = []
-    if vehicle_ids:
-        sales_filters.append({"vehicle_id": {"$in": vehicle_ids}})
-    if user_ids:
-        sales_filters.append({"seller_id": {"$in": user_ids}})
-    if agency_ids:
-        sales_filters.append({"agency_id": {"$in": agency_ids}})
-
-    dependency_counts = {
-        "agencias": len(agency_ids),
-        "usuarios": len(user_ids),
-        "tasas financieras": await db.financial_rates.count_documents({"$or": rates_filters}),
-        "objetivos": await db.sales_objectives.count_documents({"$or": objectives_filters}),
-        "vehiculos": len(vehicle_ids),
-        "ventas": await db.sales.count_documents({"$or": sales_filters}) if sales_filters else 0,
-        "reglas de comision": await db.commission_rules.count_documents({"agency_id": {"$in": agency_ids}}) if agency_ids else 0,
-    }
-    dependencies = [f"{count} {name}" for name, count in dependency_counts.items() if count > 0]
+    context = await build_brand_delete_context(db, brand_id)
+    dependency_counts = await summarize_brand_dependencies(db, context)
+    dependencies = format_dependency_messages(dependency_counts)
     if dependencies and not cascade:
         raise HTTPException(
             status_code=409,
@@ -2364,15 +2269,7 @@ async def delete_brand(brand_id: str, request: Request, cascade: bool = Query(Fa
     }
 
     if cascade:
-        if sales_filters:
-            deleted_counts["sales"] = (await db.sales.delete_many({"$or": sales_filters})).deleted_count
-        if agency_ids:
-            deleted_counts["commission_rules"] = (await db.commission_rules.delete_many({"agency_id": {"$in": agency_ids}})).deleted_count
-        deleted_counts["sales_objectives"] = (await db.sales_objectives.delete_many({"$or": objectives_filters})).deleted_count
-        deleted_counts["financial_rates"] = (await db.financial_rates.delete_many({"$or": rates_filters})).deleted_count
-        deleted_counts["vehicles"] = (await db.vehicles.delete_many({"$or": vehicle_filters})).deleted_count
-        deleted_counts["users"] = (await db.users.delete_many({"$or": user_filters})).deleted_count
-        deleted_counts["agencies"] = (await db.agencies.delete_many({"brand_id": brand_id})).deleted_count
+        deleted_counts.update(await execute_brand_cascade_delete(db, context))
 
     deleted_counts["brands"] = await delete_brand_by_id(db, brand_id)
 
