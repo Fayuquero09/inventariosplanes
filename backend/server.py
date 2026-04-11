@@ -17,8 +17,6 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict, Any, Tuple
 from calendar import monthrange
 from pydantic import BaseModel, Field, EmailStr
-import pandas as pd
-from io import BytesIO
 import json
 from pathlib import Path
 from modules.auth_users_routes import AuthUsersRouteHandlers
@@ -66,6 +64,11 @@ from repositories.user_repository import (
     update_user_password_hash,
 )
 from services.commission_service import calculate_commission_from_rules as _calculate_commission_from_rules
+from services.import_service import (
+    import_organization_from_excel,
+    import_sales_from_file,
+    import_vehicles_from_file,
+)
 from services.operational_calendar_service import (
     add_months_ym as _add_months_ym,
     compute_operational_day_profile as _compute_operational_day_profile,
@@ -7044,18 +7047,6 @@ async def get_vehicle_suggestions(
 
 # ============== IMPORT ROUTES ==============
 
-def _normalize_cell(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, float) and pd.isna(value):
-        return None
-    text = str(value).strip()
-    return text if text else None
-
-def _normalize_key(value: Any) -> Optional[str]:
-    text = _normalize_cell(value)
-    return text.lower() if text else None
-
 @api_router.post("/import/organization")
 async def import_organization(request: Request, file: UploadFile = File(...)):
     """
@@ -7069,362 +7060,15 @@ async def import_organization(request: Request, file: UploadFile = File(...)):
     if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN]:
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    if not file.filename or not file.filename.endswith((".xlsx", ".xls")):
-        raise HTTPException(status_code=400, detail="Unsupported file format. Use Excel (.xlsx/.xls).")
-
     content = await file.read()
-    try:
-        sheets_raw = pd.read_excel(BytesIO(content), sheet_name=None)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error reading file: {str(e)}")
-
-    sheets = {str(name).strip().lower(): df for name, df in sheets_raw.items()}
-    if not any(name in sheets for name in ["groups", "brands", "agencies", "sellers"]):
-        raise HTTPException(
-            status_code=400,
-            detail="Excel must contain at least one sheet named: groups, brands, agencies, or sellers."
-        )
-
-    user_group_id = current_user.get("group_id")
-    if current_user["role"] == UserRole.GROUP_ADMIN and not user_group_id:
-        raise HTTPException(status_code=403, detail="Group admin has no assigned group")
-
-    # Load base maps
-    groups = await db.groups.find({}).to_list(10000)
-    groups_by_id = {str(g["_id"]): g for g in groups}
-    groups_by_name = {_normalize_key(g.get("name")): g for g in groups if _normalize_key(g.get("name"))}
-
-    brands = await db.brands.find({}).to_list(10000)
-    brands_by_id = {str(b["_id"]): b for b in brands}
-    brands_by_group_and_name = {}
-    for b in brands:
-        key_name = _normalize_key(b.get("name"))
-        group_id = b.get("group_id")
-        if key_name and group_id:
-            brands_by_group_and_name[(str(group_id), key_name)] = b
-
-    agencies = await db.agencies.find({}).to_list(10000)
-    agencies_by_id = {str(a["_id"]): a for a in agencies}
-    agencies_by_brand_and_name = {}
-    for a in agencies:
-        key_name = _normalize_key(a.get("name"))
-        brand_id = a.get("brand_id")
-        if key_name and brand_id:
-            agencies_by_brand_and_name[(str(brand_id), key_name)] = a
-
-    users = await db.users.find({}, {"email": 1, "role": 1}).to_list(10000)
-    users_by_email = {_normalize_key(u.get("email")): u for u in users if _normalize_key(u.get("email"))}
-
-    summary = {
-        "groups": {"created": 0, "updated": 0, "skipped": 0},
-        "brands": {"created": 0, "updated": 0, "skipped": 0},
-        "agencies": {"created": 0, "updated": 0, "skipped": 0},
-        "sellers": {"created": 0, "updated": 0, "skipped": 0},
-    }
-    errors = []
-
-    def resolve_group_id(row: pd.Series, default_group_id: Optional[str] = None) -> Optional[str]:
-        group_id_raw = _normalize_cell(row.get("group_id"))
-        if group_id_raw and ObjectId.is_valid(group_id_raw) and group_id_raw in groups_by_id:
-            return group_id_raw
-        group_name_key = _normalize_key(row.get("group_name"))
-        if group_name_key and group_name_key in groups_by_name:
-            return str(groups_by_name[group_name_key]["_id"])
-        return default_group_id
-
-    # 1) Groups
-    if "groups" in sheets:
-        groups_df = sheets["groups"]
-        if current_user["role"] == UserRole.GROUP_ADMIN:
-            summary["groups"]["skipped"] += len(groups_df)
-            errors.append("Sheet groups skipped: group_admin cannot create groups.")
-        else:
-            for idx, row in groups_df.iterrows():
-                row_number = idx + 2
-                group_name = _normalize_cell(row.get("name"))
-                description = _normalize_cell(row.get("description"))
-                if not group_name:
-                    summary["groups"]["skipped"] += 1
-                    errors.append(f"groups row {row_number}: name is required")
-                    continue
-
-                group_key = group_name.lower()
-                existing = groups_by_name.get(group_key)
-                if existing:
-                    update_data = {}
-                    if description is not None and description != existing.get("description"):
-                        update_data["description"] = description
-                    if update_data:
-                        await db.groups.update_one({"_id": existing["_id"]}, {"$set": update_data})
-                        existing.update(update_data)
-                        summary["groups"]["updated"] += 1
-                    else:
-                        summary["groups"]["skipped"] += 1
-                else:
-                    doc = {
-                        "name": group_name,
-                        "description": description,
-                        "created_at": datetime.now(timezone.utc)
-                    }
-                    result = await db.groups.insert_one(doc)
-                    doc["_id"] = result.inserted_id
-                    groups_by_id[str(result.inserted_id)] = doc
-                    groups_by_name[group_key] = doc
-                    summary["groups"]["created"] += 1
-
-    # 2) Brands
-    if "brands" in sheets:
-        brands_df = sheets["brands"]
-        for idx, row in brands_df.iterrows():
-            row_number = idx + 2
-            brand_name = _normalize_cell(row.get("name"))
-            if not brand_name:
-                summary["brands"]["skipped"] += 1
-                errors.append(f"brands row {row_number}: name is required")
-                continue
-
-            resolved_group_id = resolve_group_id(
-                row,
-                default_group_id=user_group_id if current_user["role"] == UserRole.GROUP_ADMIN else None
-            )
-            if not resolved_group_id:
-                summary["brands"]["skipped"] += 1
-                errors.append(f"brands row {row_number}: group_id/group_name is required")
-                continue
-
-            if current_user["role"] == UserRole.GROUP_ADMIN and resolved_group_id != user_group_id:
-                summary["brands"]["skipped"] += 1
-                errors.append(f"brands row {row_number}: cannot import outside your group")
-                continue
-
-            logo_url = _normalize_cell(row.get("logo_url"))
-            brand_key = (resolved_group_id, brand_name.lower())
-            existing = brands_by_group_and_name.get(brand_key)
-
-            if existing:
-                update_data = {}
-                if logo_url is not None and logo_url != existing.get("logo_url"):
-                    update_data["logo_url"] = logo_url
-                if update_data:
-                    await db.brands.update_one({"_id": existing["_id"]}, {"$set": update_data})
-                    existing.update(update_data)
-                    summary["brands"]["updated"] += 1
-                else:
-                    summary["brands"]["skipped"] += 1
-            else:
-                doc = {
-                    "name": brand_name,
-                    "group_id": resolved_group_id,
-                    "logo_url": logo_url,
-                    "created_at": datetime.now(timezone.utc)
-                }
-                result = await db.brands.insert_one(doc)
-                doc["_id"] = result.inserted_id
-                brands_by_id[str(result.inserted_id)] = doc
-                brands_by_group_and_name[brand_key] = doc
-                summary["brands"]["created"] += 1
-
-    # 3) Agencies
-    if "agencies" in sheets:
-        agencies_df = sheets["agencies"]
-        for idx, row in agencies_df.iterrows():
-            row_number = idx + 2
-            agency_name = _normalize_cell(row.get("name"))
-            if not agency_name:
-                summary["agencies"]["skipped"] += 1
-                errors.append(f"agencies row {row_number}: name is required")
-                continue
-
-            resolved_group_id = resolve_group_id(
-                row,
-                default_group_id=user_group_id if current_user["role"] == UserRole.GROUP_ADMIN else None
-            )
-
-            brand_id_raw = _normalize_cell(row.get("brand_id"))
-            brand = None
-            if brand_id_raw and ObjectId.is_valid(brand_id_raw):
-                brand = brands_by_id.get(brand_id_raw)
-
-            if not brand:
-                brand_name_key = _normalize_key(row.get("brand_name"))
-                if brand_name_key:
-                    if resolved_group_id:
-                        brand = brands_by_group_and_name.get((resolved_group_id, brand_name_key))
-                    else:
-                        candidates = [b for (gid, name), b in brands_by_group_and_name.items() if name == brand_name_key]
-                        if len(candidates) == 1:
-                            brand = candidates[0]
-
-            if not brand:
-                summary["agencies"]["skipped"] += 1
-                errors.append(f"agencies row {row_number}: brand_id/brand_name not found or ambiguous")
-                continue
-
-            resolved_group_id = str(brand.get("group_id"))
-            resolved_brand_id = str(brand["_id"])
-            if current_user["role"] == UserRole.GROUP_ADMIN and resolved_group_id != user_group_id:
-                summary["agencies"]["skipped"] += 1
-                errors.append(f"agencies row {row_number}: cannot import outside your group")
-                continue
-
-            city = _normalize_cell(row.get("city"))
-            address = _normalize_cell(row.get("address"))
-            agency_key = (resolved_brand_id, agency_name.lower())
-            existing = agencies_by_brand_and_name.get(agency_key)
-
-            if existing:
-                update_data = {}
-                if address is not None and address != existing.get("address"):
-                    update_data["address"] = address
-                next_city_source = city if city is not None else existing.get("city")
-                next_address_source = address if address is not None else existing.get("address")
-                location = _resolve_agency_location(next_city_source, next_address_source)
-                if location.get("city") is not None and location.get("city") != existing.get("city"):
-                    update_data["city"] = location["city"]
-                if location.get("postal_code") is not None and location.get("postal_code") != existing.get("postal_code"):
-                    update_data["postal_code"] = location["postal_code"]
-                if update_data:
-                    await db.agencies.update_one({"_id": existing["_id"]}, {"$set": update_data})
-                    existing.update(update_data)
-                    summary["agencies"]["updated"] += 1
-                else:
-                    summary["agencies"]["skipped"] += 1
-            else:
-                location = _resolve_agency_location(city, address)
-                doc = {
-                    "name": agency_name,
-                    "brand_id": resolved_brand_id,
-                    "group_id": resolved_group_id,
-                    "city": location["city"],
-                    "postal_code": location["postal_code"],
-                    "address": address,
-                    "created_at": datetime.now(timezone.utc)
-                }
-                result = await db.agencies.insert_one(doc)
-                doc["_id"] = result.inserted_id
-                agencies_by_id[str(result.inserted_id)] = doc
-                agencies_by_brand_and_name[agency_key] = doc
-                summary["agencies"]["created"] += 1
-
-    # 4) Sellers
-    if "sellers" in sheets:
-        sellers_df = sheets["sellers"]
-        for idx, row in sellers_df.iterrows():
-            row_number = idx + 2
-            email = _normalize_key(row.get("email"))
-            if not email:
-                summary["sellers"]["skipped"] += 1
-                errors.append(f"sellers row {row_number}: email is required")
-                continue
-
-            resolved_group_id = resolve_group_id(
-                row,
-                default_group_id=user_group_id if current_user["role"] == UserRole.GROUP_ADMIN else None
-            )
-
-            agency_id_raw = _normalize_cell(row.get("agency_id"))
-            agency = None
-            if agency_id_raw and ObjectId.is_valid(agency_id_raw):
-                agency = agencies_by_id.get(agency_id_raw)
-
-            if not agency:
-                agency_name_key = _normalize_key(row.get("agency_name"))
-                if agency_name_key:
-                    brand = None
-                    brand_id_raw = _normalize_cell(row.get("brand_id"))
-                    if brand_id_raw and ObjectId.is_valid(brand_id_raw):
-                        brand = brands_by_id.get(brand_id_raw)
-                    if not brand:
-                        brand_name_key = _normalize_key(row.get("brand_name"))
-                        if brand_name_key:
-                            if resolved_group_id:
-                                brand = brands_by_group_and_name.get((resolved_group_id, brand_name_key))
-                            else:
-                                candidates = [b for (gid, name), b in brands_by_group_and_name.items() if name == brand_name_key]
-                                if len(candidates) == 1:
-                                    brand = candidates[0]
-                    if brand:
-                        agency = agencies_by_brand_and_name.get((str(brand["_id"]), agency_name_key))
-                    if not agency:
-                        candidates = [a for (bid, name), a in agencies_by_brand_and_name.items() if name == agency_name_key]
-                        if len(candidates) == 1:
-                            agency = candidates[0]
-
-            if not agency:
-                summary["sellers"]["skipped"] += 1
-                errors.append(f"sellers row {row_number}: agency_id/agency_name not found or ambiguous")
-                continue
-
-            resolved_group_id = str(agency.get("group_id"))
-            resolved_brand_id = str(agency.get("brand_id"))
-            resolved_agency_id = str(agency["_id"])
-            if current_user["role"] == UserRole.GROUP_ADMIN and resolved_group_id != user_group_id:
-                summary["sellers"]["skipped"] += 1
-                errors.append(f"sellers row {row_number}: cannot import outside your group")
-                continue
-
-            name = _normalize_cell(row.get("name")) or email.split("@")[0]
-            role = _normalize_cell(row.get("role")) or UserRole.SELLER
-            password = _normalize_cell(row.get("password")) or "TempPass123!"
-            valid_roles = {
-                UserRole.APP_ADMIN,
-                UserRole.APP_USER,
-                UserRole.GROUP_ADMIN,
-                UserRole.GROUP_FINANCE_MANAGER,
-                UserRole.BRAND_ADMIN,
-                UserRole.AGENCY_ADMIN,
-                UserRole.AGENCY_SALES_MANAGER,
-                UserRole.AGENCY_GENERAL_MANAGER,
-                UserRole.AGENCY_COMMERCIAL_MANAGER,
-                UserRole.GROUP_USER,
-                UserRole.BRAND_USER,
-                UserRole.AGENCY_USER,
-                UserRole.SELLER,
-            }
-            if role not in valid_roles:
-                summary["sellers"]["skipped"] += 1
-                errors.append(f"sellers row {row_number}: invalid role '{role}'")
-                continue
-            if current_user["role"] == UserRole.GROUP_ADMIN and role in [UserRole.APP_ADMIN, UserRole.APP_USER]:
-                summary["sellers"]["skipped"] += 1
-                errors.append(f"sellers row {row_number}: group_admin cannot create app-level roles")
-                continue
-
-            existing_user = users_by_email.get(email)
-            if existing_user:
-                update_data = {
-                    "name": name,
-                    "role": role,
-                    "group_id": resolved_group_id,
-                    "brand_id": resolved_brand_id,
-                    "agency_id": resolved_agency_id,
-                }
-                if _normalize_cell(row.get("password")):
-                    update_data["password_hash"] = hash_password(password)
-                await db.users.update_one({"_id": existing_user["_id"]}, {"$set": update_data})
-                existing_user.update(update_data)
-                summary["sellers"]["updated"] += 1
-            else:
-                doc = {
-                    "email": email,
-                    "password_hash": hash_password(password),
-                    "name": name,
-                    "role": role,
-                    "group_id": resolved_group_id,
-                    "brand_id": resolved_brand_id,
-                    "agency_id": resolved_agency_id,
-                    "created_at": datetime.now(timezone.utc)
-                }
-                result = await db.users.insert_one(doc)
-                doc["_id"] = result.inserted_id
-                users_by_email[email] = doc
-                summary["sellers"]["created"] += 1
-
-    response = {
-        "message": "Organization import finished",
-        "summary": summary,
-        "errors": errors[:200]
-    }
+    response = await import_organization_from_excel(
+        db,
+        current_user=current_user,
+        filename=file.filename,
+        content=content,
+        resolve_agency_location=_resolve_agency_location,
+        hash_password=hash_password,
+    )
 
     await log_audit_event(
         request=request,
@@ -7434,8 +7078,8 @@ async def import_organization(request: Request, file: UploadFile = File(...)):
         group_id=current_user.get("group_id"),
         details={
             "filename": file.filename,
-            "summary": summary,
-            "errors_count": len(errors),
+            "summary": response.get("summary", {}),
+            "errors_count": len(response.get("errors", [])),
         },
     )
     return response
@@ -7447,71 +7091,12 @@ async def import_vehicles(request: Request, file: UploadFile = File(...)):
         raise HTTPException(status_code=403, detail="Not authorized")
     
     content = await file.read()
-    
-    try:
-        if file.filename.endswith('.csv'):
-            df = pd.read_csv(BytesIO(content))
-        elif file.filename.endswith(('.xlsx', '.xls')):
-            df = pd.read_excel(BytesIO(content))
-        else:
-            raise HTTPException(status_code=400, detail="Unsupported file format. Use CSV or Excel.")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error reading file: {str(e)}")
-    
-    required_columns = ['vin', 'model', 'year', 'trim', 'color', 'vehicle_type', 'purchase_price', 'agency_id']
-    missing = [col for col in required_columns if col not in df.columns]
-    if missing:
-        raise HTTPException(status_code=400, detail=f"Missing required columns: {missing}")
-    
-    imported = 0
-    errors = []
-    allowed_model_year = get_catalog_model_year()
-    
-    for idx, row in df.iterrows():
-        try:
-            agency = await db.agencies.find_one({"_id": ObjectId(row['agency_id'])})
-            if not agency:
-                errors.append(f"Row {idx + 2}: Agency not found")
-                continue
-            
-            entry_date = row.get('entry_date')
-            if pd.isna(entry_date):
-                entry_date = datetime.now(timezone.utc)
-            elif isinstance(entry_date, str):
-                entry_date = datetime.fromisoformat(entry_date.replace("Z", "+00:00"))
-
-            row_year = int(row['year'])
-            if row_year != allowed_model_year:
-                errors.append(f"Row {idx + 2}: only model year {allowed_model_year} is allowed")
-                continue
-            
-            vehicle_doc = {
-                "vin": str(row['vin']),
-                "model": str(row['model']),
-                "year": row_year,
-                "trim": str(row['trim']),
-                "color": str(row['color']),
-                "vehicle_type": str(row['vehicle_type']),
-                "purchase_price": float(row['purchase_price']),
-                "agency_id": str(row['agency_id']),
-                "brand_id": agency.get("brand_id"),
-                "group_id": agency.get("group_id"),
-                "entry_date": entry_date,
-                "exit_date": None,
-                "status": "in_stock",
-                "created_at": datetime.now(timezone.utc)
-            }
-            
-            await db.vehicles.insert_one(vehicle_doc)
-            imported += 1
-        except Exception as e:
-            errors.append(f"Row {idx + 2}: {str(e)}")
-    
-    response = {
-        "imported": imported,
-        "errors": errors,
-        "total_rows": len(df)
-    }
+    response = await import_vehicles_from_file(
+        db,
+        filename=file.filename,
+        content=content,
+        allowed_model_year=get_catalog_model_year(),
+    )
 
     await log_audit_event(
         request=request,
@@ -7521,9 +7106,9 @@ async def import_vehicles(request: Request, file: UploadFile = File(...)):
         group_id=current_user.get("group_id"),
         details={
             "filename": file.filename,
-            "imported": imported,
-            "total_rows": len(df),
-            "errors_count": len(errors),
+            "imported": response.get("imported", 0),
+            "total_rows": response.get("total_rows", 0),
+            "errors_count": len(response.get("errors", [])),
         },
     )
     return response
@@ -7535,123 +7120,17 @@ async def import_sales(request: Request, file: UploadFile = File(...)):
         raise HTTPException(status_code=403, detail="Not authorized")
     
     content = await file.read()
-    
-    try:
-        if file.filename.endswith('.csv'):
-            df = pd.read_csv(BytesIO(content))
-        elif file.filename.endswith(('.xlsx', '.xls')):
-            df = pd.read_excel(BytesIO(content))
-        else:
-            raise HTTPException(status_code=400, detail="Unsupported file format. Use CSV or Excel.")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error reading file: {str(e)}")
-    
-    required_columns = ['vehicle_id', 'seller_id', 'sale_price', 'sale_date']
-    missing = [col for col in required_columns if col not in df.columns]
-    if missing:
-        raise HTTPException(status_code=400, detail=f"Missing required columns: {missing}")
-    
-    imported = 0
-    errors = []
-    
-    for idx, row in df.iterrows():
-        try:
-            vehicle = await db.vehicles.find_one({"_id": ObjectId(row['vehicle_id'])})
-            if not vehicle:
-                errors.append(f"Row {idx + 2}: Vehicle not found")
-                continue
-            
-            sale_date = row['sale_date']
-            if isinstance(sale_date, str):
-                sale_date = datetime.fromisoformat(sale_date.replace("Z", "+00:00"))
-            
-            fi_revenue = float(row.get('fi_revenue', 0)) if not pd.isna(row.get('fi_revenue')) else 0
-            plant_incentive = float(row.get('plant_incentive', 0)) if not pd.isna(row.get('plant_incentive')) else 0
-
-            reference_date_ymd = sale_date.date().isoformat() if isinstance(sale_date, datetime) else None
-            configured_pricing = await _resolve_effective_sale_pricing_for_model(
-                group_id=vehicle.get("group_id"),
-                brand_id=vehicle.get("brand_id"),
-                agency_id=vehicle.get("agency_id"),
-                model=vehicle.get("model"),
-                version=vehicle.get("version") or vehicle.get("trim"),
-                reference_date_ymd=reference_date_ymd,
-                fallback_msrp=_to_non_negative_float(row.get('sale_price'), _to_non_negative_float(vehicle.get("msrp"), 0.0)),
-            )
-            effective_pricing = _apply_manual_sale_price_override(configured_pricing, row.get('sale_price'))
-            aging_plan = _extract_active_aging_incentive_plan(vehicle)
-            effective_pricing, applied_aging = _apply_aging_plan_to_effective_pricing(effective_pricing, aging_plan)
-            resolved_sale_price = _to_non_negative_float(effective_pricing.get("transaction_price"), 0.0)
-            if resolved_sale_price <= 0:
-                errors.append(f"Row {idx + 2}: unable to resolve effective sale price")
-                continue
-
-            base_commission = await calculate_commission(
-                {
-                    "sale_price": float(resolved_sale_price),
-                    "commission_base_price": _to_non_negative_float(effective_pricing.get("commission_base_price"), resolved_sale_price),
-                    "fi_revenue": fi_revenue,
-                    "plant_incentive": plant_incentive,
-                    "model": vehicle.get("model"),
-                },
-                vehicle["agency_id"],
-                str(row['seller_id']),
-                vehicle=vehicle,
-                sale_date=sale_date,
-            )
-            commission = round(base_commission + _to_non_negative_float(applied_aging.get("seller_bonus_amount"), 0.0), 2)
-            
-            sale_doc = {
-                "vehicle_id": str(row['vehicle_id']),
-                "seller_id": str(row['seller_id']),
-                "agency_id": vehicle["agency_id"],
-                "brand_id": vehicle.get("brand_id"),
-                "group_id": vehicle.get("group_id"),
-                "sale_price": float(resolved_sale_price),
-                "commission_base_price": round(_to_non_negative_float(effective_pricing.get("commission_base_price"), resolved_sale_price), 2),
-                "effective_revenue": round(_to_non_negative_float(effective_pricing.get("effective_revenue"), resolved_sale_price), 2),
-                "brand_incentive_amount": round(_to_non_negative_float(effective_pricing.get("brand_incentive_amount"), 0.0), 2),
-                "dealer_incentive_amount": round(_to_non_negative_float(effective_pricing.get("dealer_incentive_amount"), 0.0), 2),
-                "undocumented_dealer_incentive_amount": round(_to_non_negative_float(effective_pricing.get("undocumented_dealer_incentive_amount"), 0.0), 2),
-                "aging_incentive_sale_discount_amount": round(_to_non_negative_float(applied_aging.get("sale_discount_amount"), 0.0), 2),
-                "aging_incentive_seller_bonus_amount": round(_to_non_negative_float(applied_aging.get("seller_bonus_amount"), 0.0), 2),
-                "aging_incentive_total_amount": round(_to_non_negative_float(applied_aging.get("total_amount"), 0.0), 2),
-                "sale_date": sale_date,
-                "fi_revenue": fi_revenue,
-                "plant_incentive": plant_incentive,
-                "model": vehicle.get("model"),
-                "version": vehicle.get("version") or vehicle.get("trim"),
-                "price_source": str(effective_pricing.get("price_source") or "price_bulletin"),
-                "commission": commission,
-                "created_at": datetime.now(timezone.utc)
-            }
-            
-            sale_result = await db.sales.insert_one(sale_doc)
-            
-            # Mark vehicle as sold
-            vehicle_update = {"status": "sold", "exit_date": sale_date}
-            if aging_plan:
-                vehicle_update.update({
-                    "aging_incentive_plan.active": False,
-                    "aging_incentive_plan.applied_sale_id": str(sale_result.inserted_id),
-                    "aging_incentive_plan.applied_at": datetime.now(timezone.utc),
-                    "aging_incentive_plan.applied_sale_discount_amount": round(_to_non_negative_float(applied_aging.get("sale_discount_amount"), 0.0), 2),
-                    "aging_incentive_plan.applied_seller_bonus_amount": round(_to_non_negative_float(applied_aging.get("seller_bonus_amount"), 0.0), 2),
-                })
-            await db.vehicles.update_one(
-                {"_id": ObjectId(row['vehicle_id'])},
-                {"$set": vehicle_update}
-            )
-            
-            imported += 1
-        except Exception as e:
-            errors.append(f"Row {idx + 2}: {str(e)}")
-    
-    response = {
-        "imported": imported,
-        "errors": errors,
-        "total_rows": len(df)
-    }
+    response = await import_sales_from_file(
+        db,
+        filename=file.filename,
+        content=content,
+        calculate_commission=calculate_commission,
+        resolve_effective_sale_pricing_for_model=_resolve_effective_sale_pricing_for_model,
+        apply_manual_sale_price_override=_apply_manual_sale_price_override,
+        extract_active_aging_incentive_plan=_extract_active_aging_incentive_plan,
+        apply_aging_plan_to_effective_pricing=_apply_aging_plan_to_effective_pricing,
+        to_non_negative_float=_to_non_negative_float,
+    )
 
     await log_audit_event(
         request=request,
@@ -7661,9 +7140,9 @@ async def import_sales(request: Request, file: UploadFile = File(...)):
         group_id=current_user.get("group_id"),
         details={
             "filename": file.filename,
-            "imported": imported,
-            "total_rows": len(df),
-            "errors_count": len(errors),
+            "imported": response.get("imported", 0),
+            "total_rows": response.get("total_rows", 0),
+            "errors_count": len(response.get("errors", [])),
         },
     )
     return response
