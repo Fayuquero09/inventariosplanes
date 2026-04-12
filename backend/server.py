@@ -205,6 +205,9 @@ from services.sales_service import create_sale_record, list_sales_with_enrichmen
 from services.auth_users_service import (
     build_audit_logs_query_for_actor as _build_audit_logs_query_for_actor_service,
     build_users_query_for_actor as _build_users_query_for_actor_service,
+    google_auth_flow as _google_auth_flow_service,
+    login_user as _login_user_service,
+    reset_password_flow as _reset_password_flow_service,
     resolve_register_hierarchy_scope as _resolve_register_hierarchy_scope_service,
 )
 from services.rbac_service import (
@@ -1531,38 +1534,21 @@ async def register(user_data: UserCreate, request: Request):
     }
 
 async def login(user_data: UserLogin, response: Response):
-    email = str(user_data.email).strip().lower()
-    user = await find_user_by_email(db, email)
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-
-    password_raw = user_data.password or ""
-    password_trimmed = password_raw.strip()
-    if not (
-        verify_password(password_raw, user["password_hash"]) or
-        (password_trimmed != password_raw and verify_password(password_trimmed, user["password_hash"]))
-    ):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    
-    user_id = str(user["_id"])
-    access_token = create_access_token(user_id, email, user["role"])
-    refresh_token = create_refresh_token(user_id)
+    login_result = await _login_user_service(
+        db,
+        user_data=user_data,
+        find_user_by_email=find_user_by_email,
+        verify_password=verify_password,
+        create_access_token=create_access_token,
+        create_refresh_token=create_refresh_token,
+    )
+    access_token = login_result["access_token"]
+    refresh_token = login_result["refresh_token"]
     
     response.set_cookie(key="access_token", value=access_token, httponly=True, secure=False, samesite="lax", max_age=86400, path="/")
     response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
     
-    return {
-        "id": user_id,
-        "email": user["email"],
-        "name": user["name"],
-        "position": user.get("position"),
-        "role": user["role"],
-        "group_id": user.get("group_id"),
-        "brand_id": user.get("brand_id"),
-        "agency_id": user.get("agency_id"),
-        "created_at": user["created_at"].isoformat() if isinstance(user["created_at"], datetime) else user["created_at"],
-        "token": access_token
-    }
+    return login_result["user_payload"]
 
 async def logout(response: Response):
     response.delete_cookie("access_token", path="/")
@@ -1570,18 +1556,13 @@ async def logout(response: Response):
     return {"message": "Logged out successfully"}
 
 async def reset_password(payload: PasswordResetRequest):
-    email = str(payload.email).strip().lower()
-
-    if len(payload.new_password or "") < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
-
-    user = await find_user_by_email(db, email)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    await update_user_password_hash(db, str(user["_id"]), hash_password(payload.new_password))
-
-    return {"message": "Password updated successfully"}
+    return await _reset_password_flow_service(
+        db,
+        payload=payload,
+        find_user_by_email=find_user_by_email,
+        update_user_password_hash=update_user_password_hash,
+        hash_password=hash_password,
+    )
 
 async def get_me(request: Request):
     user = await get_current_user(request)
@@ -1591,70 +1572,26 @@ async def google_auth(request: Request, response: Response):
     """Handle Google OAuth callback"""
     data = await request.json()
     credential = data.get("credential")
-    
-    if not credential:
-        raise HTTPException(status_code=400, detail="No credential provided")
-    
     try:
-        # Decode the JWT token from Google (without verification for simplicity)
-        # In production, verify with Google's public keys
-        import base64
-        parts = credential.split(".")
-        payload = parts[1]
-        # Add padding if necessary
-        padding = 4 - len(payload) % 4
-        if padding != 4:
-            payload += "=" * padding
-        decoded = base64.urlsafe_b64decode(payload)
-        google_user = json.loads(decoded)
-        
-        email = str(google_user.get("email", "")).strip().lower()
-        name = google_user.get("name", "")
-        
-        # Check if user exists
-        user = await find_user_by_email(db, email)
-        
-        if not user:
-            # Create new user
-            user_doc = {
-                "email": email,
-                "password_hash": "",  # No password for Google users
-                "name": name,
-                "position": None,
-                "role": UserRole.APP_USER,
-                "group_id": None,
-                "brand_id": None,
-                "agency_id": None,
-                "google_id": google_user.get("sub"),
-                "created_at": datetime.now(timezone.utc)
-            }
-            user_id = await create_user(db, user_doc)
-            user = user_doc
-            user["_id"] = ObjectId(user_id)
-        else:
-            user_id = str(user["_id"])
-        
-        access_token = create_access_token(user_id, email, user.get("role", UserRole.APP_USER))
-        refresh_token = create_refresh_token(user_id)
-        
-        response.set_cookie(key="access_token", value=access_token, httponly=True, secure=False, samesite="lax", max_age=86400, path="/")
-        response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
-        
-        return {
-            "id": user_id,
-            "email": email,
-            "name": user.get("name", name),
-            "position": user.get("position"),
-            "role": user.get("role", UserRole.APP_USER),
-            "group_id": user.get("group_id"),
-            "brand_id": user.get("brand_id"),
-            "agency_id": user.get("agency_id"),
-            "created_at": user["created_at"].isoformat() if isinstance(user.get("created_at"), datetime) else str(user.get("created_at", "")),
-            "token": access_token
-        }
-    except Exception as e:
-        logger.error(f"Google auth error: {e}")
-        raise HTTPException(status_code=400, detail=f"Invalid Google credential: {str(e)}")
+        auth_result = await _google_auth_flow_service(
+            db,
+            credential=credential,
+            find_user_by_email=find_user_by_email,
+            create_user=create_user,
+            create_access_token=create_access_token,
+            create_refresh_token=create_refresh_token,
+            app_user_role=UserRole.APP_USER,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Google auth error: {exc}")
+        raise HTTPException(status_code=400, detail=f"Invalid Google credential: {str(exc)}") from exc
+
+    response.set_cookie(key="access_token", value=auth_result["access_token"], httponly=True, secure=False, samesite="lax", max_age=86400, path="/")
+    response.set_cookie(key="refresh_token", value=auth_result["refresh_token"], httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
+
+    return auth_result["user_payload"]
 
 # ============== USERS ROUTES ==============
 
