@@ -202,13 +202,56 @@ from services.price_bulletins_service import (
     upsert_price_bulletins_items as _upsert_price_bulletins_items_service,
 )
 from services.sales_service import create_sale_record, list_sales_with_enrichment
+from services.auth_users_service import (
+    build_audit_logs_query_for_actor as _build_audit_logs_query_for_actor_service,
+    build_users_query_for_actor as _build_users_query_for_actor_service,
+    resolve_register_hierarchy_scope as _resolve_register_hierarchy_scope_service,
+)
+from services.rbac_service import (
+    ACTION_AUDIT_LOGS_READ,
+    ACTION_USERS_MANAGE,
+    AGENCY_SCOPED_ROLES,
+    APP_LEVEL_ROLES,
+    BRAND_SCOPED_ROLES,
+    COMMISSION_APPROVER_ROLES,
+    COMMISSION_MATRIX_EDITOR_ROLES,
+    COMMISSION_PROPOSER_ROLES,
+    CORP_FINANCE_ROLES,
+    CORP_STRUCTURE_ROLES,
+    DEALER_GENERAL_ASSIGNABLE_ROLES,
+    DEALER_GENERAL_EFFECTIVE_ROLES,
+    DEALER_LEGACY_READONLY_ROLE,
+    DEALER_SALES_ASSIGNABLE_ROLES,
+    DEALER_SALES_EFFECTIVE_ROLES,
+    DEALER_SELLER_ROLE,
+    DEALER_USER_MANAGER_ROLES,
+    FINANCIAL_RATE_MANAGER_ROLES,
+    OBJECTIVE_APPROVER_ROLES,
+    OBJECTIVE_EDITOR_ROLES,
+    PRICE_BULLETIN_EDITOR_ROLES,
+    WRITE_AUDIT_ROLES,
+    build_scope_query as _build_scope_query,
+    ensure_doc_scope_access as _ensure_doc_scope_access,
+    get_dealer_assignable_roles as _get_dealer_assignable_roles,
+    is_agency_scoped_role as _is_agency_scoped_role,
+    is_app_level_role as _is_app_level_role,
+    is_brand_scoped_role as _is_brand_scoped_role,
+    is_corp_finance_role as _is_corp_finance_role,
+    is_corp_structure_role as _is_corp_structure_role,
+    is_dealer_general_effective_role as _is_dealer_general_effective_role,
+    is_dealer_sales_effective_role as _is_dealer_sales_effective_role,
+    is_dealer_user_manager_role as _is_dealer_user_manager_role,
+    require_action_role as _require_action_role,
+    same_scope_id as _same_scope_id,
+    scope_query_has_access as _scope_query_has_access,
+    validate_scope_filters as _validate_scope_filters,
+)
 from services.user_management_service import (
     apply_register_scope_constraints as _apply_register_scope_constraints_service,
     build_user_document as _build_user_document_service,
     build_user_update_audit_changes as _build_user_update_audit_changes_service,
     enforce_delete_scope_permissions as _enforce_delete_scope_permissions_service,
     enforce_update_scope_permissions as _enforce_update_scope_permissions_service,
-    ensure_user_management_role as _ensure_user_management_role_service,
     extract_new_password_and_payload as _extract_new_password_and_payload_service,
     normalize_optional_position as _normalize_optional_position_service,
     normalize_user_email as _normalize_user_email_service,
@@ -863,178 +906,10 @@ def serialize_doc(doc: dict) -> dict:
             result[k] = v
     return result
 
-APP_LEVEL_ROLES = {UserRole.APP_ADMIN, UserRole.APP_USER}
-BRAND_SCOPED_ROLES = {UserRole.BRAND_ADMIN, UserRole.BRAND_USER}
-AGENCY_SCOPED_ROLES = {
-    UserRole.AGENCY_ADMIN,
-    UserRole.AGENCY_SALES_MANAGER,
-    UserRole.AGENCY_GENERAL_MANAGER,
-    UserRole.AGENCY_COMMERCIAL_MANAGER,
-    UserRole.AGENCY_USER,
-    UserRole.SELLER,
-}
-CORP_STRUCTURE_ROLES = {
-    UserRole.APP_ADMIN,
-    UserRole.GROUP_ADMIN,
-}
-CORP_FINANCE_ROLES = {
-    UserRole.APP_ADMIN,
-    UserRole.GROUP_FINANCE_MANAGER,
-}
-DEALER_GENERAL_EFFECTIVE_ROLES = {
-    UserRole.AGENCY_GENERAL_MANAGER,
-    UserRole.AGENCY_ADMIN,  # legacy write role
-    UserRole.AGENCY_COMMERCIAL_MANAGER,  # legacy approver equivalent
-}
-DEALER_SALES_EFFECTIVE_ROLES = {
-    UserRole.AGENCY_SALES_MANAGER,
-}
-DEALER_SELLER_ROLE = UserRole.SELLER
-DEALER_LEGACY_READONLY_ROLE = UserRole.AGENCY_USER
-DEALER_USER_MANAGER_ROLES = DEALER_GENERAL_EFFECTIVE_ROLES | DEALER_SALES_EFFECTIVE_ROLES
-
-DEALER_GENERAL_ASSIGNABLE_ROLES = {
-    UserRole.AGENCY_SALES_MANAGER,
-    UserRole.SELLER,
-    UserRole.AGENCY_USER,  # legacy read-only compatibility
-}
-DEALER_SALES_ASSIGNABLE_ROLES = {
-    UserRole.SELLER,
-}
-
 COMMISSION_PENDING = "pending"
 COMMISSION_APPROVED = "approved"
 COMMISSION_REJECTED = "rejected"
 COMMISSION_MATRIX_DEFAULT_PLANT_SHARE_PCT = 100.0
-
-def _same_scope_id(left: Optional[str], right: Optional[str]) -> bool:
-    if left is None or right is None:
-        return False
-    return str(left) == str(right)
-
-def _empty_scope_query() -> Dict[str, Any]:
-    # Mongo ObjectId field never equals this string, so query returns no rows.
-    return {"_id": "__none__"}
-
-def _is_app_level_role(role: Optional[str]) -> bool:
-    return role in APP_LEVEL_ROLES
-
-def _is_brand_scoped_role(role: Optional[str]) -> bool:
-    return role in BRAND_SCOPED_ROLES
-
-def _is_agency_scoped_role(role: Optional[str]) -> bool:
-    return role in AGENCY_SCOPED_ROLES
-
-def _is_corp_structure_role(role: Optional[str]) -> bool:
-    return role in CORP_STRUCTURE_ROLES
-
-def _is_corp_finance_role(role: Optional[str]) -> bool:
-    return role in CORP_FINANCE_ROLES
-
-def _is_dealer_general_effective_role(role: Optional[str]) -> bool:
-    return role in DEALER_GENERAL_EFFECTIVE_ROLES
-
-def _is_dealer_sales_effective_role(role: Optional[str]) -> bool:
-    return role in DEALER_SALES_EFFECTIVE_ROLES
-
-def _is_dealer_user_manager_role(role: Optional[str]) -> bool:
-    return role in DEALER_USER_MANAGER_ROLES
-
-def _get_dealer_assignable_roles(role: Optional[str]) -> set[str]:
-    if _is_dealer_general_effective_role(role):
-        return DEALER_GENERAL_ASSIGNABLE_ROLES
-    if _is_dealer_sales_effective_role(role):
-        return DEALER_SALES_ASSIGNABLE_ROLES
-    return set()
-
-def _build_scope_query(current_user: dict) -> Dict[str, Any]:
-    role = current_user.get("role")
-    if _is_app_level_role(role):
-        return {}
-
-    user_group_id = current_user.get("group_id")
-    if not user_group_id:
-        return _empty_scope_query()
-
-    query: Dict[str, Any] = {"group_id": user_group_id}
-
-    if _is_brand_scoped_role(role):
-        user_brand_id = current_user.get("brand_id")
-        if not user_brand_id:
-            return _empty_scope_query()
-        query["brand_id"] = user_brand_id
-
-    if _is_agency_scoped_role(role):
-        user_agency_id = current_user.get("agency_id")
-        if not user_agency_id:
-            return _empty_scope_query()
-        query["agency_id"] = user_agency_id
-        # Agency roles usually carry brand_id as well; if present, keep strict scope.
-        if current_user.get("brand_id"):
-            query["brand_id"] = current_user["brand_id"]
-
-    return query
-
-def _scope_query_has_access(query: Dict[str, Any]) -> bool:
-    return query.get("_id") != "__none__"
-
-def _validate_scope_filters(
-    current_user: dict,
-    group_id: Optional[str] = None,
-    brand_id: Optional[str] = None,
-    agency_id: Optional[str] = None,
-) -> None:
-    role = current_user.get("role")
-    if _is_app_level_role(role):
-        return
-
-    user_group_id = current_user.get("group_id")
-    user_brand_id = current_user.get("brand_id")
-    user_agency_id = current_user.get("agency_id")
-
-    if group_id and user_group_id and not _same_scope_id(group_id, user_group_id):
-        raise HTTPException(status_code=403, detail="No tienes acceso a este grupo")
-
-    if _is_brand_scoped_role(role):
-        if brand_id and user_brand_id and not _same_scope_id(brand_id, user_brand_id):
-            raise HTTPException(status_code=403, detail="No tienes acceso a esta marca")
-
-    if _is_agency_scoped_role(role):
-        if brand_id and user_brand_id and not _same_scope_id(brand_id, user_brand_id):
-            raise HTTPException(status_code=403, detail="No tienes acceso a esta marca")
-        if agency_id and user_agency_id and not _same_scope_id(agency_id, user_agency_id):
-            raise HTTPException(status_code=403, detail="No tienes acceso a esta agencia")
-
-def _ensure_doc_scope_access(
-    current_user: dict,
-    doc: Optional[Dict[str, Any]],
-    *,
-    group_field: str = "group_id",
-    brand_field: str = "brand_id",
-    agency_field: str = "agency_id",
-    detail: str = "No tienes acceso a este recurso",
-) -> None:
-    if not doc:
-        raise HTTPException(status_code=404, detail="Resource not found")
-
-    role = current_user.get("role")
-    if _is_app_level_role(role):
-        return
-
-    user_group_id = current_user.get("group_id")
-    user_brand_id = current_user.get("brand_id")
-    user_agency_id = current_user.get("agency_id")
-
-    if user_group_id and not _same_scope_id(doc.get(group_field), user_group_id):
-        raise HTTPException(status_code=403, detail=detail)
-
-    if _is_brand_scoped_role(role):
-        if user_brand_id and not _same_scope_id(doc.get(brand_field), user_brand_id):
-            raise HTTPException(status_code=403, detail=detail)
-
-    if _is_agency_scoped_role(role):
-        if user_agency_id and not _same_scope_id(doc.get(agency_field), user_agency_id):
-            raise HTTPException(status_code=403, detail=detail)
 
 async def _resolve_financial_rate_scope(
     current_user: dict,
@@ -1094,50 +969,10 @@ async def _resolve_financial_rate_scope(
         "agency_id": normalized_agency_id,
     }
 
-WRITE_AUDIT_ROLES = {
-    UserRole.APP_ADMIN,
-    UserRole.GROUP_ADMIN,
-    UserRole.GROUP_FINANCE_MANAGER,
-    UserRole.BRAND_ADMIN,
-    UserRole.AGENCY_ADMIN,
-    UserRole.AGENCY_SALES_MANAGER,
-    UserRole.AGENCY_GENERAL_MANAGER,
-    UserRole.AGENCY_COMMERCIAL_MANAGER,
-    UserRole.SELLER,
-}
-
-FINANCIAL_RATE_MANAGER_ROLES = CORP_FINANCE_ROLES
-PRICE_BULLETIN_EDITOR_ROLES = {
-    UserRole.APP_ADMIN,
-    UserRole.GROUP_ADMIN,
-    UserRole.GROUP_FINANCE_MANAGER,
-    UserRole.BRAND_ADMIN,
-    UserRole.AGENCY_GENERAL_MANAGER,
-    UserRole.AGENCY_SALES_MANAGER,
-    UserRole.AGENCY_ADMIN,
-    UserRole.AGENCY_COMMERCIAL_MANAGER,
-}
-
 OBJECTIVE_PENDING = "pending"
 OBJECTIVE_DRAFT = "draft"
 OBJECTIVE_APPROVED = "approved"
 OBJECTIVE_REJECTED = "rejected"
-
-OBJECTIVE_EDITOR_ROLES = DEALER_SALES_EFFECTIVE_ROLES
-OBJECTIVE_APPROVER_ROLES = DEALER_GENERAL_EFFECTIVE_ROLES
-
-COMMISSION_PROPOSER_ROLES = DEALER_SALES_EFFECTIVE_ROLES
-COMMISSION_APPROVER_ROLES = DEALER_GENERAL_EFFECTIVE_ROLES
-COMMISSION_MATRIX_EDITOR_ROLES = (
-    DEALER_SALES_EFFECTIVE_ROLES
-    | DEALER_GENERAL_EFFECTIVE_ROLES
-    | {
-        UserRole.APP_ADMIN,
-        UserRole.GROUP_ADMIN,
-        UserRole.GROUP_FINANCE_MANAGER,
-        UserRole.BRAND_ADMIN,
-    }
-)
 
 def _to_jsonable(value: Any) -> Any:
     if isinstance(value, ObjectId):
@@ -1607,13 +1442,8 @@ def _ensure_allowed_model_year(year: int) -> None:
 async def register(user_data: UserCreate, request: Request):
     current_user = await get_current_user(request)
     actor_role = current_user.get("role")
+    _require_action_role(ACTION_USERS_MANAGE, actor_role, detail="Not authorized")
     try:
-        _ensure_user_management_role_service(
-            actor_role=actor_role,
-            app_admin_role=UserRole.APP_ADMIN,
-            group_admin_role=UserRole.GROUP_ADMIN,
-            is_dealer_user_manager_role=_is_dealer_user_manager_role,
-        )
         _apply_register_scope_constraints_service(
             current_user=current_user,
             user_data=user_data,
@@ -1631,27 +1461,12 @@ async def register(user_data: UserCreate, request: Request):
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
     
-    if user_data.brand_id:
-        brand = await find_brand_by_id(db, user_data.brand_id)
-        if not brand:
-            raise HTTPException(status_code=404, detail="Brand not found")
-        if user_data.group_id and brand.get("group_id") != user_data.group_id:
-            raise HTTPException(status_code=400, detail="Brand does not belong to selected group")
-        if not user_data.group_id:
-            user_data.group_id = brand.get("group_id")
-
-    if user_data.agency_id:
-        agency = await find_agency_by_id(db, user_data.agency_id)
-        if not agency:
-            raise HTTPException(status_code=404, detail="Agency not found")
-        if user_data.group_id and agency.get("group_id") != user_data.group_id:
-            raise HTTPException(status_code=400, detail="Agency does not belong to selected group")
-        if user_data.brand_id and agency.get("brand_id") != user_data.brand_id:
-            raise HTTPException(status_code=400, detail="Agency does not belong to selected brand")
-        if not user_data.group_id:
-            user_data.group_id = agency.get("group_id")
-        if not user_data.brand_id:
-            user_data.brand_id = agency.get("brand_id")
+    await _resolve_register_hierarchy_scope_service(
+        db=db,
+        user_data=user_data,
+        find_brand_by_id=find_brand_by_id,
+        find_agency_by_id=find_agency_by_id,
+    )
 
     try:
         _validate_role_scope_requirements_service(
@@ -1846,23 +1661,16 @@ async def google_auth(request: Request, response: Response):
 async def get_users(request: Request):
     current_user = await get_current_user(request)
     actor_role = current_user.get("role")
-    try:
-        _ensure_user_management_role_service(
-            actor_role=actor_role,
-            app_admin_role=UserRole.APP_ADMIN,
-            group_admin_role=UserRole.GROUP_ADMIN,
-            is_dealer_user_manager_role=_is_dealer_user_manager_role,
-        )
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    
-    query = {}
-    if actor_role == UserRole.GROUP_ADMIN and current_user.get("group_id"):
-        query["group_id"] = current_user["group_id"]
-    elif _is_dealer_user_manager_role(actor_role):
-        if not current_user.get("agency_id"):
-            return []
-        query["agency_id"] = current_user["agency_id"]
+    _require_action_role(ACTION_USERS_MANAGE, actor_role, detail="Not authorized")
+
+    query, should_return_empty = _build_users_query_for_actor_service(
+        actor_role=actor_role,
+        current_user=current_user,
+        group_admin_role=UserRole.GROUP_ADMIN,
+        is_dealer_user_manager_role=_is_dealer_user_manager_role,
+    )
+    if should_return_empty:
+        return []
     
     users = await list_users(db, query, include_password_hash=False, limit=1000)
     return [serialize_doc(u) for u in users]
@@ -1870,15 +1678,7 @@ async def get_users(request: Request):
 async def update_user(user_id: str, request: Request):
     current_user = await get_current_user(request)
     actor_role = current_user.get("role")
-    try:
-        _ensure_user_management_role_service(
-            actor_role=actor_role,
-            app_admin_role=UserRole.APP_ADMIN,
-            group_admin_role=UserRole.GROUP_ADMIN,
-            is_dealer_user_manager_role=_is_dealer_user_manager_role,
-        )
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    _require_action_role(ACTION_USERS_MANAGE, actor_role, detail="Not authorized")
     
     data = await request.json()
     try:
@@ -1936,15 +1736,7 @@ async def update_user(user_id: str, request: Request):
 async def delete_user(user_id: str, request: Request):
     current_user = await get_current_user(request)
     actor_role = current_user.get("role")
-    try:
-        _ensure_user_management_role_service(
-            actor_role=actor_role,
-            app_admin_role=UserRole.APP_ADMIN,
-            group_admin_role=UserRole.GROUP_ADMIN,
-            is_dealer_user_manager_role=_is_dealer_user_manager_role,
-        )
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    _require_action_role(ACTION_USERS_MANAGE, actor_role, detail="Not authorized")
 
     if not ObjectId.is_valid(user_id):
         raise HTTPException(status_code=400, detail="Invalid user_id")
@@ -1995,36 +1787,21 @@ async def get_audit_logs(
 ):
     current_user = await get_current_user(request)
     actor_role = current_user.get("role")
-    if actor_role not in {UserRole.APP_ADMIN, UserRole.GROUP_ADMIN, UserRole.GROUP_FINANCE_MANAGER} and not _is_dealer_user_manager_role(actor_role):
-        raise HTTPException(status_code=403, detail="Not authorized")
+    _require_action_role(ACTION_AUDIT_LOGS_READ, actor_role, detail="Not authorized")
 
     safe_limit = max(1, min(limit, 500))
-    query: Dict[str, Any] = {}
-
-    if actor_role in [UserRole.GROUP_ADMIN, UserRole.GROUP_FINANCE_MANAGER]:
-        user_group_id = current_user.get("group_id")
-        if not user_group_id:
-            return []
-        query["group_id"] = user_group_id
-        if group_id and group_id != user_group_id:
-            raise HTTPException(status_code=403, detail="No tienes acceso a este grupo")
-    elif _is_dealer_user_manager_role(actor_role):
-        user_agency_id = current_user.get("agency_id")
-        if not user_agency_id:
-            return []
-        query["agency_id"] = user_agency_id
-        if agency_id and agency_id != user_agency_id:
-            raise HTTPException(status_code=403, detail="No tienes acceso a esta agencia")
-        user_group_id = current_user.get("group_id")
-        if group_id and user_group_id and group_id != user_group_id:
-            raise HTTPException(status_code=403, detail="No tienes acceso a este grupo")
-    elif group_id:
-        query["group_id"] = group_id
-
-    if agency_id and not _is_dealer_user_manager_role(actor_role):
-        query["agency_id"] = agency_id
-    if actor_id:
-        query["actor_id"] = actor_id
+    query, should_return_empty = _build_audit_logs_query_for_actor_service(
+        actor_role=actor_role,
+        current_user=current_user,
+        agency_id=agency_id,
+        group_id=group_id,
+        actor_id=actor_id,
+        group_admin_role=UserRole.GROUP_ADMIN,
+        group_finance_role=UserRole.GROUP_FINANCE_MANAGER,
+        is_dealer_user_manager_role=_is_dealer_user_manager_role,
+    )
+    if should_return_empty:
+        return []
 
     logs = await list_audit_logs(db, query, limit=safe_limit)
     return [serialize_doc(item) for item in logs]
