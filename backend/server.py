@@ -202,6 +202,10 @@ from services.import_service import (
     import_sales_from_file,
     import_vehicles_from_file,
 )
+from services.logo_assets_service import (
+    resolve_logo_directory as _resolve_logo_directory_service,
+    resolve_logo_url_for_brand as _resolve_logo_url_for_brand_service,
+)
 from services.sales_objectives_service import (
     build_sales_objective_suggestion as _build_sales_objective_suggestion_service,
     list_sales_objectives_with_progress as _list_sales_objectives_with_progress_service,
@@ -332,19 +336,6 @@ catalog_cache: Dict[str, Any] = {
     "mtime": None,
     "payload": None,
 }
-logo_assets_cache: Dict[str, Any] = {
-    "directory": None,
-    "files": None,
-}
-
-LOGO_FILE_EXTENSIONS = {".png", ".svg", ".webp", ".jpg", ".jpeg"}
-LOGO_SLUG_ALIASES: Dict[str, List[str]] = {
-    "changan": ["changang"],
-    "changang": ["changan"],
-    "gac-motor": ["gac"],
-    "gac": ["gac-motor"],
-}
-
 def get_jwt_secret() -> str:
     return os.environ.get("JWT_SECRET", "default-secret-change-me")
 
@@ -358,139 +349,19 @@ def get_catalog_model_year() -> int:
     except (TypeError, ValueError):
         return CATALOG_DEFAULT_MODEL_YEAR
 
-def _slugify_asset_name(value: str) -> str:
-    import unicodedata
-
-    normalized = unicodedata.normalize("NFKD", str(value or "").strip().lower())
-    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
-    normalized = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")
-    return normalized
-
-def _build_logo_directory_candidates() -> List[Path]:
-    candidates: List[Path] = []
-    direct_logo_dir = os.environ.get(LOGO_DIRECTORY_ENV)
-    if direct_logo_dir:
-        candidates.append(Path(direct_logo_dir))
-
-    roots = [
-        os.environ.get("CORTEX_AUTOMOTRIZ_ROOT"),
-        CORTEX_ROOT_DEFAULT_PATH,
-    ]
-    for root in roots:
-        if not root:
-            continue
-        base = Path(root)
-        candidates.extend(
-            [
-                base / "cortex_frontend" / "public" / "logos",
-                base / "dataframe_base_backup_20251006" / "cortex_frontend" / "public" / "logos",
-                base / "dataframe_base_backup_only_db_20251006" / "cortex_frontend" / "public" / "logos",
-                base / "strapi" / "cortex_frontend" / "public" / "logos",
-                base / "Strapi" / "cortex_frontend" / "public" / "logos",
-            ]
-        )
-
-    deduped: List[Path] = []
-    seen: set[str] = set()
-    for path in candidates:
-        key = str(path)
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(path)
-    return deduped
-
-def _count_logo_files(directory: Path) -> int:
-    count = 0
-    try:
-        for child in directory.iterdir():
-            if child.is_file() and child.suffix.lower() in LOGO_FILE_EXTENSIONS:
-                count += 1
-    except Exception:
-        return 0
-    return count
+def _resolve_logo_url_for_brand(brand_name: str, request: Optional[Request] = None) -> Optional[str]:
+    return _resolve_logo_url_for_brand_service(
+        brand_name,
+        request=request,
+        logo_directory_env=LOGO_DIRECTORY_ENV,
+        cortex_root_default_path=CORTEX_ROOT_DEFAULT_PATH,
+    )
 
 def _resolve_logo_directory() -> Optional[Path]:
-    best_dir: Optional[Path] = None
-    best_count = 0
-
-    for candidate in _build_logo_directory_candidates():
-        try:
-            if not candidate.exists() or not candidate.is_dir():
-                continue
-        except Exception:
-            continue
-        candidate_count = _count_logo_files(candidate)
-        if candidate_count > best_count:
-            best_count = candidate_count
-            best_dir = candidate
-
-    return best_dir
-
-def _load_logo_filename_index() -> Dict[str, str]:
-    directory = _resolve_logo_directory()
-    cached_directory = logo_assets_cache.get("directory")
-    cached_files = logo_assets_cache.get("files")
-    directory_key = str(directory) if directory else None
-
-    if cached_directory == directory_key and isinstance(cached_files, dict):
-        return cached_files
-
-    files: Dict[str, str] = {}
-    if directory:
-        try:
-            for child in directory.iterdir():
-                if not child.is_file():
-                    continue
-                if child.suffix.lower() not in LOGO_FILE_EXTENSIONS:
-                    continue
-                files[child.name.lower()] = child.name
-        except Exception:
-            files = {}
-
-    logo_assets_cache["directory"] = directory_key
-    logo_assets_cache["files"] = files
-    return files
-
-def _resolve_logo_filename_for_brand(brand_name: str) -> Optional[str]:
-    files = _load_logo_filename_index()
-    if not files:
-        return None
-
-    slug = _slugify_asset_name(brand_name)
-    if not slug:
-        return None
-
-    candidate_slugs = [slug]
-    candidate_slugs.extend(LOGO_SLUG_ALIASES.get(slug, []))
-
-    for slug_candidate in candidate_slugs:
-        filename_candidates = [
-            f"{slug_candidate}-logo.png",
-            f"{slug_candidate}.png",
-            f"{slug_candidate}-logo.svg",
-            f"{slug_candidate}.svg",
-            f"{slug_candidate}-logo.webp",
-            f"{slug_candidate}.webp",
-            f"{slug_candidate}-logo.jpg",
-            f"{slug_candidate}.jpg",
-            f"{slug_candidate}-logo.jpeg",
-            f"{slug_candidate}.jpeg",
-        ]
-        for filename in filename_candidates:
-            resolved = files.get(filename.lower())
-            if resolved:
-                return resolved
-    return None
-
-def _resolve_logo_url_for_brand(brand_name: str, request: Optional[Request] = None) -> Optional[str]:
-    filename = _resolve_logo_filename_for_brand(brand_name)
-    if not filename:
-        return None
-    relative_path = f"/logos/{filename}"
-    if not request:
-        return relative_path
-    return f"{str(request.base_url).rstrip('/')}{relative_path}"
+    return _resolve_logo_directory_service(
+        logo_directory_env=LOGO_DIRECTORY_ENV,
+        cortex_root_default_path=CORTEX_ROOT_DEFAULT_PATH,
+    )
 
 # Password functions
 def hash_password(password: str) -> str:
