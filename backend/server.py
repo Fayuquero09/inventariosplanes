@@ -9,8 +9,6 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
 import os
 import logging
-import bcrypt
-import jwt
 import secrets
 import re
 from datetime import datetime, timezone, timedelta
@@ -209,6 +207,14 @@ from services.auth_users_service import (
     login_user as _login_user_service,
     reset_password_flow as _reset_password_flow_service,
     resolve_register_hierarchy_scope as _resolve_register_hierarchy_scope_service,
+)
+from services.auth_session_service import (
+    create_access_token as _create_access_token_service,
+    create_refresh_token as _create_refresh_token_service,
+    get_current_user as _get_current_user_service,
+    get_optional_user as _get_optional_user_service,
+    hash_password as _hash_password_service,
+    verify_password as _verify_password_service,
 )
 from services.rbac_service import (
     ACTION_AUDIT_LOGS_READ,
@@ -450,31 +456,29 @@ def _resolve_logo_url_for_brand(brand_name: str, request: Optional[Request] = No
 
 # Password functions
 def hash_password(password: str) -> str:
-    salt = bcrypt.gensalt()
-    hashed = bcrypt.hashpw(password.encode("utf-8"), salt)
-    return hashed.decode("utf-8")
+    return _hash_password_service(password)
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
+    return _verify_password_service(plain_password, hashed_password)
 
 # JWT functions
 def create_access_token(user_id: str, email: str, role: str) -> str:
-    payload = {
-        "sub": user_id,
-        "email": email,
-        "role": role,
-        "exp": datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
-        "type": "access"
-    }
-    return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+    return _create_access_token_service(
+        user_id=user_id,
+        email=email,
+        role=role,
+        jwt_secret=get_jwt_secret(),
+        jwt_algorithm=JWT_ALGORITHM,
+        expires_minutes=ACCESS_TOKEN_EXPIRE_MINUTES,
+    )
 
 def create_refresh_token(user_id: str) -> str:
-    payload = {
-        "sub": user_id,
-        "exp": datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS),
-        "type": "refresh"
-    }
-    return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+    return _create_refresh_token_service(
+        user_id=user_id,
+        jwt_secret=get_jwt_secret(),
+        jwt_algorithm=JWT_ALGORITHM,
+        expires_days=REFRESH_TOKEN_EXPIRE_DAYS,
+    )
 
 # Create the main app
 app = FastAPI(title="AutoConnect - Vehicle Inventory Management")
@@ -864,34 +868,20 @@ class DashboardMonthlyCloseUpsert(BaseModel):
 # ============== AUTH HELPER ==============
 
 async def get_current_user(request: Request) -> dict:
-    token = request.cookies.get("access_token")
-    if not token:
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:]
-    if not token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    try:
-        payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
-        if payload.get("type") != "access":
-            raise HTTPException(status_code=401, detail="Invalid token type")
-        user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
-        if not user:
-            raise HTTPException(status_code=401, detail="User not found")
-        user["id"] = str(user["_id"])
-        del user["_id"]
-        user.pop("password_hash", None)
-        return user
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    return await _get_current_user_service(
+        request=request,
+        db=db,
+        jwt_secret=get_jwt_secret(),
+        jwt_algorithm=JWT_ALGORITHM,
+    )
 
 async def get_optional_user(request: Request) -> Optional[dict]:
-    try:
-        return await get_current_user(request)
-    except:
-        return None
+    return await _get_optional_user_service(
+        request=request,
+        db=db,
+        jwt_secret=get_jwt_secret(),
+        jwt_algorithm=JWT_ALGORITHM,
+    )
 
 def serialize_doc(doc: dict) -> dict:
     """Convert MongoDB document to serializable dict"""
