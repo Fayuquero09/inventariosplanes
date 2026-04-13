@@ -26,6 +26,7 @@ from modules.registry import RouteModuleHandlers, register_route_modules
 from modules.sales_routes import SalesRouteHandlers
 from modules.sales_objectives_routes import SalesObjectivesRouteHandlers
 from handlers.catalog_handlers import build_catalog_route_handlers
+from handlers.commissions_handlers import build_commissions_route_handlers
 from handlers.dashboard_handlers import build_dashboard_route_handlers
 from handlers.financial_rates_handlers import build_financial_rates_route_handlers
 from handlers.price_bulletins_handlers import build_price_bulletins_route_handlers
@@ -1726,617 +1727,6 @@ def _build_matrix_models_response(
 def _resolve_matrix_volume_bonus_per_unit(volume_tiers: Optional[List[Dict[str, Any]]], seller_month_units: int) -> float:
     return _resolve_matrix_volume_bonus_per_unit_service(volume_tiers, seller_month_units)
 
-async def _serialize_commission_matrix(agency: Dict[str, Any], matrix_doc: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    brand_name = ""
-    group_name = ""
-    if agency.get("brand_id"):
-        brand = await _find_brand_by_id_commission_repo(db, str(agency["brand_id"]))
-        if brand:
-            brand_name = str(brand.get("name") or "")
-    if agency.get("group_id"):
-        group = await _find_group_by_id_commission_repo(db, str(agency["group_id"]))
-        if group:
-            group_name = str(group.get("name") or "")
-
-    general = _normalize_commission_matrix_general((matrix_doc or {}).get("general"))
-    overrides = _normalize_commission_matrix_models((matrix_doc or {}).get("models"))
-    catalog_models = _get_catalog_models_for_brand(brand_name)
-    models_response = _build_matrix_models_response(catalog_models, overrides, general.get("global_percentage", 0.0))
-
-    return {
-        "agency_id": str(agency.get("_id")),
-        "agency_name": agency.get("name"),
-        "brand_id": str(agency.get("brand_id")) if agency.get("brand_id") else None,
-        "brand_name": brand_name,
-        "group_id": str(agency.get("group_id")) if agency.get("group_id") else None,
-        "group_name": group_name,
-        "general": general,
-        "models": models_response,
-        "updated_at": matrix_doc.get("updated_at").isoformat() if matrix_doc and isinstance(matrix_doc.get("updated_at"), datetime) else None,
-        "updated_by": matrix_doc.get("updated_by") if matrix_doc else None,
-    }
-
-async def get_commission_matrix(request: Request, agency_id: str):
-    current_user = await get_current_user(request)
-    if not ObjectId.is_valid(agency_id):
-        raise HTTPException(status_code=400, detail="Invalid agency_id")
-
-    agency = await _find_agency_by_id_commission_repo(db, agency_id)
-    if not agency:
-        raise HTTPException(status_code=404, detail="Agency not found")
-    _ensure_doc_scope_access(current_user, agency, agency_field="_id", detail="No tienes acceso a esta agencia")
-
-    matrix_doc = await _find_commission_matrix_by_agency_repo(db, agency_id=agency_id)
-    return await _serialize_commission_matrix(agency, matrix_doc)
-
-async def upsert_commission_matrix(payload: CommissionMatrixUpsert, request: Request):
-    current_user = await get_current_user(request)
-    if current_user.get("role") not in COMMISSION_MATRIX_EDITOR_ROLES:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    if not ObjectId.is_valid(payload.agency_id):
-        raise HTTPException(status_code=400, detail="Invalid agency_id")
-
-    agency = await _find_agency_by_id_commission_repo(db, payload.agency_id)
-    if not agency:
-        raise HTTPException(status_code=404, detail="Agency not found")
-    _ensure_doc_scope_access(current_user, agency, agency_field="_id", detail="No tienes acceso a esta agencia")
-
-    now = datetime.now(timezone.utc)
-    normalized_general = _normalize_commission_matrix_general(payload.general.model_dump())
-    normalized_models = _normalize_commission_matrix_models([model.model_dump() for model in payload.models])
-
-    matrix_upsert_payload = _build_commission_matrix_upsert_fields_service(
-        agency_id=payload.agency_id,
-        brand_id=agency.get("brand_id"),
-        group_id=agency.get("group_id"),
-        normalized_general=normalized_general,
-        normalized_models=normalized_models,
-        current_user_id=current_user.get("id"),
-        now=now,
-    )
-    await _upsert_commission_matrix_by_agency_repo(
-        db,
-        agency_id=payload.agency_id,
-        set_fields=matrix_upsert_payload["set_fields"],
-        set_on_insert=matrix_upsert_payload["set_on_insert"],
-    )
-
-    matrix_doc = await _find_commission_matrix_by_agency_repo(db, agency_id=payload.agency_id)
-
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="upsert_commission_matrix",
-        entity_type="commission_matrix",
-        entity_id=str(matrix_doc.get("_id")) if matrix_doc else None,
-        group_id=str(agency.get("group_id")) if agency.get("group_id") else None,
-        brand_id=str(agency.get("brand_id")) if agency.get("brand_id") else None,
-        agency_id=payload.agency_id,
-        details={
-            "general": normalized_general,
-            "models_count": len(normalized_models),
-        },
-    )
-
-    return await _serialize_commission_matrix(agency, matrix_doc)
-
-async def create_commission_rule(rule_data: CommissionRuleCreate, request: Request):
-    current_user = await get_current_user(request)
-    if current_user.get("role") not in COMMISSION_PROPOSER_ROLES:
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    if not ObjectId.is_valid(rule_data.agency_id):
-        raise HTTPException(status_code=400, detail="Invalid agency_id")
-    
-    agency = await _find_agency_by_id_commission_repo(db, rule_data.agency_id)
-    if not agency:
-        raise HTTPException(status_code=404, detail="Agency not found")
-    _ensure_doc_scope_access(current_user, agency, agency_field="_id", detail="No tienes acceso a esta agencia")
-
-    now = datetime.now(timezone.utc)
-    rule_doc = _build_commission_rule_doc_service(
-        agency_id=rule_data.agency_id,
-        brand_id=agency.get("brand_id"),
-        group_id=agency.get("group_id"),
-        name=rule_data.name,
-        rule_type=rule_data.rule_type,
-        value=rule_data.value,
-        min_units=rule_data.min_units,
-        max_units=rule_data.max_units,
-        current_user_id=current_user.get("id"),
-        now=now,
-        pending_status=COMMISSION_PENDING,
-    )
-    inserted_rule_id = await _insert_commission_rule_repo(db, rule_doc)
-    rule_doc["id"] = inserted_rule_id
-
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="create_commission_rule",
-        entity_type="commission_rule",
-        entity_id=inserted_rule_id,
-        group_id=rule_doc.get("group_id"),
-        brand_id=rule_doc.get("brand_id"),
-        agency_id=rule_doc.get("agency_id"),
-        details={
-            "name": rule_data.name,
-            "rule_type": rule_data.rule_type,
-            "value": rule_data.value,
-            "min_units": rule_data.min_units,
-            "max_units": rule_data.max_units,
-            "approval_status": COMMISSION_PENDING,
-        },
-    )
-    return serialize_doc(rule_doc)
-
-async def _serialize_commission_rule(rule_doc: Dict[str, Any]) -> Dict[str, Any]:
-    serialized = serialize_doc(rule_doc)
-    serialized["approval_status"] = _normalize_commission_status_service(
-        serialized.get("approval_status"),
-        pending_status=COMMISSION_PENDING,
-        approved_status=COMMISSION_APPROVED,
-        rejected_status=COMMISSION_REJECTED,
-    )
-
-    if rule_doc.get("agency_id"):
-        agency = await _find_agency_by_id_commission_repo(db, rule_doc["agency_id"])
-        if agency:
-            serialized["agency_name"] = agency["name"]
-    if rule_doc.get("brand_id"):
-        brand = await _find_brand_by_id_commission_repo(db, rule_doc["brand_id"])
-        if brand:
-            serialized["brand_name"] = brand["name"]
-    if rule_doc.get("group_id"):
-        group = await _find_group_by_id_commission_repo(db, rule_doc["group_id"])
-        if group:
-            serialized["group_name"] = group["name"]
-
-    if rule_doc.get("submitted_by") and ObjectId.is_valid(rule_doc["submitted_by"]):
-        submitter = await _find_user_by_id_commission_repo(db, rule_doc["submitted_by"])
-        if submitter:
-            serialized["submitted_by_name"] = submitter.get("name")
-    if rule_doc.get("approved_by") and ObjectId.is_valid(rule_doc["approved_by"]):
-        approver = await _find_user_by_id_commission_repo(db, rule_doc["approved_by"])
-        if approver:
-            serialized["approved_by_name"] = approver.get("name")
-    if rule_doc.get("rejected_by") and ObjectId.is_valid(rule_doc["rejected_by"]):
-        rejector = await _find_user_by_id_commission_repo(db, rule_doc["rejected_by"])
-        if rejector:
-            serialized["rejected_by_name"] = rejector.get("name")
-    return serialized
-
-async def get_commission_rules(
-    request: Request, 
-    group_id: Optional[str] = None,
-    brand_id: Optional[str] = None,
-    agency_id: Optional[str] = None
-):
-    current_user = await get_current_user(request)
-    query = _build_scope_query(current_user)
-    if not _scope_query_has_access(query):
-        return []
-
-    _validate_scope_filters(current_user, group_id=group_id, brand_id=brand_id, agency_id=agency_id)
-    if agency_id:
-        query["agency_id"] = agency_id
-    elif brand_id:
-        query["brand_id"] = brand_id
-    elif group_id:
-        query["group_id"] = group_id
-    
-    rules = await _list_commission_rules_repo(db, query=query, limit=1000)
-    result = [await _serialize_commission_rule(rule) for rule in rules]
-    return result
-
-async def update_commission_rule(rule_id: str, rule_data: CommissionRuleCreate, request: Request):
-    current_user = await get_current_user(request)
-    if current_user.get("role") not in COMMISSION_PROPOSER_ROLES:
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    if not ObjectId.is_valid(rule_id):
-        raise HTTPException(status_code=400, detail="Invalid rule_id")
-    
-    previous = await _find_commission_rule_by_id_repo(db, rule_id)
-    _ensure_doc_scope_access(current_user, previous, detail="No tienes acceso a esta regla")
-    now = datetime.now(timezone.utc)
-    update_fields = _build_commission_rule_update_fields_service(
-        name=rule_data.name,
-        rule_type=rule_data.rule_type,
-        value=rule_data.value,
-        min_units=rule_data.min_units,
-        max_units=rule_data.max_units,
-        current_user_id=current_user.get("id"),
-        now=now,
-        pending_status=COMMISSION_PENDING,
-    )
-    await _update_commission_rule_by_id_repo(
-        db,
-        rule_id=rule_id,
-        set_fields=update_fields,
-    )
-    rule = await _find_commission_rule_by_id_repo(db, rule_id)
-
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="update_commission_rule",
-        entity_type="commission_rule",
-        entity_id=rule_id,
-        group_id=rule.get("group_id") if rule else previous.get("group_id") if previous else None,
-        brand_id=rule.get("brand_id") if rule else previous.get("brand_id") if previous else None,
-        agency_id=rule.get("agency_id") if rule else previous.get("agency_id") if previous else None,
-        details={
-            "before": {
-                "name": previous.get("name") if previous else None,
-                "rule_type": previous.get("rule_type") if previous else None,
-                "value": previous.get("value") if previous else None,
-                "min_units": previous.get("min_units") if previous else None,
-                "max_units": previous.get("max_units") if previous else None,
-                "approval_status": previous.get("approval_status") if previous else None,
-            },
-            "after": {
-                "name": rule.get("name") if rule else None,
-                "rule_type": rule.get("rule_type") if rule else None,
-                "value": rule.get("value") if rule else None,
-                "min_units": rule.get("min_units") if rule else None,
-                "max_units": rule.get("max_units") if rule else None,
-                "approval_status": rule.get("approval_status") if rule else None,
-            },
-        },
-    )
-    return await _serialize_commission_rule(rule)
-
-async def approve_commission_rule(
-    rule_id: str,
-    approval: CommissionApprovalAction,
-    request: Request,
-):
-    current_user = await get_current_user(request)
-    if current_user.get("role") not in COMMISSION_APPROVER_ROLES:
-        raise HTTPException(status_code=403, detail="Solo gerente general operativo puede aprobar reglas")
-
-    if not ObjectId.is_valid(rule_id):
-        raise HTTPException(status_code=400, detail="Invalid rule_id")
-
-    previous = await _find_commission_rule_by_id_repo(db, rule_id)
-    _ensure_doc_scope_access(current_user, previous, detail="No tienes acceso a esta regla")
-
-    now = datetime.now(timezone.utc)
-    try:
-        update_fields = _build_commission_approval_update_fields_service(
-            decision=approval.decision,
-            comment=approval.comment,
-            current_user_id=current_user.get("id"),
-            now=now,
-            approved_status=COMMISSION_APPROVED,
-            rejected_status=COMMISSION_REJECTED,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    await _update_commission_rule_by_id_repo(
-        db,
-        rule_id=rule_id,
-        set_fields=update_fields,
-    )
-    rule = await _find_commission_rule_by_id_repo(db, rule_id)
-
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="approve_commission_rule",
-        entity_type="commission_rule",
-        entity_id=rule_id,
-        group_id=rule.get("group_id") if rule else previous.get("group_id") if previous else None,
-        brand_id=rule.get("brand_id") if rule else previous.get("brand_id") if previous else None,
-        agency_id=rule.get("agency_id") if rule else previous.get("agency_id") if previous else None,
-        details={
-            "before_status": previous.get("approval_status") if previous else None,
-            "after_status": rule.get("approval_status") if rule else None,
-            "comment": update_fields.get("approval_comment"),
-        },
-    )
-    return await _serialize_commission_rule(rule)
-
-async def delete_commission_rule(rule_id: str, request: Request):
-    current_user = await get_current_user(request)
-    role = current_user.get("role")
-    if role not in COMMISSION_PROPOSER_ROLES and role not in COMMISSION_APPROVER_ROLES:
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    if not ObjectId.is_valid(rule_id):
-        raise HTTPException(status_code=400, detail="Invalid rule_id")
-    
-    previous = await _find_commission_rule_by_id_repo(db, rule_id)
-    _ensure_doc_scope_access(current_user, previous, detail="No tienes acceso a esta regla")
-    previous_status = str(previous.get("approval_status") or "").strip().lower()
-    if role in COMMISSION_PROPOSER_ROLES and previous_status == COMMISSION_APPROVED:
-        raise HTTPException(status_code=403, detail="Solo gerencia general puede borrar reglas aprobadas")
-    await _delete_commission_rule_by_id_repo(db, rule_id=rule_id)
-
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="delete_commission_rule",
-        entity_type="commission_rule",
-        entity_id=rule_id,
-        group_id=previous.get("group_id") if previous else None,
-        brand_id=previous.get("brand_id") if previous else None,
-        agency_id=previous.get("agency_id") if previous else None,
-        details={
-            "name": previous.get("name") if previous else None,
-            "rule_type": previous.get("rule_type") if previous else None,
-            "value": previous.get("value") if previous else None,
-        },
-    )
-    return {"message": "Rule deleted"}
-
-async def commission_simulator(payload: CommissionSimulatorInput, request: Request):
-    current_user = await get_current_user(request)
-    role = current_user.get("role")
-    if role not in DEALER_SALES_EFFECTIVE_ROLES and role not in DEALER_GENERAL_EFFECTIVE_ROLES and role != DEALER_SELLER_ROLE:
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    if not ObjectId.is_valid(payload.agency_id):
-        raise HTTPException(status_code=400, detail="Invalid agency_id")
-    agency = await _find_agency_by_id_commission_repo(db, payload.agency_id)
-    if not agency:
-        raise HTTPException(status_code=404, detail="Agency not found")
-    _ensure_doc_scope_access(current_user, agency, agency_field="_id", detail="No tienes acceso a esta agencia")
-
-    if role == DEALER_SELLER_ROLE:
-        seller_id = current_user.get("id")
-        if not seller_id:
-            raise HTTPException(status_code=400, detail="Seller identity not found")
-    else:
-        seller_id = payload.seller_id
-        if seller_id and not ObjectId.is_valid(seller_id):
-            raise HTTPException(status_code=400, detail="Invalid seller_id")
-        if seller_id:
-            seller = await _find_user_by_id_commission_repo(db, seller_id)
-            if not seller:
-                raise HTTPException(status_code=404, detail="Seller not found")
-            _ensure_doc_scope_access(current_user, seller, detail="No tienes acceso a este vendedor")
-            if seller.get("role") != UserRole.SELLER:
-                raise HTTPException(status_code=400, detail="Selected user is not a seller")
-            if seller.get("agency_id") != payload.agency_id:
-                raise HTTPException(status_code=400, detail="Seller does not belong to selected agency")
-
-    rules = await list_active_rules_by_agency(
-        db,
-        agency_id=payload.agency_id,
-        approved_status=COMMISSION_APPROVED,
-        limit=1000,
-    )
-
-    projection = _build_commission_simulator_projection_service(
-        rules=rules,
-        units=payload.units,
-        average_ticket=payload.average_ticket,
-        average_fi_revenue=payload.average_fi_revenue,
-        target_commission=payload.target_commission,
-        calculate_commission_from_rules=_calculate_commission_from_rules,
-    )
-
-    return {
-        "agency_id": payload.agency_id,
-        "seller_id": seller_id,
-        "target_commission": payload.target_commission,
-        "units": payload.units,
-        "average_ticket": payload.average_ticket,
-        "average_fi_revenue": payload.average_fi_revenue,
-        "estimated_commission": projection["estimated_commission"],
-        "difference_vs_target": projection["difference_vs_target"],
-        "suggested_units_to_target": projection["suggested_units_to_target"],
-    }
-
-async def create_commission_closure(payload: CommissionClosureCreate, request: Request):
-    current_user = await get_current_user(request)
-    role = current_user.get("role")
-    if role not in COMMISSION_PROPOSER_ROLES:
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    if not ObjectId.is_valid(payload.agency_id):
-        raise HTTPException(status_code=400, detail="Invalid agency_id")
-    if not ObjectId.is_valid(payload.seller_id):
-        raise HTTPException(status_code=400, detail="Invalid seller_id")
-
-    agency = await _find_agency_by_id_commission_repo(db, payload.agency_id)
-    if not agency:
-        raise HTTPException(status_code=404, detail="Agency not found")
-    _ensure_doc_scope_access(current_user, agency, agency_field="_id", detail="No tienes acceso a esta agencia")
-
-    seller = await _find_user_by_id_commission_repo(db, payload.seller_id)
-    if not seller:
-        raise HTTPException(status_code=404, detail="Seller not found")
-    _ensure_doc_scope_access(current_user, seller, detail="No tienes acceso a este vendedor")
-    if seller.get("role") != UserRole.SELLER:
-        raise HTTPException(status_code=400, detail="Selected user is not a seller")
-    if seller.get("agency_id") != payload.agency_id:
-        raise HTTPException(status_code=400, detail="Seller does not belong to selected agency")
-
-    start_date, end_date = _build_month_bounds_service(payload.year, payload.month)
-    sales = await _list_sales_for_closure_repo(
-        db,
-        agency_id=payload.agency_id,
-        seller_id=payload.seller_id,
-        start_date=start_date,
-        end_date=end_date,
-        limit=10000,
-    )
-    now = datetime.now(timezone.utc)
-    snapshot = _build_commission_closure_snapshot_service(
-        sales=sales,
-        now=now,
-    )
-
-    existing = await _find_commission_closure_by_scope_repo(
-        db,
-        seller_id=payload.seller_id,
-        agency_id=payload.agency_id,
-        month=payload.month,
-        year=payload.year,
-    )
-    if existing and str(existing.get("approval_status") or "").strip().lower() == COMMISSION_APPROVED:
-        raise HTTPException(status_code=409, detail="Approved closure cannot be modified")
-
-    closure_doc = _build_commission_closure_doc_service(
-        seller_id=payload.seller_id,
-        agency_id=payload.agency_id,
-        brand_id=agency.get("brand_id"),
-        group_id=agency.get("group_id"),
-        month=payload.month,
-        year=payload.year,
-        snapshot=snapshot,
-        current_user_id=current_user.get("id"),
-        now=now,
-        pending_status=COMMISSION_PENDING,
-    )
-
-    if existing:
-        await _update_commission_closure_by_id_repo(
-            db,
-            closure_id=str(existing["_id"]),
-            set_fields=closure_doc,
-        )
-        closure = await _find_commission_closure_by_id_repo(db, str(existing["_id"]))
-        entity_id = str(existing["_id"])
-        action = "update_commission_closure"
-    else:
-        entity_id = await _insert_commission_closure_repo(db, closure_doc)
-        closure = await _find_commission_closure_by_id_repo(db, entity_id)
-        action = "create_commission_closure"
-
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action=action,
-        entity_type="commission_closure",
-        entity_id=entity_id,
-        group_id=closure.get("group_id"),
-        brand_id=closure.get("brand_id"),
-        agency_id=closure.get("agency_id"),
-        details={
-            "seller_id": payload.seller_id,
-            "month": payload.month,
-            "year": payload.year,
-            "snapshot": snapshot,
-            "approval_status": COMMISSION_PENDING,
-        },
-    )
-    return serialize_doc(closure)
-
-async def get_commission_closures(
-    request: Request,
-    group_id: Optional[str] = None,
-    brand_id: Optional[str] = None,
-    agency_id: Optional[str] = None,
-    seller_id: Optional[str] = None,
-    month: Optional[int] = None,
-    year: Optional[int] = None,
-):
-    current_user = await get_current_user(request)
-    query = _build_scope_query(current_user)
-    if not _scope_query_has_access(query):
-        return []
-
-    _validate_scope_filters(current_user, group_id=group_id, brand_id=brand_id, agency_id=agency_id)
-    if group_id:
-        query["group_id"] = group_id
-    if brand_id:
-        query["brand_id"] = brand_id
-    if agency_id:
-        query["agency_id"] = agency_id
-    if seller_id:
-        query["seller_id"] = seller_id
-    if month:
-        query["month"] = month
-    if year:
-        query["year"] = year
-
-    closures = await _list_commission_closures_repo(db, query=query, limit=1000)
-    enriched: List[Dict[str, Any]] = []
-    for closure in closures:
-        closure["approval_status"] = _normalize_commission_status_service(
-            closure.get("approval_status"),
-            pending_status=COMMISSION_PENDING,
-            approved_status=COMMISSION_APPROVED,
-            rejected_status=COMMISSION_REJECTED,
-        )
-
-        if closure.get("seller_id") and ObjectId.is_valid(closure["seller_id"]):
-            seller = await _find_user_by_id_commission_repo(db, closure["seller_id"])
-            if seller:
-                closure["seller_name"] = seller.get("name")
-        if closure.get("agency_id") and ObjectId.is_valid(closure["agency_id"]):
-            agency = await _find_agency_by_id_commission_repo(db, closure["agency_id"])
-            if agency:
-                closure["agency_name"] = agency.get("name")
-        if closure.get("brand_id") and ObjectId.is_valid(closure["brand_id"]):
-            brand = await _find_brand_by_id_commission_repo(db, closure["brand_id"])
-            if brand:
-                closure["brand_name"] = brand.get("name")
-        if closure.get("group_id") and ObjectId.is_valid(closure["group_id"]):
-            group = await _find_group_by_id_commission_repo(db, closure["group_id"])
-            if group:
-                closure["group_name"] = group.get("name")
-
-        enriched.append(closure)
-    return [serialize_doc(c) for c in enriched]
-
-async def approve_commission_closure(
-    closure_id: str,
-    approval: CommissionClosureApprovalAction,
-    request: Request,
-):
-    current_user = await get_current_user(request)
-    if current_user.get("role") not in COMMISSION_APPROVER_ROLES:
-        raise HTTPException(status_code=403, detail="Solo gerente general operativo puede aprobar cierres")
-
-    if not ObjectId.is_valid(closure_id):
-        raise HTTPException(status_code=400, detail="Invalid closure_id")
-
-    previous = await _find_commission_closure_by_id_repo(db, closure_id)
-    _ensure_doc_scope_access(current_user, previous, detail="No tienes acceso a este cierre")
-
-    now = datetime.now(timezone.utc)
-    try:
-        update_fields = _build_commission_approval_update_fields_service(
-            decision=approval.decision,
-            comment=approval.comment,
-            current_user_id=current_user.get("id"),
-            now=now,
-            approved_status=COMMISSION_APPROVED,
-            rejected_status=COMMISSION_REJECTED,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    await _update_commission_closure_by_id_repo(
-        db,
-        closure_id=closure_id,
-        set_fields=update_fields,
-    )
-    closure = await _find_commission_closure_by_id_repo(db, closure_id)
-
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="approve_commission_closure",
-        entity_type="commission_closure",
-        entity_id=closure_id,
-        group_id=closure.get("group_id") if closure else previous.get("group_id") if previous else None,
-        brand_id=closure.get("brand_id") if closure else previous.get("brand_id") if previous else None,
-        agency_id=closure.get("agency_id") if closure else previous.get("agency_id") if previous else None,
-        details={
-            "before_status": previous.get("approval_status") if previous else None,
-            "after_status": closure.get("approval_status") if closure else None,
-            "comment": update_fields.get("approval_comment"),
-        },
-    )
-    return serialize_doc(closure)
-
 # ============== SALES ROUTES ==============
 
 async def calculate_commission(
@@ -2741,6 +2131,74 @@ get_sales_objectives = _sales_objectives_route_handlers.get_sales_objectives
 get_sales_objective_suggestion = _sales_objectives_route_handlers.get_sales_objective_suggestion
 update_sales_objective = _sales_objectives_route_handlers.update_sales_objective
 approve_sales_objective = _sales_objectives_route_handlers.approve_sales_objective
+
+# ============== COMMISSIONS ROUTE HANDLERS ==============
+
+_commissions_route_handlers = build_commissions_route_handlers(
+    db=db,
+    get_current_user=get_current_user,
+    object_id_cls=ObjectId,
+    ensure_doc_scope_access=_ensure_doc_scope_access,
+    log_audit_event=log_audit_event,
+    serialize_doc=serialize_doc,
+    build_scope_query=_build_scope_query,
+    scope_query_has_access=_scope_query_has_access,
+    validate_scope_filters=_validate_scope_filters,
+    normalize_commission_matrix_general=_normalize_commission_matrix_general,
+    normalize_commission_matrix_models=_normalize_commission_matrix_models,
+    get_catalog_models_for_brand=_get_catalog_models_for_brand,
+    build_matrix_models_response=_build_matrix_models_response,
+    to_non_negative_float=_to_non_negative_float,
+    normalize_commission_status=_normalize_commission_status_service,
+    commission_matrix_editor_roles=COMMISSION_MATRIX_EDITOR_ROLES,
+    commission_proposer_roles=COMMISSION_PROPOSER_ROLES,
+    commission_approver_roles=COMMISSION_APPROVER_ROLES,
+    commission_pending=COMMISSION_PENDING,
+    commission_approved=COMMISSION_APPROVED,
+    commission_rejected=COMMISSION_REJECTED,
+    dealer_sales_effective_roles=DEALER_SALES_EFFECTIVE_ROLES,
+    dealer_general_effective_roles=DEALER_GENERAL_EFFECTIVE_ROLES,
+    dealer_seller_role=DEALER_SELLER_ROLE,
+    seller_role=UserRole.SELLER,
+    find_agency_by_id=_find_agency_by_id_commission_repo,
+    find_brand_by_id=_find_brand_by_id_commission_repo,
+    find_group_by_id=_find_group_by_id_commission_repo,
+    find_user_by_id=_find_user_by_id_commission_repo,
+    find_commission_matrix_by_agency=_find_commission_matrix_by_agency_repo,
+    upsert_commission_matrix_by_agency=_upsert_commission_matrix_by_agency_repo,
+    build_commission_matrix_upsert_fields=_build_commission_matrix_upsert_fields_service,
+    build_commission_rule_doc=_build_commission_rule_doc_service,
+    insert_commission_rule=_insert_commission_rule_repo,
+    list_commission_rules=_list_commission_rules_repo,
+    find_commission_rule_by_id=_find_commission_rule_by_id_repo,
+    build_commission_rule_update_fields=_build_commission_rule_update_fields_service,
+    update_commission_rule_by_id=_update_commission_rule_by_id_repo,
+    build_commission_approval_update_fields=_build_commission_approval_update_fields_service,
+    delete_commission_rule_by_id=_delete_commission_rule_by_id_repo,
+    list_active_rules_by_agency=list_active_rules_by_agency,
+    build_commission_simulator_projection=_build_commission_simulator_projection_service,
+    calculate_commission_from_rules=_calculate_commission_from_rules,
+    build_month_bounds=_build_month_bounds_service,
+    list_sales_for_closure=_list_sales_for_closure_repo,
+    build_commission_closure_snapshot=_build_commission_closure_snapshot_service,
+    find_commission_closure_by_scope=_find_commission_closure_by_scope_repo,
+    build_commission_closure_doc=_build_commission_closure_doc_service,
+    update_commission_closure_by_id=_update_commission_closure_by_id_repo,
+    find_commission_closure_by_id=_find_commission_closure_by_id_repo,
+    insert_commission_closure=_insert_commission_closure_repo,
+    list_commission_closures=_list_commission_closures_repo,
+)
+get_commission_matrix = _commissions_route_handlers.get_commission_matrix
+upsert_commission_matrix = _commissions_route_handlers.upsert_commission_matrix
+create_commission_rule = _commissions_route_handlers.create_commission_rule
+get_commission_rules = _commissions_route_handlers.get_commission_rules
+update_commission_rule = _commissions_route_handlers.update_commission_rule
+approve_commission_rule = _commissions_route_handlers.approve_commission_rule
+delete_commission_rule = _commissions_route_handlers.delete_commission_rule
+commission_simulator = _commissions_route_handlers.commission_simulator
+create_commission_closure = _commissions_route_handlers.create_commission_closure
+get_commission_closures = _commissions_route_handlers.get_commission_closures
+approve_commission_closure = _commissions_route_handlers.approve_commission_closure
 
 # ============== DASHBOARD ROUTE HANDLERS ==============
 
