@@ -29,6 +29,7 @@ from modules.sales_objectives_routes import SalesObjectivesRouteHandlers
 from handlers.catalog_handlers import build_catalog_route_handlers
 from handlers.financial_rates_handlers import build_financial_rates_route_handlers
 from handlers.price_bulletins_handlers import build_price_bulletins_route_handlers
+from handlers.sales_handlers import build_sales_route_handlers
 from handlers.vehicles_handlers import build_vehicles_route_handlers
 from schemas.api_models import (
     AgencyCreate,
@@ -2741,119 +2742,6 @@ def _apply_aging_plan_to_effective_pricing(
         "total_amount": round(applied_sale_discount + applied_seller_bonus, 2),
     }
 
-async def create_sale(sale_data: SaleCreate, request: Request):
-    current_user = await get_current_user(request)
-    if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN, UserRole.BRAND_ADMIN, UserRole.AGENCY_ADMIN, UserRole.SELLER]:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    
-    vehicle = await find_sales_vehicle_by_id(db, sale_data.vehicle_id)
-    if not vehicle:
-        raise HTTPException(status_code=404, detail="Vehicle not found")
-    _ensure_doc_scope_access(current_user, vehicle, detail="No tienes acceso a este vehículo")
-
-    if current_user["role"] == UserRole.SELLER and sale_data.seller_id != current_user.get("id"):
-        raise HTTPException(status_code=403, detail="Seller can only register own sales")
-    if sale_data.seller_id:
-        target_seller = await find_user_by_id(db, sale_data.seller_id)
-        if not target_seller:
-            raise HTTPException(status_code=404, detail="Seller not found")
-        _ensure_doc_scope_access(
-            current_user,
-            target_seller,
-            detail="No tienes acceso a este vendedor",
-        )
-    creation_result = await create_sale_record(
-        db,
-        sale_data=sale_data.model_dump(),
-        vehicle=vehicle,
-        calculate_commission=calculate_commission,
-        resolve_effective_sale_pricing_for_model=_resolve_effective_sale_pricing_for_model,
-        apply_manual_sale_price_override=_apply_manual_sale_price_override,
-        extract_active_aging_incentive_plan=_extract_active_aging_incentive_plan,
-        apply_aging_plan_to_effective_pricing=_apply_aging_plan_to_effective_pricing,
-        to_non_negative_float=_to_non_negative_float,
-    )
-    sale_doc = creation_result["sale_doc"]
-    sale_id = creation_result["sale_id"]
-    effective_pricing = creation_result["effective_pricing"]
-    applied_aging = creation_result["applied_aging"]
-    resolved_sale_price = creation_result["resolved_sale_price"]
-    base_commission = creation_result["base_commission"]
-    commission = sale_doc.get("commission", 0)
-
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="create_sale",
-        entity_type="sale",
-        entity_id=str(sale_id),
-        group_id=sale_doc.get("group_id"),
-        brand_id=sale_doc.get("brand_id"),
-        agency_id=sale_doc.get("agency_id"),
-        details={
-            "vehicle_id": sale_data.vehicle_id,
-            "seller_id": sale_data.seller_id,
-            "sale_price": resolved_sale_price,
-            "commission_base_price": round(_to_non_negative_float(effective_pricing.get("commission_base_price"), resolved_sale_price), 2),
-            "effective_revenue": round(_to_non_negative_float(effective_pricing.get("effective_revenue"), resolved_sale_price), 2),
-            "brand_incentive_amount": round(_to_non_negative_float(effective_pricing.get("brand_incentive_amount"), 0.0), 2),
-            "dealer_incentive_amount": round(_to_non_negative_float(effective_pricing.get("dealer_incentive_amount"), 0.0), 2),
-            "undocumented_dealer_incentive_amount": round(_to_non_negative_float(effective_pricing.get("undocumented_dealer_incentive_amount"), 0.0), 2),
-            "aging_incentive_sale_discount_amount": round(_to_non_negative_float(applied_aging.get("sale_discount_amount"), 0.0), 2),
-            "aging_incentive_seller_bonus_amount": round(_to_non_negative_float(applied_aging.get("seller_bonus_amount"), 0.0), 2),
-            "aging_incentive_total_amount": round(_to_non_negative_float(applied_aging.get("total_amount"), 0.0), 2),
-            "fi_revenue": sale_data.fi_revenue,
-            "plant_incentive": sale_data.plant_incentive,
-            "base_commission": base_commission,
-            "commission": commission,
-        },
-    )
-
-    sale_doc["id"] = str(sale_id)
-    return serialize_doc(sale_doc)
-
-async def get_sales(
-    request: Request,
-    agency_id: Optional[str] = None,
-    seller_id: Optional[str] = None,
-    month: Optional[int] = None,
-    year: Optional[int] = None
-):
-    current_user = await get_current_user(request)
-    query = _build_scope_query(current_user)
-    if not _scope_query_has_access(query):
-        return []
-
-    _validate_scope_filters(current_user, agency_id=agency_id)
-    if agency_id:
-        query["agency_id"] = agency_id
-    if current_user["role"] == UserRole.SELLER and current_user.get("id"):
-        query["seller_id"] = current_user["id"]
-
-    if current_user["role"] == UserRole.SELLER:
-        current_seller_id = current_user.get("id")
-        if not current_seller_id:
-            return []
-        if seller_id and seller_id != current_seller_id:
-            raise HTTPException(status_code=403, detail="No tienes acceso a este vendedor")
-        query["seller_id"] = current_seller_id
-    elif seller_id:
-        query["seller_id"] = seller_id
-    if month and year:
-        start_date = datetime(year, month, 1, tzinfo=timezone.utc)
-        if month == 12:
-            end_date = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
-        else:
-            end_date = datetime(year, month + 1, 1, tzinfo=timezone.utc)
-        query["sale_date"] = {"$gte": start_date, "$lt": end_date}
-
-    return await list_sales_with_enrichment(
-        db,
-        query=query,
-        serialize_doc=serialize_doc,
-        limit=1000,
-    )
-
 # ============== DASHBOARD / ANALYTICS ROUTES ==============
 
 async def _resolve_dashboard_scope_group_id(scope_query: Dict[str, Any]) -> Optional[str]:
@@ -3388,6 +3276,40 @@ _price_bulletins_route_handlers = build_price_bulletins_route_handlers(
 get_price_bulletins = _price_bulletins_route_handlers.get_price_bulletins
 upsert_price_bulletins_bulk = _price_bulletins_route_handlers.upsert_price_bulletins_bulk
 delete_price_bulletin = _price_bulletins_route_handlers.delete_price_bulletin
+
+# ============== SALES ROUTE HANDLERS ==============
+
+_sale_creator_roles = [
+    UserRole.APP_ADMIN,
+    UserRole.GROUP_ADMIN,
+    UserRole.BRAND_ADMIN,
+    UserRole.AGENCY_ADMIN,
+    UserRole.SELLER,
+]
+_sales_route_handlers = build_sales_route_handlers(
+    db=db,
+    get_current_user=get_current_user,
+    sale_creator_roles=_sale_creator_roles,
+    seller_role=UserRole.SELLER,
+    find_sales_vehicle_by_id=find_sales_vehicle_by_id,
+    ensure_doc_scope_access=_ensure_doc_scope_access,
+    find_user_by_id=find_user_by_id,
+    create_sale_record=create_sale_record,
+    calculate_commission=calculate_commission,
+    resolve_effective_sale_pricing_for_model=_resolve_effective_sale_pricing_for_model,
+    apply_manual_sale_price_override=_apply_manual_sale_price_override,
+    extract_active_aging_incentive_plan=_extract_active_aging_incentive_plan,
+    apply_aging_plan_to_effective_pricing=_apply_aging_plan_to_effective_pricing,
+    to_non_negative_float=_to_non_negative_float,
+    log_audit_event=log_audit_event,
+    serialize_doc=serialize_doc,
+    build_scope_query=_build_scope_query,
+    scope_query_has_access=_scope_query_has_access,
+    validate_scope_filters=_validate_scope_filters,
+    list_sales_with_enrichment=list_sales_with_enrichment,
+)
+create_sale = _sales_route_handlers.create_sale
+get_sales = _sales_route_handlers.get_sales
 
 # ============== ROOT ROUTE ==============
 
