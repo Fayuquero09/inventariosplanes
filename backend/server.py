@@ -33,6 +33,7 @@ from handlers.financial_rates_handlers import build_financial_rates_route_handle
 from handlers.import_handlers import build_import_route_handlers
 from handlers.organization_catalog_handlers import build_organization_catalog_route_handlers
 from handlers.price_bulletins_handlers import build_price_bulletins_route_handlers
+from handlers.runtime_helpers import build_runtime_helper_bundle
 from handlers.sales_handlers import build_sales_route_handlers
 from handlers.sales_objectives_handlers import build_sales_objectives_route_handlers
 from handlers.vehicles_handlers import build_vehicles_route_handlers
@@ -984,123 +985,33 @@ def _build_matrix_models_response(
 def _resolve_matrix_volume_bonus_per_unit(volume_tiers: Optional[List[Dict[str, Any]]], seller_month_units: int) -> float:
     return _resolve_matrix_volume_bonus_per_unit_service(volume_tiers, seller_month_units)
 
-# ============== SALES ROUTES ==============
+# ============== RUNTIME HELPER BUNDLE ==============
 
-async def calculate_commission(
-    sale: dict,
-    agency_id: str,
-    seller_id: str,
-    *,
-    vehicle: Optional[Dict[str, Any]] = None,
-    sale_date: Optional[datetime] = None,
-) -> float:
-    return await _calculate_commission_service(
-        db,
-        sale=sale,
-        agency_id=agency_id,
-        seller_id=seller_id,
-        vehicle=vehicle,
-        sale_date=sale_date,
-        approved_status=COMMISSION_APPROVED,
-        normalize_general=_normalize_commission_matrix_general,
-        normalize_models=_normalize_commission_matrix_models,
-        resolve_volume_bonus_per_unit=_resolve_matrix_volume_bonus_per_unit,
-        to_non_negative_float=_to_non_negative_float,
-        sale_commission_base_price=_sale_commission_base_price,
-        coerce_utc_datetime=_coerce_utc_datetime,
-        default_plant_share_pct=COMMISSION_MATRIX_DEFAULT_PLANT_SHARE_PCT,
-    )
-
-def _extract_active_aging_incentive_plan(vehicle: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    plan = (vehicle or {}).get("aging_incentive_plan")
-    if not isinstance(plan, dict):
-        return None
-    if not bool(plan.get("active")):
-        return None
-
-    sale_discount_amount = round(_to_non_negative_float(plan.get("sale_discount_amount"), 0.0), 2)
-    seller_bonus_amount = round(_to_non_negative_float(plan.get("seller_bonus_amount"), 0.0), 2)
-    total_amount = round(sale_discount_amount + seller_bonus_amount, 2)
-    if total_amount <= 0:
-        return None
-
-    return {
-        "sale_discount_amount": sale_discount_amount,
-        "seller_bonus_amount": seller_bonus_amount,
-        "total_amount": total_amount,
-        "suggested_amount": round(_to_non_negative_float(plan.get("suggested_amount"), 0.0), 2),
-        "configured_by": plan.get("configured_by"),
-        "configured_by_name": plan.get("configured_by_name"),
-        "configured_at": plan.get("configured_at"),
-    }
-
-
-def _apply_aging_plan_to_effective_pricing(
-    effective_pricing: Dict[str, Any],
-    aging_plan: Optional[Dict[str, Any]],
-) -> Tuple[Dict[str, Any], Dict[str, float]]:
-    pricing = dict(effective_pricing or {})
-    applied_sale_discount = 0.0
-    applied_seller_bonus = 0.0
-
-    if aging_plan:
-        transaction_price = _to_non_negative_float(pricing.get("transaction_price"), 0.0)
-        planned_sale_discount = _to_non_negative_float(aging_plan.get("sale_discount_amount"), 0.0)
-        applied_sale_discount = round(min(transaction_price, planned_sale_discount), 2)
-        transaction_price = round(max(0.0, transaction_price - applied_sale_discount), 2)
-        pricing["transaction_price"] = transaction_price
-
-        brand_incentive_amount = _to_non_negative_float(pricing.get("brand_incentive_amount"), 0.0)
-        pricing["commission_base_price"] = round(transaction_price + brand_incentive_amount, 2)
-        pricing["effective_revenue"] = round(transaction_price + brand_incentive_amount, 2)
-
-        applied_seller_bonus = round(_to_non_negative_float(aging_plan.get("seller_bonus_amount"), 0.0), 2)
-
-    return pricing, {
-        "sale_discount_amount": applied_sale_discount,
-        "seller_bonus_amount": applied_seller_bonus,
-        "total_amount": round(applied_sale_discount + applied_seller_bonus, 2),
-    }
-
-# ============== DASHBOARD / ANALYTICS ROUTES ==============
-
-async def _resolve_dashboard_scope_group_id(scope_query: Dict[str, Any]) -> Optional[str]:
-    return await _resolve_dashboard_scope_group_id_service(
-        db,
-        scope_query=scope_query,
-        find_brand_group_id=find_brand_group_id,
-        find_agency_group_id=find_agency_group_id,
-    )
-
-
-async def _find_dashboard_monthly_close(
-    year: int,
-    month: int,
-    group_id: Optional[str] = None,
-) -> Tuple[Optional[Dict[str, Any]], str]:
-    return await find_monthly_close(
-        db,
-        year=int(year),
-        month=int(month),
-        group_id=str(group_id) if group_id else None,
-    )
-
-
-async def _build_vehicle_aging_suggestion(
-    vehicle: Dict[str, Any],
-    *,
-    enriched_vehicle: Optional[Dict[str, Any]] = None,
-) -> Optional[Dict[str, Any]]:
-    if enriched_vehicle is None:
-        enriched_vehicle = await enrich_vehicle(vehicle)
-    return await _build_vehicle_aging_suggestion_service(
-        db,
-        vehicle=vehicle,
-        enriched_vehicle=enriched_vehicle,
-        list_similar_sold_vehicles=_list_similar_sold_vehicles_dashboard_repo,
-        to_non_negative_float=_to_non_negative_float,
-        now=datetime.now(timezone.utc),
-    )
+_runtime_helper_bundle = build_runtime_helper_bundle(
+    db=db,
+    calculate_commission_service=_calculate_commission_service,
+    commission_approved=COMMISSION_APPROVED,
+    normalize_general=_normalize_commission_matrix_general,
+    normalize_models=_normalize_commission_matrix_models,
+    resolve_volume_bonus_per_unit=_resolve_matrix_volume_bonus_per_unit,
+    to_non_negative_float=_to_non_negative_float,
+    sale_commission_base_price=_sale_commission_base_price,
+    coerce_utc_datetime=_coerce_utc_datetime,
+    default_plant_share_pct=COMMISSION_MATRIX_DEFAULT_PLANT_SHARE_PCT,
+    resolve_dashboard_scope_group_id_service=_resolve_dashboard_scope_group_id_service,
+    find_brand_group_id=find_brand_group_id,
+    find_agency_group_id=find_agency_group_id,
+    find_monthly_close=find_monthly_close,
+    enrich_vehicle=enrich_vehicle,
+    build_vehicle_aging_suggestion_service=_build_vehicle_aging_suggestion_service,
+    list_similar_sold_vehicles=_list_similar_sold_vehicles_dashboard_repo,
+)
+calculate_commission = _runtime_helper_bundle.calculate_commission
+_extract_active_aging_incentive_plan = _runtime_helper_bundle.extract_active_aging_incentive_plan
+_apply_aging_plan_to_effective_pricing = _runtime_helper_bundle.apply_aging_plan_to_effective_pricing
+_resolve_dashboard_scope_group_id = _runtime_helper_bundle.resolve_dashboard_scope_group_id
+_find_dashboard_monthly_close = _runtime_helper_bundle.find_dashboard_monthly_close
+_build_vehicle_aging_suggestion = _runtime_helper_bundle.build_vehicle_aging_suggestion
 
 # ============== IMPORT ROUTE HANDLERS ==============
 
