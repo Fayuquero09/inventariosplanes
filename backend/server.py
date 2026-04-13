@@ -30,6 +30,7 @@ from handlers.app_runtime_helpers import (
     run_shutdown,
     run_startup,
 )
+from handlers.auth_runtime_helpers import build_auth_runtime_helper_bundle
 from handlers.catalog_handlers import build_catalog_route_handlers
 from handlers.commissions_handlers import build_commissions_route_handlers
 from handlers.core_helpers import build_core_helper_bundle
@@ -397,31 +398,26 @@ def _resolve_logo_directory() -> Optional[Path]:
         cortex_root_default_path=CORTEX_ROOT_DEFAULT_PATH,
     )
 
-# Password functions
-def hash_password(password: str) -> str:
-    return _hash_password_service(password)
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return _verify_password_service(plain_password, hashed_password)
-
-# JWT functions
-def create_access_token(user_id: str, email: str, role: str) -> str:
-    return _create_access_token_service(
-        user_id=user_id,
-        email=email,
-        role=role,
-        jwt_secret=get_jwt_secret(),
-        jwt_algorithm=JWT_ALGORITHM,
-        expires_minutes=ACCESS_TOKEN_EXPIRE_MINUTES,
-    )
-
-def create_refresh_token(user_id: str) -> str:
-    return _create_refresh_token_service(
-        user_id=user_id,
-        jwt_secret=get_jwt_secret(),
-        jwt_algorithm=JWT_ALGORITHM,
-        expires_days=REFRESH_TOKEN_EXPIRE_DAYS,
-    )
+# Auth runtime helpers (hashing, token generation, current user resolution)
+_auth_runtime_helper_bundle = build_auth_runtime_helper_bundle(
+    db=db,
+    get_jwt_secret=get_jwt_secret,
+    jwt_algorithm=JWT_ALGORITHM,
+    access_token_expires_minutes=ACCESS_TOKEN_EXPIRE_MINUTES,
+    refresh_token_expires_days=REFRESH_TOKEN_EXPIRE_DAYS,
+    hash_password_service=_hash_password_service,
+    verify_password_service=_verify_password_service,
+    create_access_token_service=_create_access_token_service,
+    create_refresh_token_service=_create_refresh_token_service,
+    get_current_user_service=_get_current_user_service,
+    get_optional_user_service=_get_optional_user_service,
+)
+hash_password = _auth_runtime_helper_bundle.hash_password
+verify_password = _auth_runtime_helper_bundle.verify_password
+create_access_token = _auth_runtime_helper_bundle.create_access_token
+create_refresh_token = _auth_runtime_helper_bundle.create_refresh_token
+get_current_user = _auth_runtime_helper_bundle.get_current_user
+get_optional_user = _auth_runtime_helper_bundle.get_optional_user
 
 # Create the main app
 app = create_app(
@@ -431,24 +427,6 @@ app = create_app(
 
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
-
-# ============== AUTH HELPER ==============
-
-async def get_current_user(request: Request) -> dict:
-    return await _get_current_user_service(
-        request=request,
-        db=db,
-        jwt_secret=get_jwt_secret(),
-        jwt_algorithm=JWT_ALGORITHM,
-    )
-
-async def get_optional_user(request: Request) -> Optional[dict]:
-    return await _get_optional_user_service(
-        request=request,
-        db=db,
-        jwt_secret=get_jwt_secret(),
-        jwt_algorithm=JWT_ALGORITHM,
-    )
 
 COMMISSION_PENDING = "pending"
 COMMISSION_APPROVED = "approved"
