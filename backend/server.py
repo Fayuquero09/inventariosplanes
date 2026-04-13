@@ -4693,9 +4693,6 @@ register_route_modules(
     api_router,
     RouteModuleHandlers(
         auth_users=AuthUsersRouteHandlers(
-            UserCreate=UserCreate,
-            UserLogin=UserLogin,
-            PasswordResetRequest=PasswordResetRequest,
             register=register,
             login=login,
             logout=logout,

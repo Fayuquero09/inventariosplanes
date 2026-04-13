@@ -2,17 +2,15 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import APIRouter, Request, Response
+from schemas.api_models import PasswordResetRequest, UserCreate, UserLogin
 
 
 @dataclass(frozen=True)
 class AuthUsersRouteHandlers:
-    UserCreate: Any
-    UserLogin: Any
-    PasswordResetRequest: Any
-    register: Callable[[Any, Request], Awaitable[Any]]
-    login: Callable[[Any, Response], Awaitable[Any]]
+    register: Callable[[UserCreate, Request], Awaitable[Any]]
+    login: Callable[[UserLogin, Response], Awaitable[Any]]
     logout: Callable[[Response], Awaitable[Any]]
-    reset_password: Callable[[Any], Awaitable[Any]]
+    reset_password: Callable[[PasswordResetRequest], Awaitable[Any]]
     get_me: Callable[[Request], Awaitable[Any]]
     google_auth: Callable[[Request, Response], Awaitable[Any]]
     get_users: Callable[[Request], Awaitable[Any]]
@@ -24,11 +22,11 @@ class AuthUsersRouteHandlers:
 
 def register_auth_users_routes(router: APIRouter, handlers: AuthUsersRouteHandlers) -> None:
     @router.post("/auth/register")
-    async def register_route(user_data: handlers.UserCreate, request: Request):
+    async def register_route(user_data: UserCreate, request: Request):
         return await handlers.register(user_data, request)
 
     @router.post("/auth/login")
-    async def login_route(user_data: handlers.UserLogin, response: Response):
+    async def login_route(user_data: UserLogin, response: Response):
         return await handlers.login(user_data, response)
 
     @router.post("/auth/logout")
@@ -36,7 +34,7 @@ def register_auth_users_routes(router: APIRouter, handlers: AuthUsersRouteHandle
         return await handlers.logout(response)
 
     @router.post("/auth/reset-password")
-    async def reset_password_route(payload: handlers.PasswordResetRequest):
+    async def reset_password_route(payload: PasswordResetRequest):
         return await handlers.reset_password(payload)
 
     @router.get("/auth/me")
@@ -88,4 +86,3 @@ def register_auth_users_routes(router: APIRouter, handlers: AuthUsersRouteHandle
             brand_id=brand_id,
             group_id=group_id,
         )
-
