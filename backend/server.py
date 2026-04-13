@@ -26,6 +26,7 @@ from modules.price_bulletins_routes import PriceBulletinsRouteHandlers
 from modules.registry import RouteModuleHandlers, register_route_modules
 from modules.sales_routes import SalesRouteHandlers
 from modules.sales_objectives_routes import SalesObjectivesRouteHandlers
+from handlers.catalog_handlers import build_catalog_route_handlers
 from schemas.api_models import (
     AgencyCreate,
     AgencyResponse,
@@ -1509,76 +1510,17 @@ async def update_agency(agency_id: str, agency_data: AgencyCreate, request: Requ
 
 # ============== VEHICLE CATALOG ROUTES ==============
 
-async def get_catalog_makes(request: Request):
-    await get_current_user(request)
-    catalog = _build_catalog_tree_from_source()
-    return {
-        "model_year": catalog["model_year"],
-        "source_last_modified": catalog["source_last_modified"],
-        "items": [
-            {
-                "name": make_entry["name"],
-                "models_count": len(make_entry.get("models", [])),
-                "logo_url": _resolve_logo_url_for_brand(make_entry["name"], request),
-            }
-            for make_entry in catalog.get("makes", [])
-        ]
-    }
-
-async def get_catalog_models(
-    request: Request,
-    make: str = Query(..., min_length=1),
-    all_years: bool = Query(False),
-):
-    await get_current_user(request)
-    catalog = _build_catalog_tree_from_source(all_years=all_years)
-    make_entry = _find_catalog_make(catalog, make)
-    if not make_entry:
-        if catalog.get("all_years"):
-            raise HTTPException(status_code=404, detail="Make not found in catalog")
-        raise HTTPException(status_code=404, detail=f"Make not found in catalog for model year {catalog['model_year']}")
-
-    return {
-        "model_year": catalog["model_year"],
-        "all_years": bool(catalog.get("all_years")),
-        "available_years": catalog.get("available_years", []),
-        "make": make_entry["name"],
-        "items": [
-            {
-                "name": model_entry["name"],
-                "versions_count": len(model_entry.get("versions", [])),
-                "min_msrp": _parse_catalog_price(model_entry.get("min_msrp")),
-            }
-            for model_entry in make_entry.get("models", [])
-        ]
-    }
-
-async def get_catalog_versions(
-    request: Request,
-    make: str = Query(..., min_length=1),
-    model: str = Query(..., min_length=1),
-    all_years: bool = Query(False),
-):
-    await get_current_user(request)
-    catalog = _build_catalog_tree_from_source(all_years=all_years)
-    make_entry = _find_catalog_make(catalog, make)
-    if not make_entry:
-        if catalog.get("all_years"):
-            raise HTTPException(status_code=404, detail="Make not found in catalog")
-        raise HTTPException(status_code=404, detail=f"Make not found in catalog for model year {catalog['model_year']}")
-
-    model_entry = _find_catalog_model(make_entry, model)
-    if not model_entry:
-        raise HTTPException(status_code=404, detail=f"Model not found for make {make_entry['name']}")
-
-    return {
-        "model_year": catalog["model_year"],
-        "all_years": bool(catalog.get("all_years")),
-        "available_years": catalog.get("available_years", []),
-        "make": make_entry["name"],
-        "model": model_entry["name"],
-        "items": model_entry.get("versions", [])
-    }
+_catalog_route_handlers = build_catalog_route_handlers(
+    get_current_user=get_current_user,
+    build_catalog_tree_from_source=_build_catalog_tree_from_source,
+    find_catalog_make=_find_catalog_make,
+    find_catalog_model=_find_catalog_model,
+    parse_catalog_price=_parse_catalog_price,
+    resolve_logo_url_for_brand=_resolve_logo_url_for_brand,
+)
+get_catalog_makes = _catalog_route_handlers.get_catalog_makes
+get_catalog_models = _catalog_route_handlers.get_catalog_models
+get_catalog_versions = _catalog_route_handlers.get_catalog_versions
 
 # ============== PRICE BULLETINS ROUTES ==============
 
