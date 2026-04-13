@@ -27,6 +27,7 @@ from modules.registry import RouteModuleHandlers, register_route_modules
 from modules.sales_routes import SalesRouteHandlers
 from modules.sales_objectives_routes import SalesObjectivesRouteHandlers
 from handlers.catalog_handlers import build_catalog_route_handlers
+from handlers.financial_rates_handlers import build_financial_rates_route_handlers
 from handlers.price_bulletins_handlers import build_price_bulletins_route_handlers
 from schemas.api_models import (
     AgencyCreate,
@@ -1634,320 +1635,6 @@ async def _build_default_financial_rate_name(
         find_brand_by_id=find_brand_by_id,
         find_agency_by_id=find_agency_by_id,
     )
-
-async def create_financial_rate(rate_data: FinancialRateCreate, request: Request):
-    current_user = await get_current_user(request)
-    if current_user["role"] not in FINANCIAL_RATE_MANAGER_ROLES:
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    scope = await _resolve_financial_rate_scope(
-        current_user=current_user,
-        group_id=rate_data.group_id,
-        brand_id=rate_data.brand_id,
-        agency_id=rate_data.agency_id,
-    )
-
-    rate_name = str(rate_data.name or "").strip()
-    if not rate_name:
-        rate_name = await _build_default_financial_rate_name(
-            group_id=scope["group_id"],
-            brand_id=scope["brand_id"],
-            agency_id=scope["agency_id"],
-        )
-
-    financial_rate_payload = _build_financial_rate_record_service(
-        scope=scope,
-        tiie_rate=rate_data.tiie_rate,
-        spread=rate_data.spread,
-        grace_days=rate_data.grace_days,
-        rate_name=rate_name,
-        now=datetime.now(timezone.utc),
-        monthly_to_annual=_monthly_to_annual,
-    )
-    rate_doc = financial_rate_payload["rate_doc"]
-    tiie_monthly = financial_rate_payload["tiie_monthly"]
-    spread_monthly = financial_rate_payload["spread_monthly"]
-
-    created_rate_id = await _insert_financial_rate_repo(db, rate_doc)
-    rate_doc["id"] = created_rate_id
-    rate_doc["total_rate"] = financial_rate_payload["total_rate"]
-
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="create_financial_rate",
-        entity_type="financial_rate",
-        entity_id=created_rate_id,
-        group_id=scope["group_id"],
-        brand_id=scope["brand_id"],
-        agency_id=scope["agency_id"],
-        details={
-            "name": rate_name,
-            "rate_period": "monthly",
-            "tiie_rate": tiie_monthly,
-            "spread": spread_monthly,
-            "grace_days": rate_data.grace_days,
-            "total_rate": rate_doc["total_rate"],
-        },
-    )
-    return serialize_doc(rate_doc)
-
-
-async def apply_group_default_financial_rate(
-    payload: FinancialRateBulkApplyRequest,
-    request: Request,
-):
-    current_user = await get_current_user(request)
-    if current_user["role"] not in FINANCIAL_RATE_MANAGER_ROLES:
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    scope = await _resolve_financial_rate_scope(
-        current_user=current_user,
-        group_id=payload.group_id,
-        brand_id=None,
-        agency_id=None,
-    )
-
-    group_id = scope["group_id"]
-    group_base_rate = await _find_latest_financial_rate_repo(
-        db,
-        group_id=group_id,
-        brand_id=None,
-        agency_id=None,
-    )
-    if not group_base_rate:
-        raise HTTPException(
-            status_code=400,
-            detail="Primero crea una tasa general de grupo para poder aplicarla a marcas.",
-        )
-
-    brands = await _list_brands_for_group_repo(db, group_id=group_id, limit=1000)
-    if not brands:
-        return {
-            "group_id": group_id,
-            "created_count": 0,
-            "skipped_count": 0,
-            "message": "El grupo no tiene marcas para aplicar la tasa.",
-        }
-
-    existing_brand_rates = await _list_brand_financial_rates_for_group_repo(
-        db,
-        group_id=group_id,
-        limit=5000,
-    )
-    existing_brand_ids = {
-        str(rate.get("brand_id"))
-        for rate in existing_brand_rates
-        if rate.get("brand_id")
-    }
-
-    group_doc = await find_group_by_id(db, group_id)
-    group_name = str(group_doc.get("name") or "Grupo") if group_doc else "Grupo"
-
-    planned_defaults = _plan_group_default_rate_docs_service(
-        group_id=group_id,
-        group_name=group_name,
-        group_base_rate=group_base_rate,
-        brands=brands,
-        existing_brand_ids=existing_brand_ids,
-        now=datetime.now(timezone.utc),
-        extract_rate_components_from_doc=_extract_rate_components_from_doc,
-        monthly_to_annual=_monthly_to_annual,
-    )
-    docs_to_insert = planned_defaults["docs_to_insert"]
-    skipped_count = planned_defaults["skipped_count"]
-    base_tiie = planned_defaults["base_tiie"]
-    base_spread = planned_defaults["base_spread"]
-    base_grace_days = planned_defaults["base_grace_days"]
-
-    created_count = 0
-    if docs_to_insert:
-        created_count = await _insert_many_financial_rates_repo(db, docs_to_insert)
-
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="apply_group_default_financial_rate",
-        entity_type="financial_rate",
-        entity_id=str(group_base_rate.get("_id")),
-        group_id=group_id,
-        details={
-            "group_base_rate_id": str(group_base_rate.get("_id")),
-            "group_base_rate_name": group_base_rate.get("name"),
-            "base_tiie_rate": base_tiie,
-            "base_spread": base_spread,
-            "base_grace_days": base_grace_days,
-            "created_count": created_count,
-            "skipped_count": skipped_count,
-        },
-    )
-
-    return {
-        "group_id": group_id,
-        "created_count": created_count,
-        "skipped_count": skipped_count,
-        "message": "Tasa general aplicada a marcas sin tasa propia.",
-    }
-
-async def get_financial_rates(
-    request: Request, 
-    group_id: Optional[str] = None,
-    brand_id: Optional[str] = None,
-    agency_id: Optional[str] = None
-):
-    current_user = await get_current_user(request)
-    if current_user.get("role") in AGENCY_SCOPED_ROLES:
-        raise HTTPException(status_code=403, detail="No autorizado para ver tasas financieras")
-    query = _build_scope_query(current_user)
-    if not _scope_query_has_access(query):
-        return []
-
-    _validate_scope_filters(current_user, group_id=group_id, brand_id=brand_id, agency_id=agency_id)
-    if agency_id:
-        query["agency_id"] = agency_id
-    elif brand_id:
-        query["brand_id"] = brand_id
-    elif group_id:
-        query["group_id"] = group_id
-
-    rates = await _list_financial_rates_repo(db, query=query, limit=1000)
-    result = []
-    for rate_doc in rates:
-        enriched_rate = await _enrich_financial_rate_service(
-            db,
-            rate_doc=rate_doc,
-            serialize_doc=serialize_doc,
-            extract_rate_components_from_doc=_extract_rate_components_from_doc,
-            monthly_to_annual=_monthly_to_annual,
-            resolve_effective_rate_components_for_scope=_resolve_effective_rate_components_for_scope,
-            find_group_by_id=find_group_by_id,
-            find_brand_by_id=find_brand_by_id,
-            find_agency_by_id=find_agency_by_id,
-        )
-        result.append(enriched_rate)
-
-    return result
-
-async def update_financial_rate(rate_id: str, rate_data: FinancialRateCreate, request: Request):
-    current_user = await get_current_user(request)
-    if current_user["role"] not in FINANCIAL_RATE_MANAGER_ROLES:
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    if not ObjectId.is_valid(rate_id):
-        raise HTTPException(status_code=400, detail="Invalid rate_id")
-
-    previous = await _find_financial_rate_by_id_repo(db, rate_id)
-    if not previous:
-        raise HTTPException(status_code=404, detail="Rate not found")
-    _ensure_doc_scope_access(current_user, previous, detail="No tienes acceso a esta tasa")
-
-    scope = await _resolve_financial_rate_scope(
-        current_user=current_user,
-        group_id=rate_data.group_id,
-        brand_id=rate_data.brand_id,
-        agency_id=rate_data.agency_id,
-    )
-    rate_name = str(rate_data.name or "").strip()
-    if not rate_name:
-        rate_name = await _build_default_financial_rate_name(
-            group_id=scope["group_id"],
-            brand_id=scope["brand_id"],
-            agency_id=scope["agency_id"],
-        )
-
-    update_payload = _build_financial_rate_update_fields_service(
-        scope=scope,
-        tiie_rate=rate_data.tiie_rate,
-        spread=rate_data.spread,
-        grace_days=rate_data.grace_days,
-        rate_name=rate_name,
-        monthly_to_annual=_monthly_to_annual,
-    )
-
-    await _update_financial_rate_by_id_repo(
-        db,
-        rate_id=rate_id,
-        set_fields=update_payload["update_fields"],
-    )
-
-    rate = await _find_financial_rate_by_id_repo(db, rate_id)
-    if not rate:
-        raise HTTPException(status_code=404, detail="Rate not found")
-    result = await _enrich_financial_rate_service(
-        db,
-        rate_doc=rate,
-        serialize_doc=serialize_doc,
-        extract_rate_components_from_doc=_extract_rate_components_from_doc,
-        monthly_to_annual=_monthly_to_annual,
-        resolve_effective_rate_components_for_scope=_resolve_effective_rate_components_for_scope,
-        find_group_by_id=find_group_by_id,
-        find_brand_by_id=find_brand_by_id,
-        find_agency_by_id=find_agency_by_id,
-    )
-
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="update_financial_rate",
-        entity_type="financial_rate",
-        entity_id=rate_id,
-        group_id=rate.get("group_id") if rate else previous.get("group_id") if previous else None,
-        brand_id=rate.get("brand_id") if rate else previous.get("brand_id") if previous else None,
-        agency_id=rate.get("agency_id") if rate else previous.get("agency_id") if previous else None,
-        details={
-            "before": {
-                "name": previous.get("name") if previous else None,
-                "tiie_rate": previous.get("tiie_rate") if previous else None,
-                "spread": previous.get("spread") if previous else None,
-                "grace_days": previous.get("grace_days") if previous else None,
-                "group_id": previous.get("group_id") if previous else None,
-                "brand_id": previous.get("brand_id") if previous else None,
-                "agency_id": previous.get("agency_id") if previous else None,
-            },
-            "after": {
-                "name": rate.get("name") if rate else None,
-                "tiie_rate": rate.get("tiie_rate") if rate else None,
-                "spread": rate.get("spread") if rate else None,
-                "grace_days": rate.get("grace_days") if rate else None,
-                "group_id": rate.get("group_id") if rate else None,
-                "brand_id": rate.get("brand_id") if rate else None,
-                "agency_id": rate.get("agency_id") if rate else None,
-            },
-        },
-    )
-    return result
-
-async def delete_financial_rate(rate_id: str, request: Request):
-    current_user = await get_current_user(request)
-    if current_user["role"] not in FINANCIAL_RATE_MANAGER_ROLES:
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    if not ObjectId.is_valid(rate_id):
-        raise HTTPException(status_code=400, detail="Invalid rate_id")
-
-    previous = await _find_financial_rate_by_id_repo(db, rate_id)
-    if not previous:
-        raise HTTPException(status_code=404, detail="Rate not found")
-    _ensure_doc_scope_access(current_user, previous, detail="No tienes acceso a esta tasa")
-    await _delete_financial_rate_by_id_repo(db, rate_id=rate_id)
-
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="delete_financial_rate",
-        entity_type="financial_rate",
-        entity_id=rate_id,
-        group_id=previous.get("group_id") if previous else None,
-        brand_id=previous.get("brand_id") if previous else None,
-        agency_id=previous.get("agency_id") if previous else None,
-        details={
-            "name": previous.get("name") if previous else None,
-            "tiie_rate": previous.get("tiie_rate") if previous else None,
-            "spread": previous.get("spread") if previous else None,
-            "grace_days": previous.get("grace_days") if previous else None,
-        },
-    )
-    return {"message": "Rate deleted"}
 
 # ============== VEHICLES ROUTES ==============
 
@@ -3840,6 +3527,48 @@ async def import_sales(request: Request, file: UploadFile = File(...)):
         },
     )
     return response
+
+# ============== FINANCIAL RATES ROUTE HANDLERS ==============
+
+_financial_rates_route_handlers = build_financial_rates_route_handlers(
+    db=db,
+    get_current_user=get_current_user,
+    financial_rate_manager_roles=FINANCIAL_RATE_MANAGER_ROLES,
+    agency_scoped_roles=AGENCY_SCOPED_ROLES,
+    resolve_financial_rate_scope=_resolve_financial_rate_scope,
+    build_default_financial_rate_name=_build_default_financial_rate_name,
+    build_financial_rate_record=_build_financial_rate_record_service,
+    monthly_to_annual=_monthly_to_annual,
+    insert_financial_rate_by_doc=_insert_financial_rate_repo,
+    log_audit_event=log_audit_event,
+    serialize_doc=serialize_doc,
+    find_latest_financial_rate=_find_latest_financial_rate_repo,
+    list_brands_for_group=_list_brands_for_group_repo,
+    list_brand_financial_rates_for_group=_list_brand_financial_rates_for_group_repo,
+    find_group_by_id=find_group_by_id,
+    plan_group_default_rate_docs=_plan_group_default_rate_docs_service,
+    extract_rate_components_from_doc=_extract_rate_components_from_doc,
+    insert_many_financial_rates=_insert_many_financial_rates_repo,
+    build_scope_query=_build_scope_query,
+    scope_query_has_access=_scope_query_has_access,
+    validate_scope_filters=_validate_scope_filters,
+    list_financial_rates=_list_financial_rates_repo,
+    enrich_financial_rate=_enrich_financial_rate_service,
+    resolve_effective_rate_components_for_scope=_resolve_effective_rate_components_for_scope,
+    find_brand_by_id=find_brand_by_id,
+    find_agency_by_id=find_agency_by_id,
+    object_id_cls=ObjectId,
+    find_financial_rate_by_id=_find_financial_rate_by_id_repo,
+    ensure_doc_scope_access=_ensure_doc_scope_access,
+    build_financial_rate_update_fields=_build_financial_rate_update_fields_service,
+    update_financial_rate_by_id=_update_financial_rate_by_id_repo,
+    delete_financial_rate_by_id=_delete_financial_rate_by_id_repo,
+)
+create_financial_rate = _financial_rates_route_handlers.create_financial_rate
+apply_group_default_financial_rate = _financial_rates_route_handlers.apply_group_default_financial_rate
+get_financial_rates = _financial_rates_route_handlers.get_financial_rates
+update_financial_rate = _financial_rates_route_handlers.update_financial_rate
+delete_financial_rate = _financial_rates_route_handlers.delete_financial_rate
 
 # ============== PRICE BULLETINS ROUTE HANDLERS ==============
 
