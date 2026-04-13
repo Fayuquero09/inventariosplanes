@@ -25,6 +25,7 @@ from modules.price_bulletins_routes import PriceBulletinsRouteHandlers
 from modules.registry import RouteModuleHandlers, register_route_modules
 from modules.sales_routes import SalesRouteHandlers
 from modules.sales_objectives_routes import SalesObjectivesRouteHandlers
+from handlers.auth_users_handlers import build_auth_users_route_handlers
 from handlers.catalog_handlers import build_catalog_route_handlers
 from handlers.commissions_handlers import build_commissions_route_handlers
 from handlers.dashboard_handlers import build_dashboard_route_handlers
@@ -635,341 +636,78 @@ def _find_catalog_model(make_entry: Dict[str, Any], model_name: str) -> Optional
 def _ensure_allowed_model_year(year: int) -> None:
     _ensure_allowed_model_year_service(year=year, allowed_year=get_catalog_model_year())
 
-# ============== AUTH ROUTES ==============
+# ============== AUTH USERS ROUTE HANDLERS ==============
 
-async def register(user_data: UserCreate, request: Request):
-    current_user = await get_current_user(request)
-    actor_role = current_user.get("role")
-    _require_action_role(ACTION_USERS_MANAGE, actor_role, detail="Not authorized")
-    try:
-        _apply_register_scope_constraints_service(
-            current_user=current_user,
-            user_data=user_data,
-            app_admin_role=UserRole.APP_ADMIN,
-            app_user_role=UserRole.APP_USER,
-            group_admin_role=UserRole.GROUP_ADMIN,
-            is_dealer_user_manager_role=_is_dealer_user_manager_role,
-            get_dealer_assignable_roles=_get_dealer_assignable_roles,
-        )
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-
-    email = _normalize_user_email_service(user_data.email)
-    existing = await find_user_by_email(db, email)
-    if existing:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    
-    await _resolve_register_hierarchy_scope_service(
-        db=db,
-        user_data=user_data,
-        find_brand_by_id=find_brand_by_id,
-        find_agency_by_id=find_agency_by_id,
-    )
-
-    try:
-        _validate_role_scope_requirements_service(
-            role=user_data.role,
-            brand_id=user_data.brand_id,
-            agency_id=user_data.agency_id,
-            brand_scoped_roles=[UserRole.BRAND_ADMIN, UserRole.BRAND_USER],
-            agency_scoped_roles=[
-                UserRole.AGENCY_ADMIN,
-                UserRole.AGENCY_SALES_MANAGER,
-                UserRole.AGENCY_GENERAL_MANAGER,
-                UserRole.AGENCY_COMMERCIAL_MANAGER,
-                UserRole.AGENCY_USER,
-                UserRole.SELLER,
-            ],
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    normalized_position = _normalize_optional_position_service(user_data.position)
-
-    user_doc = _build_user_document_service(
-        email=email,
-        password_hash=hash_password(user_data.password),
-        name=user_data.name,
-        position=normalized_position,
-        role=user_data.role,
-        group_id=user_data.group_id,
-        brand_id=user_data.brand_id,
-        agency_id=user_data.agency_id,
-        created_at=datetime.now(timezone.utc),
-    )
-    user_id = await create_user(db, user_doc)
-
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="create_user",
-        entity_type="user",
-        entity_id=user_id,
-        group_id=user_data.group_id,
-        brand_id=user_data.brand_id,
-        agency_id=user_data.agency_id,
-        details={
-            "email": email,
-            "name": user_data.name,
-            "position": normalized_position,
-            "role": user_data.role,
-        },
-    )
-
-    return {
-        "id": user_id,
-        "email": email,
-        "name": user_data.name,
-        "position": normalized_position,
-        "role": user_data.role,
-        "group_id": user_data.group_id,
-        "brand_id": user_data.brand_id,
-        "agency_id": user_data.agency_id,
-        "created_at": user_doc["created_at"].isoformat()
-    }
-
-async def login(user_data: UserLogin, response: Response):
-    login_result = await _login_user_service(
-        db,
-        user_data=user_data,
-        find_user_by_email=find_user_by_email,
-        verify_password=verify_password,
-        create_access_token=create_access_token,
-        create_refresh_token=create_refresh_token,
-    )
-    access_token = login_result["access_token"]
-    refresh_token = login_result["refresh_token"]
-    
-    response.set_cookie(key="access_token", value=access_token, httponly=True, secure=False, samesite="lax", max_age=86400, path="/")
-    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
-    
-    return login_result["user_payload"]
-
-async def logout(response: Response):
-    response.delete_cookie("access_token", path="/")
-    response.delete_cookie("refresh_token", path="/")
-    return {"message": "Logged out successfully"}
-
-async def reset_password(payload: PasswordResetRequest):
-    return await _reset_password_flow_service(
-        db,
-        payload=payload,
-        find_user_by_email=find_user_by_email,
-        update_user_password_hash=update_user_password_hash,
-        hash_password=hash_password,
-    )
-
-async def get_me(request: Request):
-    user = await get_current_user(request)
-    return user
-
-async def google_auth(request: Request, response: Response):
-    """Handle Google OAuth callback"""
-    data = await request.json()
-    credential = data.get("credential")
-    try:
-        auth_result = await _google_auth_flow_service(
-            db,
-            credential=credential,
-            find_user_by_email=find_user_by_email,
-            create_user=create_user,
-            create_access_token=create_access_token,
-            create_refresh_token=create_refresh_token,
-            app_user_role=UserRole.APP_USER,
-        )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.error(f"Google auth error: {exc}")
-        raise HTTPException(status_code=400, detail=f"Invalid Google credential: {str(exc)}") from exc
-
-    response.set_cookie(key="access_token", value=auth_result["access_token"], httponly=True, secure=False, samesite="lax", max_age=86400, path="/")
-    response.set_cookie(key="refresh_token", value=auth_result["refresh_token"], httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
-
-    return auth_result["user_payload"]
-
-# ============== USERS ROUTES ==============
-
-async def get_users(request: Request):
-    current_user = await get_current_user(request)
-    actor_role = current_user.get("role")
-    _require_action_role(ACTION_USERS_MANAGE, actor_role, detail="Not authorized")
-
-    query, should_return_empty = _build_users_query_for_actor_service(
-        actor_role=actor_role,
-        current_user=current_user,
-        group_admin_role=UserRole.GROUP_ADMIN,
-        is_dealer_user_manager_role=_is_dealer_user_manager_role,
-    )
-    if should_return_empty:
-        return []
-    
-    users = await list_users(db, query, include_password_hash=False, limit=1000)
-    return [serialize_doc(u) for u in users]
-
-async def update_user(user_id: str, request: Request):
-    current_user = await get_current_user(request)
-    actor_role = current_user.get("role")
-    _require_action_role(ACTION_USERS_MANAGE, actor_role, detail="Not authorized")
-    
-    data = await request.json()
-    try:
-        new_password, payload_without_password = _extract_new_password_and_payload_service(data)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    update_data = _sanitize_user_update_data_service(payload_without_password)
-
-    if not ObjectId.is_valid(user_id):
-        raise HTTPException(status_code=400, detail="Invalid user_id")
-    existing_user = await find_user_by_id(db, user_id, include_password_hash=False)
-    if not existing_user:
-        raise HTTPException(status_code=404, detail="User not found")
-    try:
-        update_data = _enforce_update_scope_permissions_service(
-            current_user=current_user,
-            existing_user=existing_user,
-            update_data=update_data,
-            app_admin_role=UserRole.APP_ADMIN,
-            app_user_role=UserRole.APP_USER,
-            group_admin_role=UserRole.GROUP_ADMIN,
-            is_dealer_user_manager_role=_is_dealer_user_manager_role,
-            get_dealer_assignable_roles=_get_dealer_assignable_roles,
-            same_scope_id=_same_scope_id,
-        )
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    
-    if new_password:
-        update_data["password_hash"] = hash_password(new_password)
-
-    if update_data:
-        await update_user_by_id(db, user_id, update_data)
-    user = await find_user_by_id(db, user_id, include_password_hash=False)
-
-    audit_changes = _build_user_update_audit_changes_service(update_data)
-
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="update_user",
-        entity_type="user",
-        entity_id=str(existing_user["_id"]),
-        group_id=user.get("group_id"),
-        brand_id=user.get("brand_id"),
-        agency_id=user.get("agency_id"),
-        details={
-            "changes": audit_changes,
-            "target_email": user.get("email"),
-            "target_role": user.get("role"),
-        },
-    )
-    return serialize_doc(user)
-
-async def delete_user(user_id: str, request: Request):
-    current_user = await get_current_user(request)
-    actor_role = current_user.get("role")
-    _require_action_role(ACTION_USERS_MANAGE, actor_role, detail="Not authorized")
-
-    if not ObjectId.is_valid(user_id):
-        raise HTTPException(status_code=400, detail="Invalid user_id")
-
-    existing_user = await find_user_by_id(db, user_id, include_password_hash=False)
-    if not existing_user:
-        raise HTTPException(status_code=404, detail="User not found")
-    try:
-        _enforce_delete_scope_permissions_service(
-            current_user=current_user,
-            existing_user=existing_user,
-            app_admin_role=UserRole.APP_ADMIN,
-            group_admin_role=UserRole.GROUP_ADMIN,
-            is_dealer_user_manager_role=_is_dealer_user_manager_role,
-            get_dealer_assignable_roles=_get_dealer_assignable_roles,
-            same_scope_id=_same_scope_id,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-
-    await delete_user_by_id(db, user_id)
-
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="delete_user",
-        entity_type="user",
-        entity_id=user_id,
-        group_id=existing_user.get("group_id"),
-        brand_id=existing_user.get("brand_id"),
-        agency_id=existing_user.get("agency_id"),
-        details={
-            "target_email": existing_user.get("email"),
-            "target_role": existing_user.get("role"),
-            "target_name": existing_user.get("name"),
-        },
-    )
-    return {"message": "User deleted"}
-
-async def get_audit_logs(
-    request: Request,
-    agency_id: Optional[str] = None,
-    group_id: Optional[str] = None,
-    actor_id: Optional[str] = None,
-    limit: int = 100
-):
-    current_user = await get_current_user(request)
-    actor_role = current_user.get("role")
-    _require_action_role(ACTION_AUDIT_LOGS_READ, actor_role, detail="Not authorized")
-
-    safe_limit = max(1, min(limit, 500))
-    query, should_return_empty = _build_audit_logs_query_for_actor_service(
-        actor_role=actor_role,
-        current_user=current_user,
-        agency_id=agency_id,
-        group_id=group_id,
-        actor_id=actor_id,
-        group_admin_role=UserRole.GROUP_ADMIN,
-        group_finance_role=UserRole.GROUP_FINANCE_MANAGER,
-        is_dealer_user_manager_role=_is_dealer_user_manager_role,
-    )
-    if should_return_empty:
-        return []
-
-    logs = await list_audit_logs(db, query, limit=safe_limit)
-    return [serialize_doc(item) for item in logs]
-
-async def get_sellers(request: Request, agency_id: Optional[str] = None, brand_id: Optional[str] = None, group_id: Optional[str] = None):
-    """Get sellers (users with seller role) filtered by agency/brand/group"""
-    current_user = await get_current_user(request)
-    
-    query = {"role": UserRole.SELLER}
-    scope_query = _build_scope_query(current_user)
-    if not _scope_query_has_access(scope_query):
-        return []
-
-    _validate_scope_filters(current_user, group_id=group_id, brand_id=brand_id, agency_id=agency_id)
-    query.update({k: v for k, v in scope_query.items() if k in {"group_id", "brand_id", "agency_id"}})
-
-    if group_id:
-        query["group_id"] = group_id
-    if brand_id:
-        query["brand_id"] = brand_id
-    if agency_id:
-        query["agency_id"] = agency_id
-    
-    sellers = await list_users(db, query, include_password_hash=False, limit=1000)
-    
-    # Enrich with agency name
-    result = []
-    for seller in sellers:
-        s = serialize_doc(seller)
-        if seller.get("agency_id"):
-            agency = await find_agency_by_id(db, seller["agency_id"])
-            if agency:
-                s["agency_name"] = agency["name"]
-        result.append(s)
-    
-    return result
+_auth_users_route_handlers = build_auth_users_route_handlers(
+    db=db,
+    object_id_cls=ObjectId,
+    get_current_user=get_current_user,
+    app_admin_role=UserRole.APP_ADMIN,
+    app_user_role=UserRole.APP_USER,
+    group_admin_role=UserRole.GROUP_ADMIN,
+    group_finance_role=UserRole.GROUP_FINANCE_MANAGER,
+    seller_role=UserRole.SELLER,
+    brand_admin_role=UserRole.BRAND_ADMIN,
+    brand_user_role=UserRole.BRAND_USER,
+    agency_admin_role=UserRole.AGENCY_ADMIN,
+    agency_sales_manager_role=UserRole.AGENCY_SALES_MANAGER,
+    agency_general_manager_role=UserRole.AGENCY_GENERAL_MANAGER,
+    agency_commercial_manager_role=UserRole.AGENCY_COMMERCIAL_MANAGER,
+    agency_user_role=UserRole.AGENCY_USER,
+    action_users_manage=ACTION_USERS_MANAGE,
+    action_audit_logs_read=ACTION_AUDIT_LOGS_READ,
+    require_action_role=_require_action_role,
+    is_dealer_user_manager_role=_is_dealer_user_manager_role,
+    get_dealer_assignable_roles=_get_dealer_assignable_roles,
+    same_scope_id=_same_scope_id,
+    build_scope_query=_build_scope_query,
+    scope_query_has_access=_scope_query_has_access,
+    validate_scope_filters=_validate_scope_filters,
+    apply_register_scope_constraints=_apply_register_scope_constraints_service,
+    normalize_user_email=_normalize_user_email_service,
+    resolve_register_hierarchy_scope=_resolve_register_hierarchy_scope_service,
+    validate_role_scope_requirements=_validate_role_scope_requirements_service,
+    normalize_optional_position=_normalize_optional_position_service,
+    build_user_document=_build_user_document_service,
+    find_user_by_email=find_user_by_email,
+    create_user=create_user,
+    hash_password=hash_password,
+    login_user=_login_user_service,
+    verify_password=verify_password,
+    create_access_token=create_access_token,
+    create_refresh_token=create_refresh_token,
+    reset_password_flow=_reset_password_flow_service,
+    google_auth_flow=_google_auth_flow_service,
+    build_users_query_for_actor=_build_users_query_for_actor_service,
+    list_users=list_users,
+    extract_new_password_and_payload=_extract_new_password_and_payload_service,
+    sanitize_user_update_data=_sanitize_user_update_data_service,
+    find_user_by_id=find_user_by_id,
+    enforce_update_scope_permissions=_enforce_update_scope_permissions_service,
+    update_user_by_id=update_user_by_id,
+    build_user_update_audit_changes=_build_user_update_audit_changes_service,
+    enforce_delete_scope_permissions=_enforce_delete_scope_permissions_service,
+    delete_user_by_id=delete_user_by_id,
+    build_audit_logs_query_for_actor=_build_audit_logs_query_for_actor_service,
+    list_audit_logs=list_audit_logs,
+    find_agency_by_id=find_agency_by_id,
+    serialize_doc=serialize_doc,
+    log_audit_event=log_audit_event,
+    update_user_password_hash=update_user_password_hash,
+    find_brand_by_id=find_brand_by_id,
+    find_agency_by_id_register=find_agency_by_id,
+)
+register = _auth_users_route_handlers.register
+login = _auth_users_route_handlers.login
+logout = _auth_users_route_handlers.logout
+reset_password = _auth_users_route_handlers.reset_password
+get_me = _auth_users_route_handlers.get_me
+google_auth = _auth_users_route_handlers.google_auth
+get_users = _auth_users_route_handlers.get_users
+update_user = _auth_users_route_handlers.update_user
+delete_user = _auth_users_route_handlers.delete_user
+get_audit_logs = _auth_users_route_handlers.get_audit_logs
+get_sellers = _auth_users_route_handlers.get_sellers
 
 # ============== VEHICLE CATALOG ROUTES ==============
 
