@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, UploadFile, File, Depends, Query
+from fastapi import FastAPI, APIRouter, Request
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
@@ -11,7 +11,7 @@ import os
 import logging
 import secrets
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any
 from pathlib import Path
 from modules.auth_users_routes import AuthUsersRouteHandlers
 from modules.commissions_routes import CommissionsRouteHandlers
@@ -32,6 +32,7 @@ from handlers.dashboard_handlers import build_dashboard_route_handlers
 from handlers.financial_rates_handlers import build_financial_rates_route_handlers
 from handlers.import_handlers import build_import_route_handlers
 from handlers.organization_catalog_handlers import build_organization_catalog_route_handlers
+from handlers.pricing_financial_helpers import build_pricing_financial_helper_bundle
 from handlers.price_bulletins_handlers import build_price_bulletins_route_handlers
 from handlers.runtime_helpers import build_runtime_helper_bundle
 from handlers.sales_handlers import build_sales_route_handlers
@@ -465,64 +466,6 @@ COMMISSION_APPROVED = "approved"
 COMMISSION_REJECTED = "rejected"
 COMMISSION_MATRIX_DEFAULT_PLANT_SHARE_PCT = 100.0
 
-async def _resolve_financial_rate_scope(
-    current_user: dict,
-    group_id: Optional[str],
-    brand_id: Optional[str],
-    agency_id: Optional[str],
-) -> Dict[str, Optional[str]]:
-    normalized_group_id = str(group_id or "").strip()
-    normalized_brand_id = str(brand_id or "").strip() or None
-    normalized_agency_id = str(agency_id or "").strip() or None
-
-    if not normalized_group_id:
-        raise HTTPException(status_code=400, detail="group_id is required")
-    if not ObjectId.is_valid(normalized_group_id):
-        raise HTTPException(status_code=400, detail="Invalid group_id")
-
-    group = await db.groups.find_one({"_id": ObjectId(normalized_group_id)})
-    if not group:
-        raise HTTPException(status_code=404, detail="Group not found")
-
-    _validate_scope_filters(
-        current_user,
-        group_id=normalized_group_id,
-        brand_id=normalized_brand_id,
-        agency_id=normalized_agency_id,
-    )
-
-    brand = None
-    if normalized_brand_id:
-        if not ObjectId.is_valid(normalized_brand_id):
-            raise HTTPException(status_code=400, detail="Invalid brand_id")
-        brand = await db.brands.find_one({"_id": ObjectId(normalized_brand_id)})
-        if not brand:
-            raise HTTPException(status_code=404, detail="Brand not found")
-        if str(brand.get("group_id") or "") != normalized_group_id:
-            raise HTTPException(status_code=400, detail="Brand does not belong to selected group")
-
-    if normalized_agency_id:
-        if not ObjectId.is_valid(normalized_agency_id):
-            raise HTTPException(status_code=400, detail="Invalid agency_id")
-        agency = await db.agencies.find_one({"_id": ObjectId(normalized_agency_id)})
-        if not agency:
-            raise HTTPException(status_code=404, detail="Agency not found")
-        if str(agency.get("group_id") or "") != normalized_group_id:
-            raise HTTPException(status_code=400, detail="Agency does not belong to selected group")
-
-        agency_brand_id = str(agency.get("brand_id") or "")
-        if normalized_brand_id:
-            if agency_brand_id and agency_brand_id != normalized_brand_id:
-                raise HTTPException(status_code=400, detail="Agency does not belong to selected brand")
-        else:
-            normalized_brand_id = agency_brand_id or None
-
-    return {
-        "group_id": normalized_group_id,
-        "brand_id": normalized_brand_id,
-        "agency_id": normalized_agency_id,
-    }
-
 OBJECTIVE_PENDING = "pending"
 OBJECTIVE_DRAFT = "draft"
 OBJECTIVE_APPROVED = "approved"
@@ -636,6 +579,36 @@ def _find_catalog_model(make_entry: Dict[str, Any], model_name: str) -> Optional
 
 def _ensure_allowed_model_year(year: int) -> None:
     _ensure_allowed_model_year_service(year=year, allowed_year=get_catalog_model_year())
+
+# ============== PRICING / FINANCIAL HELPER BUNDLE ==============
+
+_pricing_financial_helper_bundle = build_pricing_financial_helper_bundle(
+    db=db,
+    object_id_cls=ObjectId,
+    validate_scope_filters=_validate_scope_filters,
+    normalize_iso_date_string_service=_normalize_iso_date_string_service,
+    resolve_effective_sale_pricing_for_model_service=_resolve_effective_sale_pricing_for_model_service,
+    apply_manual_sale_price_override_service=_apply_manual_sale_price_override_service,
+    to_non_negative_float=_to_non_negative_float_service,
+    monthly_to_annual_service=_monthly_to_annual_service,
+    extract_rate_components_from_doc_service=_extract_rate_components_from_doc_service,
+    resolve_effective_rate_components_service=_resolve_effective_rate_components_service,
+    find_latest_financial_rate=_find_latest_financial_rate_repo,
+    build_default_financial_rate_name_service=_build_default_financial_rate_name_service,
+    find_group_by_id=find_group_by_id,
+    find_brand_by_id=find_brand_by_id,
+    find_agency_by_id=find_agency_by_id,
+)
+_resolve_financial_rate_scope = _pricing_financial_helper_bundle.resolve_financial_rate_scope
+_normalize_iso_date_string = _pricing_financial_helper_bundle.normalize_iso_date_string
+_resolve_effective_sale_pricing_for_model = _pricing_financial_helper_bundle.resolve_effective_sale_pricing_for_model
+_apply_manual_sale_price_override = _pricing_financial_helper_bundle.apply_manual_sale_price_override
+_resolve_effective_transaction_price_for_model = _pricing_financial_helper_bundle.resolve_effective_transaction_price_for_model
+_monthly_to_annual = _pricing_financial_helper_bundle.monthly_to_annual
+_extract_rate_components_from_doc = _pricing_financial_helper_bundle.extract_rate_components_from_doc
+_resolve_effective_rate_components_for_scope = _pricing_financial_helper_bundle.resolve_effective_rate_components_for_scope
+_resolve_effective_rate_components_for_vehicle = _pricing_financial_helper_bundle.resolve_effective_rate_components_for_vehicle
+_build_default_financial_rate_name = _pricing_financial_helper_bundle.build_default_financial_rate_name
 
 # ============== AUTH USERS ROUTE HANDLERS ==============
 
@@ -786,117 +759,10 @@ create_agency = _organization_catalog_route_handlers.create_agency
 get_agencies = _organization_catalog_route_handlers.get_agencies
 update_agency = _organization_catalog_route_handlers.update_agency
 
-# ============== PRICE BULLETINS ROUTES ==============
-
-def _normalize_iso_date_string(value: Optional[str], *, field_name: str, required: bool = False) -> Optional[str]:
-    return _normalize_iso_date_string_service(value, field_name=field_name, required=required)
-
-async def _resolve_effective_sale_pricing_for_model(
-    *,
-    group_id: Optional[str],
-    brand_id: Optional[str],
-    agency_id: Optional[str],
-    model: Optional[str],
-    version: Optional[str] = None,
-    reference_date_ymd: Optional[str] = None,
-    fallback_msrp: Optional[float] = None,
-) -> Dict[str, Any]:
-    return await _resolve_effective_sale_pricing_for_model_service(
-        db,
-        group_id=group_id,
-        brand_id=brand_id,
-        agency_id=agency_id,
-        model=model,
-        version=version,
-        reference_date_ymd=reference_date_ymd,
-        fallback_msrp=fallback_msrp,
-        to_non_negative_float=_to_non_negative_float,
-    )
-
-def _apply_manual_sale_price_override(
-    pricing: Dict[str, Any],
-    supplied_sale_price: Optional[float],
-) -> Dict[str, Any]:
-    return _apply_manual_sale_price_override_service(
-        pricing=pricing,
-        supplied_sale_price=supplied_sale_price,
-        to_non_negative_float=_to_non_negative_float,
-    )
-
-async def _resolve_effective_transaction_price_for_model(
-    *,
-    group_id: Optional[str],
-    brand_id: Optional[str],
-    agency_id: Optional[str],
-    model: Optional[str],
-    version: Optional[str] = None,
-    reference_date_ymd: Optional[str] = None,
-    fallback_msrp: Optional[float] = None,
-) -> float:
-    pricing = await _resolve_effective_sale_pricing_for_model_service(
-        db,
-        group_id=group_id,
-        brand_id=brand_id,
-        agency_id=agency_id,
-        model=model,
-        version=version,
-        reference_date_ymd=reference_date_ymd,
-        fallback_msrp=fallback_msrp,
-        to_non_negative_float=_to_non_negative_float,
-    )
-    return _to_non_negative_float(pricing.get("transaction_price"), 0.0)
-
 # ============== FINANCIAL RATES ROUTES ==============
 
 DAYS_PER_MONTH_FOR_RATE = 30
 
-
-def _monthly_to_annual(rate_monthly_pct: float) -> float:
-    return _monthly_to_annual_service(rate_monthly_pct)
-
-
-def _extract_rate_components_from_doc(rate_doc: Optional[Dict[str, Any]]) -> Dict[str, Optional[float]]:
-    return _extract_rate_components_from_doc_service(rate_doc)
-
-
-async def _resolve_effective_rate_components_for_scope(
-    *,
-    group_id: Any,
-    brand_id: Any,
-    agency_id: Any,
-) -> Dict[str, float]:
-    return await _resolve_effective_rate_components_service(
-        db,
-        group_id=group_id,
-        brand_id=brand_id,
-        agency_id=agency_id,
-        find_latest_financial_rate=_find_latest_financial_rate_repo,
-        extract_rate_components_from_doc=_extract_rate_components_from_doc,
-    )
-
-
-async def _resolve_effective_rate_components_for_vehicle(vehicle: Dict[str, Any]) -> Dict[str, float]:
-    return await _resolve_effective_rate_components_for_scope(
-        group_id=vehicle.get("group_id"),
-        brand_id=vehicle.get("brand_id"),
-        agency_id=vehicle.get("agency_id"),
-    )
-
-
-async def _build_default_financial_rate_name(
-    group_id: Optional[str],
-    brand_id: Optional[str] = None,
-    agency_id: Optional[str] = None,
-) -> str:
-    return await _build_default_financial_rate_name_service(
-        db,
-        group_id=group_id,
-        brand_id=brand_id,
-        agency_id=agency_id,
-        find_group_by_id=find_group_by_id,
-        find_brand_by_id=find_brand_by_id,
-        find_agency_by_id=find_agency_by_id,
-    )
 
 # ============== VEHICLES ROUTES ==============
 
