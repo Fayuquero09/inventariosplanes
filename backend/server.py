@@ -12,7 +12,6 @@ import logging
 import secrets
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict, Any, Tuple
-from calendar import monthrange
 from pathlib import Path
 from modules.auth_users_routes import AuthUsersRouteHandlers
 from modules.commissions_routes import CommissionsRouteHandlers
@@ -27,6 +26,7 @@ from modules.registry import RouteModuleHandlers, register_route_modules
 from modules.sales_routes import SalesRouteHandlers
 from modules.sales_objectives_routes import SalesObjectivesRouteHandlers
 from handlers.catalog_handlers import build_catalog_route_handlers
+from handlers.dashboard_handlers import build_dashboard_route_handlers
 from handlers.financial_rates_handlers import build_financial_rates_route_handlers
 from handlers.price_bulletins_handlers import build_price_bulletins_route_handlers
 from handlers.sales_handlers import build_sales_route_handlers
@@ -2439,257 +2439,6 @@ async def _find_dashboard_monthly_close(
     )
 
 
-async def get_dashboard_monthly_close(
-    request: Request,
-    month: Optional[int] = None,
-    year: Optional[int] = None,
-    group_id: Optional[str] = None,
-):
-    current_user = await get_current_user(request)
-    now = datetime.now(timezone.utc)
-    target_month = int(month or now.month)
-    target_year = int(year or now.year)
-
-    if target_month < 1 or target_month > 12:
-        raise HTTPException(status_code=400, detail="Month must be between 1 and 12")
-
-    _validate_scope_filters(current_user, group_id=group_id)
-    effective_group_id = group_id
-    if not effective_group_id:
-        scope_query = _build_scope_query(current_user)
-        effective_group_id = await _resolve_dashboard_scope_group_id(scope_query)
-
-    close_doc, close_scope = await _find_dashboard_monthly_close(
-        year=target_year,
-        month=target_month,
-        group_id=effective_group_id,
-    )
-
-    return _build_dashboard_monthly_close_response_service(
-        target_year=target_year,
-        target_month=target_month,
-        effective_group_id=effective_group_id,
-        close_doc=close_doc,
-        close_scope=close_scope,
-    )
-
-
-async def get_dashboard_monthly_close_calendar(
-    request: Request,
-    year: Optional[int] = None,
-    from_current_month: bool = True,
-):
-    await get_current_user(request)
-
-    now = datetime.now(timezone.utc)
-    target_year = int(year or now.year)
-    if target_year < 2020 or target_year > 2100:
-        raise HTTPException(status_code=400, detail="Year must be between 2020 and 2100")
-
-    start_month = now.month if (from_current_month and target_year == now.year) else 1
-    holidays_by_month = _mexico_lft_holidays_by_month(target_year)
-
-    docs = await list_global_monthly_closes_by_year(db, year=target_year, limit=1000)
-    return _build_dashboard_monthly_close_calendar_service(
-        target_year=target_year,
-        start_month=start_month,
-        docs=docs,
-        holidays_by_month=holidays_by_month,
-    )
-
-
-async def upsert_dashboard_monthly_close(payload: DashboardMonthlyCloseUpsert, request: Request):
-    current_user = await get_current_user(request)
-    if current_user.get("role") != UserRole.APP_ADMIN:
-        raise HTTPException(status_code=403, detail="Only app_admin can update monthly close values")
-
-    target_group_id = None  # calendario operativo global para todas las marcas y grupos
-    days_in_month = monthrange(int(payload.year), int(payload.month))[1]
-    if payload.fiscal_close_day is not None and payload.fiscal_close_day > days_in_month:
-        raise HTTPException(status_code=400, detail=f"fiscal_close_day must be <= {days_in_month}")
-    industry_target_year, industry_target_month = _add_months_ym(
-        int(payload.year),
-        int(payload.month),
-        int(payload.industry_close_month_offset or 0),
-    )
-    industry_days_in_target_month = monthrange(industry_target_year, industry_target_month)[1]
-    if payload.industry_close_day is not None and payload.industry_close_day > industry_days_in_target_month:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "industry_close_day must be <= "
-                f"{industry_days_in_target_month} for target month {industry_target_year}-{industry_target_month:02d}"
-            ),
-        )
-
-    now = datetime.now(timezone.utc)
-    updated = await upsert_global_monthly_close(
-        db,
-        year=int(payload.year),
-        month=int(payload.month),
-        fiscal_close_day=payload.fiscal_close_day,
-        industry_close_day=payload.industry_close_day,
-        industry_close_month_offset=int(payload.industry_close_month_offset or 0),
-        updated_by=current_user.get("id"),
-        now=now,
-    )
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="upsert_dashboard_monthly_close",
-        entity_type="dashboard_monthly_close",
-        entity_id=f"{payload.year}-{payload.month:02d}:{target_group_id or 'global'}",
-        group_id=target_group_id,
-        details={
-            "year": payload.year,
-            "month": payload.month,
-            "group_id": None,
-            "fiscal_close_day": payload.fiscal_close_day,
-            "industry_close_day": payload.industry_close_day,
-            "industry_close_month_offset": int(payload.industry_close_month_offset or 0),
-        },
-    )
-
-    return {
-        "year": payload.year,
-        "month": payload.month,
-        "group_id": None,
-        "fiscal_close_day": updated.get("fiscal_close_day") if updated else payload.fiscal_close_day,
-        "industry_close_day": updated.get("industry_close_day") if updated else payload.industry_close_day,
-        "industry_close_month_offset": int(
-            updated.get("industry_close_month_offset") or (payload.industry_close_month_offset or 0)
-        ) if updated else int(payload.industry_close_month_offset or 0),
-        "updated_at": updated.get("updated_at") if updated else now,
-    }
-
-async def get_dashboard_kpis(
-    request: Request, 
-    group_id: Optional[str] = None,
-    brand_id: Optional[str] = None,
-    agency_id: Optional[str] = None,
-    seller_id: Optional[str] = None
-):
-    current_user = await get_current_user(request)
-    if current_user["role"] == UserRole.SELLER:
-        current_seller_id = current_user.get("id")
-        if seller_id and seller_id != current_seller_id:
-            raise HTTPException(status_code=403, detail="No tienes acceso a este vendedor")
-        seller_id = current_seller_id
-    query = _build_scope_query(current_user)
-    if not _scope_query_has_access(query):
-        return _empty_dashboard_kpis_response_service()
-
-    _validate_scope_filters(current_user, group_id=group_id, brand_id=brand_id, agency_id=agency_id)
-    if agency_id:
-        query["agency_id"] = agency_id
-    elif brand_id:
-        query["brand_id"] = brand_id
-    elif group_id:
-        query["group_id"] = group_id
-
-    return await _compute_dashboard_kpis_service(
-        db,
-        query=query,
-        seller_id=seller_id,
-        now=datetime.now(timezone.utc),
-        user_role_seller=UserRole.SELLER,
-        list_vehicles=_list_vehicles_dashboard_repo,
-        list_sales=_list_sales_dashboard_repo,
-        list_vehicles_by_ids=_list_vehicles_by_ids_dashboard_repo,
-        list_agencies_by_brand_id=_list_agencies_by_brand_id_dashboard_repo,
-        list_agencies_by_group_id=_list_agencies_by_group_id_dashboard_repo,
-        count_users=_count_users_dashboard_repo,
-        count_sales=_count_sales_dashboard_repo,
-        enrich_vehicle=enrich_vehicle,
-        calculate_vehicle_financial_cost_in_period=calculate_vehicle_financial_cost_in_period,
-        sale_effective_revenue=_sale_effective_revenue,
-        resolve_dashboard_scope_group_id=_resolve_dashboard_scope_group_id,
-        find_dashboard_monthly_close=_find_dashboard_monthly_close,
-    )
-
-async def get_sales_trends(
-    request: Request, 
-    group_id: Optional[str] = None,
-    brand_id: Optional[str] = None,
-    agency_id: Optional[str] = None,
-    seller_id: Optional[str] = None,
-    months: int = 6,
-    granularity: str = "month"
-):
-    current_user = await get_current_user(request)
-    query = _build_scope_query(current_user)
-    if not _scope_query_has_access(query):
-        return []
-
-    _validate_scope_filters(current_user, group_id=group_id, brand_id=brand_id, agency_id=agency_id)
-    if agency_id:
-        query["agency_id"] = agency_id
-    elif brand_id:
-        query["brand_id"] = brand_id
-    elif group_id:
-        query["group_id"] = group_id
-
-    if current_user["role"] == UserRole.SELLER:
-        current_seller_id = current_user.get("id")
-        if not current_seller_id:
-            return []
-        if seller_id and seller_id != current_seller_id:
-            raise HTTPException(status_code=403, detail="No tienes acceso a este vendedor")
-        query["seller_id"] = current_seller_id
-    elif seller_id:
-        query["seller_id"] = seller_id
-
-    return await _compute_sales_trends_service(
-        db,
-        query=query,
-        now=datetime.now(timezone.utc),
-        months=months,
-        granularity=granularity,
-        objective_approved=OBJECTIVE_APPROVED,
-        objective_pending=OBJECTIVE_PENDING,
-        list_sales=_list_sales_dashboard_repo,
-        list_sales_objectives=_list_sales_objectives_dashboard_repo,
-        coerce_utc_datetime=_coerce_utc_datetime,
-        sale_effective_revenue=_sale_effective_revenue,
-        decrement_month=_decrement_month,
-        compute_operational_day_profile=_compute_operational_day_profile,
-        resolve_effective_objective_units=_resolve_effective_objective_units,
-    )
-
-async def get_seller_performance(request: Request, agency_id: Optional[str] = None, month: Optional[int] = None, year: Optional[int] = None):
-    current_user = await get_current_user(request)
-    
-    now = datetime.now(timezone.utc)
-    if not month:
-        month = now.month
-    if not year:
-        year = now.year
-    
-    start_date = datetime(year, month, 1, tzinfo=timezone.utc)
-    if month == 12:
-        end_date = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
-    else:
-        end_date = datetime(year, month + 1, 1, tzinfo=timezone.utc)
-    
-    query = {"sale_date": {"$gte": start_date, "$lt": end_date}}
-    scope_query = _build_scope_query(current_user)
-    if not _scope_query_has_access(scope_query):
-        return []
-    query.update({k: v for k, v in scope_query.items() if k in {"group_id", "brand_id", "agency_id"}})
-
-    _validate_scope_filters(current_user, agency_id=agency_id)
-    if agency_id:
-        query["agency_id"] = agency_id
-
-    return await _compute_seller_performance_service(
-        db,
-        query=query,
-        list_sales=_list_sales_dashboard_repo,
-        find_user_by_id=_find_user_by_id_dashboard_repo,
-        sale_effective_revenue=_sale_effective_revenue,
-    )
-
-
 async def _build_vehicle_aging_suggestion(
     vehicle: Dict[str, Any],
     *,
@@ -2704,39 +2453,6 @@ async def _build_vehicle_aging_suggestion(
         list_similar_sold_vehicles=_list_similar_sold_vehicles_dashboard_repo,
         to_non_negative_float=_to_non_negative_float,
         now=datetime.now(timezone.utc),
-    )
-
-async def get_vehicle_suggestions(
-    request: Request,
-    group_id: Optional[str] = None,
-    brand_id: Optional[str] = None,
-    agency_id: Optional[str] = None,
-    limit: int = 20,
-):
-    """Get smart suggestions for vehicles that should be promoted/discounted"""
-    current_user = await get_current_user(request)
-    
-    query = {"status": "in_stock"}
-    scope_query = _build_scope_query(current_user)
-    if not _scope_query_has_access(scope_query):
-        return []
-    query.update({k: v for k, v in scope_query.items() if k in {"group_id", "brand_id", "agency_id"}})
-
-    _validate_scope_filters(current_user, group_id=group_id, brand_id=brand_id, agency_id=agency_id)
-    if group_id:
-        query["group_id"] = group_id
-    if brand_id:
-        query["brand_id"] = brand_id
-    if agency_id:
-        query["agency_id"] = agency_id
-    
-    return await _collect_vehicle_suggestions_service(
-        db,
-        query=query,
-        limit=limit,
-        list_vehicles=_list_vehicles_dashboard_repo,
-        enrich_vehicle=enrich_vehicle,
-        build_vehicle_aging_suggestion=_build_vehicle_aging_suggestion,
     )
 
 # ============== IMPORT ROUTES ==============
@@ -3025,6 +2741,58 @@ get_sales_objectives = _sales_objectives_route_handlers.get_sales_objectives
 get_sales_objective_suggestion = _sales_objectives_route_handlers.get_sales_objective_suggestion
 update_sales_objective = _sales_objectives_route_handlers.update_sales_objective
 approve_sales_objective = _sales_objectives_route_handlers.approve_sales_objective
+
+# ============== DASHBOARD ROUTE HANDLERS ==============
+
+_dashboard_route_handlers = build_dashboard_route_handlers(
+    db=db,
+    get_current_user=get_current_user,
+    validate_scope_filters=_validate_scope_filters,
+    build_scope_query=_build_scope_query,
+    scope_query_has_access=_scope_query_has_access,
+    resolve_dashboard_scope_group_id=_resolve_dashboard_scope_group_id,
+    find_dashboard_monthly_close=_find_dashboard_monthly_close,
+    build_dashboard_monthly_close_response=_build_dashboard_monthly_close_response_service,
+    mexico_lft_holidays_by_month=_mexico_lft_holidays_by_month,
+    list_global_monthly_closes_by_year=list_global_monthly_closes_by_year,
+    build_dashboard_monthly_close_calendar=_build_dashboard_monthly_close_calendar_service,
+    upsert_global_monthly_close=upsert_global_monthly_close,
+    add_months_ym=_add_months_ym,
+    log_audit_event=log_audit_event,
+    app_admin_role=UserRole.APP_ADMIN,
+    user_role_seller=UserRole.SELLER,
+    empty_dashboard_kpis_response=_empty_dashboard_kpis_response_service,
+    compute_dashboard_kpis=_compute_dashboard_kpis_service,
+    list_vehicles=_list_vehicles_dashboard_repo,
+    list_sales=_list_sales_dashboard_repo,
+    list_vehicles_by_ids=_list_vehicles_by_ids_dashboard_repo,
+    list_agencies_by_brand_id=_list_agencies_by_brand_id_dashboard_repo,
+    list_agencies_by_group_id=_list_agencies_by_group_id_dashboard_repo,
+    count_users=_count_users_dashboard_repo,
+    count_sales=_count_sales_dashboard_repo,
+    enrich_vehicle=enrich_vehicle,
+    calculate_vehicle_financial_cost_in_period=calculate_vehicle_financial_cost_in_period,
+    sale_effective_revenue=_sale_effective_revenue,
+    compute_sales_trends=_compute_sales_trends_service,
+    objective_approved=OBJECTIVE_APPROVED,
+    objective_pending=OBJECTIVE_PENDING,
+    list_sales_objectives=_list_sales_objectives_dashboard_repo,
+    coerce_utc_datetime=_coerce_utc_datetime,
+    decrement_month=_decrement_month,
+    compute_operational_day_profile=_compute_operational_day_profile,
+    resolve_effective_objective_units=_resolve_effective_objective_units,
+    compute_seller_performance=_compute_seller_performance_service,
+    find_user_by_id=_find_user_by_id_dashboard_repo,
+    collect_vehicle_suggestions=_collect_vehicle_suggestions_service,
+    build_vehicle_aging_suggestion=_build_vehicle_aging_suggestion,
+)
+get_dashboard_monthly_close = _dashboard_route_handlers["get_dashboard_monthly_close"]
+get_dashboard_monthly_close_calendar = _dashboard_route_handlers["get_dashboard_monthly_close_calendar"]
+upsert_dashboard_monthly_close = _dashboard_route_handlers["upsert_dashboard_monthly_close"]
+get_dashboard_kpis = _dashboard_route_handlers["get_dashboard_kpis"]
+get_sales_trends = _dashboard_route_handlers["get_sales_trends"]
+get_seller_performance = _dashboard_route_handlers["get_seller_performance"]
+get_vehicle_suggestions = _dashboard_route_handlers["get_vehicle_suggestions"]
 
 # ============== ROOT ROUTE ==============
 
