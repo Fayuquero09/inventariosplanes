@@ -229,7 +229,6 @@ from services.pricing_service import (
     is_price_bulletin_active as _is_price_bulletin_active_service,
     price_item_applies_to_sale as _price_item_applies_to_sale_service,
     resolve_effective_sale_pricing_for_model as _resolve_effective_sale_pricing_for_model_service,
-    resolve_price_bulletin_for_model as _resolve_price_bulletin_for_model_service,
 )
 from services.price_bulletins_service import (
     list_price_bulletins_with_enrichment as _list_price_bulletins_with_enrichment_service,
@@ -1586,44 +1585,6 @@ async def get_catalog_versions(
 def _normalize_iso_date_string(value: Optional[str], *, field_name: str, required: bool = False) -> Optional[str]:
     return _normalize_iso_date_string_service(value, field_name=field_name, required=required)
 
-async def _resolve_price_bulletin_scope(
-    current_user: dict,
-    *,
-    group_id: Optional[str],
-    brand_id: Optional[str],
-    agency_id: Optional[str],
-) -> Dict[str, Optional[str]]:
-    return await _resolve_price_bulletin_scope_service(
-        db,
-        current_user=current_user,
-        group_id=group_id,
-        brand_id=brand_id,
-        agency_id=agency_id,
-        validate_scope_filters=_validate_scope_filters,
-    )
-
-def _is_price_bulletin_active(doc: Dict[str, Any], current_date_ymd: str) -> bool:
-    return _is_price_bulletin_active_service(doc, current_date_ymd)
-
-async def _resolve_price_bulletin_for_model(
-    *,
-    group_id: Optional[str],
-    brand_id: Optional[str],
-    agency_id: Optional[str],
-    model: Optional[str],
-    version: Optional[str] = None,
-    reference_date_ymd: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
-    return await _resolve_price_bulletin_for_model_service(
-        db,
-        group_id=group_id,
-        brand_id=brand_id,
-        agency_id=agency_id,
-        model=model,
-        version=version,
-        reference_date_ymd=reference_date_ymd,
-    )
-
 async def _resolve_effective_sale_pricing_for_model(
     *,
     group_id: Optional[str],
@@ -1666,7 +1627,8 @@ async def _resolve_effective_transaction_price_for_model(
     reference_date_ymd: Optional[str] = None,
     fallback_msrp: Optional[float] = None,
 ) -> float:
-    pricing = await _resolve_effective_sale_pricing_for_model(
+    pricing = await _resolve_effective_sale_pricing_for_model_service(
+        db,
         group_id=group_id,
         brand_id=brand_id,
         agency_id=agency_id,
@@ -1674,43 +1636,9 @@ async def _resolve_effective_transaction_price_for_model(
         version=version,
         reference_date_ymd=reference_date_ymd,
         fallback_msrp=fallback_msrp,
+        to_non_negative_float=_to_non_negative_float,
     )
     return _to_non_negative_float(pricing.get("transaction_price"), 0.0)
-
-def _price_item_applies_to_sale(
-    *,
-    sale_model: Optional[str],
-    sale_version: Optional[str],
-    affected_exact_keys: set[str],
-    affected_model_keys: set[str],
-) -> bool:
-    return _price_item_applies_to_sale_service(
-        sale_model=sale_model,
-        sale_version=sale_version,
-        affected_exact_keys=affected_exact_keys,
-        affected_model_keys=affected_model_keys,
-    )
-
-async def _reprice_sales_for_price_bulletin(
-    *,
-    scope: Dict[str, Optional[str]],
-    effective_from: Optional[str],
-    effective_to: Optional[str],
-    items: List[PriceBulletinItem],
-) -> Dict[str, int]:
-    return await _reprice_sales_for_price_bulletin_service(
-        db,
-        scope=scope,
-        effective_from=effective_from,
-        effective_to=effective_to,
-        items=items,
-        price_item_applies_to_sale=_price_item_applies_to_sale,
-        resolve_effective_sale_pricing_for_model=_resolve_effective_sale_pricing_for_model,
-        apply_manual_sale_price_override=_apply_manual_sale_price_override,
-        calculate_commission=calculate_commission,
-        to_non_negative_float=_to_non_negative_float,
-        coerce_utc_datetime=_coerce_utc_datetime,
-    )
 
 async def get_price_bulletins(
     request: Request,
@@ -1754,7 +1682,7 @@ async def get_price_bulletins(
         active_only=active_only,
         latest_per_model=latest_per_model,
         serialize_doc=serialize_doc,
-        is_price_bulletin_active=_is_price_bulletin_active,
+        is_price_bulletin_active=_is_price_bulletin_active_service,
     )
 
 async def upsert_price_bulletins_bulk(payload: PriceBulletinBulkUpsert, request: Request):
@@ -1765,11 +1693,13 @@ async def upsert_price_bulletins_bulk(payload: PriceBulletinBulkUpsert, request:
     if not payload.items:
         raise HTTPException(status_code=400, detail="At least one item is required")
 
-    scope = await _resolve_price_bulletin_scope(
+    scope = await _resolve_price_bulletin_scope_service(
+        db,
         current_user=current_user,
         group_id=payload.group_id,
         brand_id=payload.brand_id,
         agency_id=payload.agency_id,
+        validate_scope_filters=_validate_scope_filters,
     )
 
     effective_from = _normalize_iso_date_string(
@@ -1803,11 +1733,18 @@ async def upsert_price_bulletins_bulk(payload: PriceBulletinBulkUpsert, request:
     if updated_count == 0:
         raise HTTPException(status_code=400, detail="No valid items to save")
 
-    repricing_summary = await _reprice_sales_for_price_bulletin(
+    repricing_summary = await _reprice_sales_for_price_bulletin_service(
+        db,
         scope=scope,
         effective_from=effective_from,
         effective_to=effective_to,
         items=valid_items,
+        price_item_applies_to_sale=_price_item_applies_to_sale_service,
+        resolve_effective_sale_pricing_for_model=_resolve_effective_sale_pricing_for_model,
+        apply_manual_sale_price_override=_apply_manual_sale_price_override,
+        calculate_commission=calculate_commission,
+        to_non_negative_float=_to_non_negative_float,
+        coerce_utc_datetime=_coerce_utc_datetime,
     )
 
     await log_audit_event(
@@ -2725,7 +2662,7 @@ async def get_sales_objective_suggestion(
         add_months_ym=_add_months_ym,
         sale_effective_revenue=_sale_effective_revenue,
         to_non_negative_float=_to_non_negative_float,
-        is_price_bulletin_active=_is_price_bulletin_active,
+        is_price_bulletin_active=_is_price_bulletin_active_service,
         build_catalog_tree_from_source=_build_catalog_tree_from_source,
         find_catalog_make=_find_catalog_make,
         parse_catalog_price=_parse_catalog_price,
