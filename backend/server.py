@@ -1,16 +1,12 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, APIRouter, Request
-from fastapi.staticfiles import StaticFiles
-from starlette.middleware.cors import CORSMiddleware
-from starlette.middleware.sessions import SessionMiddleware
+from fastapi import APIRouter, Request
 from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
 import os
 import logging
-import secrets
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 from modules.auth_users_routes import AuthUsersRouteHandlers
@@ -26,6 +22,14 @@ from modules.registry import RouteModuleHandlers, register_route_modules
 from modules.sales_routes import SalesRouteHandlers
 from modules.sales_objectives_routes import SalesObjectivesRouteHandlers
 from handlers.auth_users_handlers import build_auth_users_route_handlers
+from handlers.app_runtime_helpers import (
+    configure_cors,
+    create_app,
+    include_api_router,
+    mount_brand_logos,
+    run_shutdown,
+    run_startup,
+)
 from handlers.catalog_handlers import build_catalog_route_handlers
 from handlers.commissions_handlers import build_commissions_route_handlers
 from handlers.core_helpers import build_core_helper_bundle
@@ -420,10 +424,10 @@ def create_refresh_token(user_id: str) -> str:
     )
 
 # Create the main app
-app = FastAPI(title="AutoConnect - Vehicle Inventory Management")
-
-# Session middleware for OAuth
-app.add_middleware(SessionMiddleware, secret_key=get_jwt_secret())
+app = create_app(
+    title="AutoConnect - Vehicle Inventory Management",
+    session_secret=get_jwt_secret(),
+)
 
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
@@ -1242,58 +1246,36 @@ register_route_modules(
     ),
 )
 
-# Mount logos directory as static assets so frontend can render brand logos
-_resolved_logo_dir = _resolve_logo_directory()
-if _resolved_logo_dir:
-    app.mount("/logos", StaticFiles(directory=str(_resolved_logo_dir)), name="brand-logos")
-    logger.info("Brand logos directory mounted: %s", _resolved_logo_dir)
-else:
-    logger.warning(
-        "Brand logos directory not found. Configure %s or place logos under cortex_frontend/public/logos.",
-        LOGO_DIRECTORY_ENV,
-    )
-
-# Include the router in the main app
-app.include_router(api_router)
-
-# CORS Configuration
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=_build_allowed_origins_service(os.environ.get("FRONTEND_URL")),
-    allow_methods=["*"],
-    allow_headers=["*"],
+mount_brand_logos(
+    app=app,
+    resolve_logo_directory=_resolve_logo_directory,
+    logger=logger,
+    logo_directory_env=LOGO_DIRECTORY_ENV,
+)
+include_api_router(app=app, api_router=api_router)
+configure_cors(
+    app=app,
+    frontend_url=os.environ.get("FRONTEND_URL"),
+    build_allowed_origins=_build_allowed_origins_service,
 )
 
 # ============== STARTUP ==============
 
 @app.on_event("startup")
 async def startup():
-    await _create_core_indexes_service(db=db)
-    backfill_summary = await backfill_agency_locations()
-    logger.info(
-        "Agency location backfill: checked=%s updated=%s city=%s postal_code=%s",
-        backfill_summary["checked"],
-        backfill_summary["updated"],
-        backfill_summary["filled_city"],
-        backfill_summary["filled_postal_code"],
-    )
-    admin_email = os.environ.get("ADMIN_EMAIL", "admin@autoconnect.com")
-    admin_password = os.environ.get("ADMIN_PASSWORD", "Admin123!")
-    seed_status = await _seed_admin_user_service(
+    await run_startup(
         db=db,
-        admin_email=admin_email,
-        admin_password=admin_password,
+        logger=logger,
+        create_core_indexes=_create_core_indexes_service,
+        backfill_agency_locations=backfill_agency_locations,
+        seed_admin_user=_seed_admin_user_service,
+        default_admin_email="admin@autoconnect.com",
+        default_admin_password="Admin123!",
         app_admin_role=UserRole.APP_ADMIN,
         hash_password=hash_password,
         verify_password=verify_password,
     )
-    if seed_status == "created":
-        logger.info("Admin user created: %s", admin_email)
-    elif seed_status == "password_updated":
-        logger.info("Admin password updated: %s", admin_email)
-    logger.info("AutoConnect API started")
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
-    client.close()
+    await run_shutdown(client=client)
