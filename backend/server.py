@@ -27,6 +27,7 @@ from modules.registry import RouteModuleHandlers, register_route_modules
 from modules.sales_routes import SalesRouteHandlers
 from modules.sales_objectives_routes import SalesObjectivesRouteHandlers
 from handlers.catalog_handlers import build_catalog_route_handlers
+from handlers.price_bulletins_handlers import build_price_bulletins_route_handlers
 from schemas.api_models import (
     AgencyCreate,
     AgencyResponse,
@@ -1581,177 +1582,6 @@ async def _resolve_effective_transaction_price_for_model(
         to_non_negative_float=_to_non_negative_float,
     )
     return _to_non_negative_float(pricing.get("transaction_price"), 0.0)
-
-async def get_price_bulletins(
-    request: Request,
-    group_id: Optional[str] = None,
-    brand_id: Optional[str] = None,
-    agency_id: Optional[str] = None,
-    model: Optional[str] = None,
-    active_only: bool = False,
-    latest_per_model: bool = False,
-    include_brand_defaults: bool = True,
-):
-    current_user = await get_current_user(request)
-    query = _build_scope_query(current_user)
-    if not _scope_query_has_access(query):
-        return []
-
-    _validate_scope_filters(current_user, group_id=group_id, brand_id=brand_id, agency_id=agency_id)
-
-    if group_id:
-        query["group_id"] = group_id
-    if brand_id:
-        query["brand_id"] = brand_id
-
-    normalized_agency_id = str(agency_id or "").strip() or None
-    if normalized_agency_id:
-        if include_brand_defaults:
-            query["$or"] = [{"agency_id": normalized_agency_id}, {"agency_id": None}]
-        else:
-            query["agency_id"] = normalized_agency_id
-    else:
-        query["agency_id"] = None
-
-    normalized_model = str(model or "").strip()
-    if normalized_model:
-        query["model"] = normalized_model
-
-    return await _list_price_bulletins_with_enrichment_service(
-        db,
-        query=query,
-        normalized_agency_id=normalized_agency_id,
-        active_only=active_only,
-        latest_per_model=latest_per_model,
-        serialize_doc=serialize_doc,
-        is_price_bulletin_active=_is_price_bulletin_active_service,
-    )
-
-async def upsert_price_bulletins_bulk(payload: PriceBulletinBulkUpsert, request: Request):
-    current_user = await get_current_user(request)
-    if current_user.get("role") not in PRICE_BULLETIN_EDITOR_ROLES:
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    if not payload.items:
-        raise HTTPException(status_code=400, detail="At least one item is required")
-
-    scope = await _resolve_price_bulletin_scope_service(
-        db,
-        current_user=current_user,
-        group_id=payload.group_id,
-        brand_id=payload.brand_id,
-        agency_id=payload.agency_id,
-        validate_scope_filters=_validate_scope_filters,
-    )
-
-    effective_from = _normalize_iso_date_string(
-        payload.effective_from or datetime.now(timezone.utc).date().isoformat(),
-        field_name="effective_from",
-        required=True,
-    )
-    effective_to = _normalize_iso_date_string(payload.effective_to, field_name="effective_to", required=False)
-    if effective_to and effective_to < effective_from:
-        raise HTTPException(status_code=400, detail="effective_to must be on or after effective_from")
-
-    bulletin_name = str(payload.bulletin_name or "").strip()
-    if not bulletin_name:
-        bulletin_name = f"Boletín {scope['brand_name']} {effective_from}"
-    notes = str(payload.notes or "").strip() or None
-
-    now = datetime.now(timezone.utc)
-    updated_count, valid_items = await _upsert_price_bulletins_items_service(
-        db,
-        scope=scope,
-        items=payload.items,
-        effective_from=effective_from,
-        effective_to=effective_to,
-        bulletin_name=bulletin_name,
-        notes=notes,
-        current_user_id=current_user.get("id"),
-        now=now,
-        to_non_negative_float=_to_non_negative_float,
-    )
-
-    if updated_count == 0:
-        raise HTTPException(status_code=400, detail="No valid items to save")
-
-    repricing_summary = await _reprice_sales_for_price_bulletin_service(
-        db,
-        scope=scope,
-        effective_from=effective_from,
-        effective_to=effective_to,
-        items=valid_items,
-        price_item_applies_to_sale=_price_item_applies_to_sale_service,
-        resolve_effective_sale_pricing_for_model=_resolve_effective_sale_pricing_for_model,
-        apply_manual_sale_price_override=_apply_manual_sale_price_override,
-        calculate_commission=calculate_commission,
-        to_non_negative_float=_to_non_negative_float,
-        coerce_utc_datetime=_coerce_utc_datetime,
-    )
-
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="upsert_price_bulletins_bulk",
-        entity_type="price_bulletin",
-        entity_id=None,
-        group_id=scope["group_id"],
-        brand_id=scope["brand_id"],
-        agency_id=scope["agency_id"],
-        details={
-            "bulletin_name": bulletin_name,
-            "effective_from": effective_from,
-            "effective_to": effective_to,
-            "items_count": updated_count,
-            "repricing": repricing_summary,
-        },
-    )
-
-    return {
-        "message": "Price bulletins saved",
-        "group_id": scope["group_id"],
-        "brand_id": scope["brand_id"],
-        "agency_id": scope["agency_id"],
-        "bulletin_name": bulletin_name,
-        "effective_from": effective_from,
-        "effective_to": effective_to,
-        "items_count": updated_count,
-        "repricing": repricing_summary,
-    }
-
-async def delete_price_bulletin(bulletin_id: str, request: Request):
-    current_user = await get_current_user(request)
-    if current_user.get("role") not in PRICE_BULLETIN_EDITOR_ROLES:
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    if not ObjectId.is_valid(bulletin_id):
-        raise HTTPException(status_code=400, detail="Invalid bulletin_id")
-
-    previous = await db.price_bulletins.find_one({"_id": ObjectId(bulletin_id)})
-    if not previous:
-        raise HTTPException(status_code=404, detail="Price bulletin not found")
-    _ensure_doc_scope_access(current_user, previous, detail="No tienes acceso a este boletín")
-    await _remove_price_bulletin_service(
-        db,
-        bulletin_id=bulletin_id,
-    )
-
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="delete_price_bulletin",
-        entity_type="price_bulletin",
-        entity_id=bulletin_id,
-        group_id=previous.get("group_id"),
-        brand_id=previous.get("brand_id"),
-        agency_id=previous.get("agency_id"),
-        details={
-            "model": previous.get("model"),
-            "version": previous.get("version"),
-            "effective_from": previous.get("effective_from"),
-        },
-    )
-    return {"message": "Price bulletin deleted"}
 
 # ============== FINANCIAL RATES ROUTES ==============
 
@@ -4010,6 +3840,37 @@ async def import_sales(request: Request, file: UploadFile = File(...)):
         },
     )
     return response
+
+# ============== PRICE BULLETINS ROUTE HANDLERS ==============
+
+_price_bulletins_route_handlers = build_price_bulletins_route_handlers(
+    db=db,
+    get_current_user=get_current_user,
+    build_scope_query=_build_scope_query,
+    scope_query_has_access=_scope_query_has_access,
+    validate_scope_filters=_validate_scope_filters,
+    list_price_bulletins_with_enrichment=_list_price_bulletins_with_enrichment_service,
+    serialize_doc=serialize_doc,
+    is_price_bulletin_active=_is_price_bulletin_active_service,
+    price_bulletin_editor_roles=PRICE_BULLETIN_EDITOR_ROLES,
+    resolve_price_bulletin_scope=_resolve_price_bulletin_scope_service,
+    normalize_iso_date_string=_normalize_iso_date_string,
+    upsert_price_bulletins_items=_upsert_price_bulletins_items_service,
+    reprice_sales_for_price_bulletin=_reprice_sales_for_price_bulletin_service,
+    price_item_applies_to_sale=_price_item_applies_to_sale_service,
+    resolve_effective_sale_pricing_for_model=_resolve_effective_sale_pricing_for_model,
+    apply_manual_sale_price_override=_apply_manual_sale_price_override,
+    calculate_commission=calculate_commission,
+    to_non_negative_float=_to_non_negative_float,
+    coerce_utc_datetime=_coerce_utc_datetime,
+    log_audit_event=log_audit_event,
+    ensure_doc_scope_access=_ensure_doc_scope_access,
+    remove_price_bulletin=_remove_price_bulletin_service,
+    object_id_cls=ObjectId,
+)
+get_price_bulletins = _price_bulletins_route_handlers.get_price_bulletins
+upsert_price_bulletins_bulk = _price_bulletins_route_handlers.upsert_price_bulletins_bulk
+delete_price_bulletin = _price_bulletins_route_handlers.delete_price_bulletin
 
 # ============== ROOT ROUTE ==============
 
