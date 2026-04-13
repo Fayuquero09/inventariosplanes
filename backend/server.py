@@ -464,44 +464,13 @@ _core_helper_bundle = build_core_helper_bundle(
 serialize_doc = _core_helper_bundle.serialize_doc
 log_audit_event = _core_helper_bundle.log_audit_event
 
-def _normalize_catalog_text(value: Any) -> Optional[str]:
-    return _normalize_catalog_text_service(value)
-
-def _parse_catalog_year(value: Any) -> Optional[int]:
-    return _parse_catalog_year_service(value)
-
-def _parse_catalog_price(value: Any) -> Optional[float]:
-    return _parse_catalog_price_service(value)
-
-def _resolve_agency_location(city: Optional[str], address: Optional[str]) -> Dict[str, Optional[str]]:
-    return _resolve_agency_location_service(city, address)
-
-def _compose_structured_agency_address(
-    street: Optional[str],
-    exterior_number: Optional[str],
-    interior_number: Optional[str],
-    neighborhood: Optional[str],
-    city: Optional[str],
-    state: Optional[str],
-    postal_code: Optional[str],
-    country: Optional[str],
-) -> Optional[str]:
-    return _compose_structured_agency_address_service(
-        street=street,
-        exterior_number=exterior_number,
-        interior_number=interior_number,
-        neighborhood=neighborhood,
-        city=city,
-        state=state,
-        postal_code=postal_code,
-        country=country,
-    )
-
-def _merge_optional_text(incoming: Optional[str], previous: Optional[str]) -> Optional[str]:
-    return _merge_optional_text_service(incoming, previous)
-
-def _merge_optional_float(incoming: Optional[float], previous: Any) -> Optional[float]:
-    return _merge_optional_float_service(incoming, previous)
+_normalize_catalog_text = _normalize_catalog_text_service
+_parse_catalog_year = _parse_catalog_year_service
+_parse_catalog_price = _parse_catalog_price_service
+_resolve_agency_location = _resolve_agency_location_service
+_compose_structured_agency_address = _compose_structured_agency_address_service
+_merge_optional_text = _merge_optional_text_service
+_merge_optional_float = _merge_optional_float_service
 
 async def backfill_agency_locations() -> Dict[str, int]:
     return await _backfill_agency_locations_service(db=db)
@@ -513,11 +482,8 @@ def _build_catalog_tree_from_source(all_years: bool = False) -> Dict[str, Any]:
         all_years=all_years,
     )
 
-def _find_catalog_make(catalog: Dict[str, Any], make_name: str) -> Optional[Dict[str, Any]]:
-    return _find_catalog_make_service(catalog, make_name)
-
-def _find_catalog_model(make_entry: Dict[str, Any], model_name: str) -> Optional[Dict[str, Any]]:
-    return _find_catalog_model_service(make_entry, model_name)
+_find_catalog_make = _find_catalog_make_service
+_find_catalog_model = _find_catalog_model_service
 
 def _ensure_allowed_model_year(year: int) -> None:
     _ensure_allowed_model_year_service(year=year, allowed_year=get_catalog_model_year())
@@ -708,8 +674,7 @@ DAYS_PER_MONTH_FOR_RATE = 30
 
 # ============== VEHICLES ROUTES ==============
 
-def _coerce_utc_datetime(value: Any) -> Optional[datetime]:
-    return _coerce_utc_datetime_service(value)
+_coerce_utc_datetime = _coerce_utc_datetime_service
 
 
 async def calculate_vehicle_financial_cost_in_period(
@@ -749,20 +714,11 @@ async def enrich_vehicle(vehicle: dict) -> dict:
 
 # ============== COMMISSION RULES ROUTES ==============
 
-def _to_non_negative_float(value: Any, default: float = 0.0) -> float:
-    return _to_non_negative_float_service(value, default)
-
-def _sale_effective_revenue(sale: Dict[str, Any]) -> float:
-    return _sale_effective_revenue_service(sale)
-
-def _sale_commission_base_price(sale: Dict[str, Any]) -> float:
-    return _sale_commission_base_price_service(sale)
-
-def _normalize_commission_matrix_volume_tiers(tiers: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
-    return _normalize_commission_matrix_volume_tiers_service(tiers)
-
-def _normalize_commission_matrix_general(general: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    return _normalize_commission_matrix_general_service(general)
+_to_non_negative_float = _to_non_negative_float_service
+_sale_effective_revenue = _sale_effective_revenue_service
+_sale_commission_base_price = _sale_commission_base_price_service
+_normalize_commission_matrix_volume_tiers = _normalize_commission_matrix_volume_tiers_service
+_normalize_commission_matrix_general = _normalize_commission_matrix_general_service
 
 def _normalize_commission_matrix_models(models: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
     return _normalize_commission_matrix_models_service(
@@ -790,8 +746,7 @@ def _build_matrix_models_response(
         default_plant_share_pct=COMMISSION_MATRIX_DEFAULT_PLANT_SHARE_PCT,
     )
 
-def _resolve_matrix_volume_bonus_per_unit(volume_tiers: Optional[List[Dict[str, Any]]], seller_month_units: int) -> float:
-    return _resolve_matrix_volume_bonus_per_unit_service(volume_tiers, seller_month_units)
+_resolve_matrix_volume_bonus_per_unit = _resolve_matrix_volume_bonus_per_unit_service
 
 # ============== RUNTIME HELPER BUNDLE ==============
 
