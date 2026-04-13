@@ -28,6 +28,7 @@ from modules.sales_objectives_routes import SalesObjectivesRouteHandlers
 from handlers.auth_users_handlers import build_auth_users_route_handlers
 from handlers.catalog_handlers import build_catalog_route_handlers
 from handlers.commissions_handlers import build_commissions_route_handlers
+from handlers.core_helpers import build_core_helper_bundle
 from handlers.dashboard_handlers import build_dashboard_route_handlers
 from handlers.financial_rates_handlers import build_financial_rates_route_handlers
 from handlers.import_handlers import build_import_route_handlers
@@ -445,22 +446,6 @@ async def get_optional_user(request: Request) -> Optional[dict]:
         jwt_algorithm=JWT_ALGORITHM,
     )
 
-def serialize_doc(doc: dict) -> dict:
-    """Convert MongoDB document to serializable dict"""
-    if doc is None:
-        return None
-    result = {}
-    for k, v in doc.items():
-        if k == "_id":
-            result["id"] = str(v)
-        elif isinstance(v, ObjectId):
-            result[k] = str(v)
-        elif isinstance(v, datetime):
-            result[k] = v.isoformat()
-        else:
-            result[k] = v
-    return result
-
 COMMISSION_PENDING = "pending"
 COMMISSION_APPROVED = "approved"
 COMMISSION_REJECTED = "rejected"
@@ -471,56 +456,13 @@ OBJECTIVE_DRAFT = "draft"
 OBJECTIVE_APPROVED = "approved"
 OBJECTIVE_REJECTED = "rejected"
 
-def _to_jsonable(value: Any) -> Any:
-    if isinstance(value, ObjectId):
-        return str(value)
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, dict):
-        return {str(k): _to_jsonable(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_to_jsonable(item) for item in value]
-    return value
-
-async def log_audit_event(
-    request: Request,
-    current_user: Optional[dict],
-    action: str,
-    entity_type: str,
-    entity_id: Optional[str] = None,
-    group_id: Optional[str] = None,
-    brand_id: Optional[str] = None,
-    agency_id: Optional[str] = None,
-    details: Optional[Dict[str, Any]] = None,
-) -> None:
-    if not current_user:
-        return
-    actor_role = current_user.get("role")
-    if actor_role not in WRITE_AUDIT_ROLES:
-        return
-
-    client_ip = None
-    if request and request.client:
-        client_ip = request.client.host
-
-    audit_doc = {
-        "created_at": datetime.now(timezone.utc),
-        "actor_id": current_user.get("id"),
-        "actor_name": current_user.get("name"),
-        "actor_email": current_user.get("email"),
-        "actor_role": actor_role,
-        "action": action,
-        "entity_type": entity_type,
-        "entity_id": entity_id,
-        "group_id": group_id,
-        "brand_id": brand_id,
-        "agency_id": agency_id,
-        "details": _to_jsonable(details or {}),
-        "path": request.url.path if request and request.url else None,
-        "method": request.method if request else None,
-        "ip": client_ip,
-    }
-    await db.audit_logs.insert_one(audit_doc)
+_core_helper_bundle = build_core_helper_bundle(
+    db=db,
+    object_id_cls=ObjectId,
+    write_audit_roles=WRITE_AUDIT_ROLES,
+)
+serialize_doc = _core_helper_bundle.serialize_doc
+log_audit_event = _core_helper_bundle.log_audit_event
 
 def _normalize_catalog_text(value: Any) -> Optional[str]:
     return _normalize_catalog_text_service(value)
