@@ -277,6 +277,11 @@ from services.catalog_utils_service import (
     parse_catalog_price as _parse_catalog_price_service,
     parse_catalog_year as _parse_catalog_year_service,
 )
+from services.cors_service import build_allowed_origins as _build_allowed_origins_service
+from services.bootstrap_service import (
+    create_core_indexes as _create_core_indexes_service,
+    seed_admin_user as _seed_admin_user_service,
+)
 from services.rbac_service import (
     ACTION_AUDIT_LOGS_READ,
     ACTION_USERS_MANAGE,
@@ -4402,77 +4407,20 @@ else:
 # Include the router in the main app
 app.include_router(api_router)
 
-# CORS helpers
-def _normalize_origin(origin: Optional[str]) -> Optional[str]:
-    if not origin:
-        return None
-    value = origin.strip().rstrip("/")
-    return value or None
-
-def _build_allowed_origins() -> List[str]:
-    origins = {
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    }
-    frontend_origin = _normalize_origin(os.environ.get("FRONTEND_URL"))
-    if frontend_origin:
-        origins.add(frontend_origin)
-    return sorted(origins)
-
 # CORS Configuration
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=_build_allowed_origins(),
+    allow_origins=_build_allowed_origins_service(os.environ.get("FRONTEND_URL")),
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ============== STARTUP ==============
 
-async def seed_admin():
-    """Seed admin user on startup"""
-    admin_email = os.environ.get("ADMIN_EMAIL", "admin@autoconnect.com")
-    admin_password = os.environ.get("ADMIN_PASSWORD", "Admin123!")
-    
-    existing = await db.users.find_one({"email": admin_email})
-    if existing is None:
-        hashed = hash_password(admin_password)
-        await db.users.insert_one({
-            "email": admin_email,
-            "password_hash": hashed,
-            "name": "Admin",
-            "role": UserRole.APP_ADMIN,
-            "group_id": None,
-            "brand_id": None,
-            "agency_id": None,
-            "created_at": datetime.now(timezone.utc)
-        })
-        logger.info(f"Admin user created: {admin_email}")
-    elif not verify_password(admin_password, existing["password_hash"]):
-        await db.users.update_one(
-            {"email": admin_email},
-            {"$set": {"password_hash": hash_password(admin_password)}}
-        )
-        logger.info(f"Admin password updated: {admin_email}")
-
-async def create_indexes():
-    """Create MongoDB indexes"""
-    await db.users.create_index("email", unique=True)
-    await db.vehicles.create_index("vin")
-    await db.vehicles.create_index("agency_id")
-    await db.vehicles.create_index("status")
-    await db.sales.create_index("seller_id")
-    await db.sales.create_index("agency_id")
-    await db.sales.create_index("sale_date")
-    await db.audit_logs.create_index("created_at")
-    await db.audit_logs.create_index("agency_id")
-    await db.audit_logs.create_index("group_id")
-    await db.audit_logs.create_index("actor_id")
-
 @app.on_event("startup")
 async def startup():
-    await create_indexes()
+    await _create_core_indexes_service(db=db)
     backfill_summary = await backfill_agency_locations()
     logger.info(
         "Agency location backfill: checked=%s updated=%s city=%s postal_code=%s",
@@ -4481,7 +4429,20 @@ async def startup():
         backfill_summary["filled_city"],
         backfill_summary["filled_postal_code"],
     )
-    await seed_admin()
+    admin_email = os.environ.get("ADMIN_EMAIL", "admin@autoconnect.com")
+    admin_password = os.environ.get("ADMIN_PASSWORD", "Admin123!")
+    seed_status = await _seed_admin_user_service(
+        db=db,
+        admin_email=admin_email,
+        admin_password=admin_password,
+        app_admin_role=UserRole.APP_ADMIN,
+        hash_password=hash_password,
+        verify_password=verify_password,
+    )
+    if seed_status == "created":
+        logger.info("Admin user created: %s", admin_email)
+    elif seed_status == "password_updated":
+        logger.info("Admin password updated: %s", admin_email)
     logger.info("AutoConnect API started")
 
 @app.on_event("shutdown")
