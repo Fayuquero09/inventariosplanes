@@ -264,6 +264,13 @@ from services.agency_location_service import (
     merge_optional_text as _merge_optional_text_service,
     resolve_agency_location as _resolve_agency_location_service,
 )
+from services.catalog_utils_service import (
+    find_catalog_make as _find_catalog_make_service,
+    find_catalog_model as _find_catalog_model_service,
+    normalize_catalog_text as _normalize_catalog_text_service,
+    parse_catalog_price as _parse_catalog_price_service,
+    parse_catalog_year as _parse_catalog_year_service,
+)
 from services.rbac_service import (
     ACTION_AUDIT_LOGS_READ,
     ACTION_USERS_MANAGE,
@@ -558,40 +565,13 @@ async def log_audit_event(
     await db.audit_logs.insert_one(audit_doc)
 
 def _normalize_catalog_text(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text if text else None
+    return _normalize_catalog_text_service(value)
 
 def _parse_catalog_year(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    if isinstance(value, int):
-        return value
-    text = str(value).strip()
-    if not text:
-        return None
-    digits = "".join(ch for ch in text if ch.isdigit())
-    if len(digits) >= 4:
-        try:
-            return int(digits[:4])
-        except ValueError:
-            return None
-    try:
-        return int(text)
-    except ValueError:
-        return None
+    return _parse_catalog_year_service(value)
 
 def _parse_catalog_price(value: Any) -> Optional[float]:
-    if value is None:
-        return None
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    if parsed <= 0:
-        return None
-    return parsed
+    return _parse_catalog_price_service(value)
 
 def _resolve_agency_location(city: Optional[str], address: Optional[str]) -> Dict[str, Optional[str]]:
     return _resolve_agency_location_service(city, address)
@@ -764,24 +744,10 @@ def _build_catalog_tree_from_source(all_years: bool = False) -> Dict[str, Any]:
     return payload
 
 def _find_catalog_make(catalog: Dict[str, Any], make_name: str) -> Optional[Dict[str, Any]]:
-    key = _normalize_catalog_text(make_name)
-    if not key:
-        return None
-    lookup = key.casefold()
-    for make_entry in catalog.get("makes", []):
-        if str(make_entry.get("name", "")).casefold() == lookup:
-            return make_entry
-    return None
+    return _find_catalog_make_service(catalog, make_name)
 
 def _find_catalog_model(make_entry: Dict[str, Any], model_name: str) -> Optional[Dict[str, Any]]:
-    key = _normalize_catalog_text(model_name)
-    if not key:
-        return None
-    lookup = key.casefold()
-    for model_entry in make_entry.get("models", []):
-        if str(model_entry.get("name", "")).casefold() == lookup:
-            return model_entry
-    return None
+    return _find_catalog_model_service(make_entry, model_name)
 
 def _ensure_allowed_model_year(year: int) -> None:
     allowed_year = get_catalog_model_year()
