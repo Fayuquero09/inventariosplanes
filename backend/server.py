@@ -29,6 +29,8 @@ from handlers.catalog_handlers import build_catalog_route_handlers
 from handlers.commissions_handlers import build_commissions_route_handlers
 from handlers.dashboard_handlers import build_dashboard_route_handlers
 from handlers.financial_rates_handlers import build_financial_rates_route_handlers
+from handlers.import_handlers import build_import_route_handlers
+from handlers.organization_catalog_handlers import build_organization_catalog_route_handlers
 from handlers.price_bulletins_handlers import build_price_bulletins_route_handlers
 from handlers.sales_handlers import build_sales_route_handlers
 from handlers.sales_objectives_handlers import build_sales_objectives_route_handlers
@@ -969,551 +971,6 @@ async def get_sellers(request: Request, agency_id: Optional[str] = None, brand_i
     
     return result
 
-# ============== GROUPS ROUTES ==============
-
-async def create_group(group_data: GroupCreate, request: Request):
-    current_user = await get_current_user(request)
-    if current_user["role"] != UserRole.APP_ADMIN:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    
-    group_doc = {
-        "name": group_data.name,
-        "description": group_data.description,
-        "created_at": datetime.now(timezone.utc)
-    }
-    group_id = await insert_group(db, group_doc)
-    group_doc["id"] = group_id
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="create_group",
-        entity_type="group",
-        entity_id=group_id,
-        group_id=group_id,
-        details={"name": group_data.name, "description": group_data.description},
-    )
-    return serialize_doc(group_doc)
-
-async def get_groups(request: Request):
-    current_user = await get_current_user(request)
-    
-    query = {}
-    # Super admin y super users pueden ver todos los grupos
-    # Otros roles solo ven su grupo asignado
-    if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.APP_USER]:
-        if current_user.get("group_id"):
-            query["_id"] = ObjectId(current_user["group_id"])
-        else:
-            # Si no tiene grupo asignado, no ve ninguno
-            return []
-    
-    groups = await list_groups(db, query, limit=1000)
-    return [serialize_doc(g) for g in groups]
-
-async def get_group(group_id: str, request: Request):
-    current_user = await get_current_user(request)
-    
-    # Verificar acceso al grupo
-    if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.APP_USER]:
-        if current_user.get("group_id") != group_id:
-            raise HTTPException(status_code=403, detail="No tienes acceso a este grupo")
-    
-    group = await find_group_by_id(db, group_id)
-    if not group:
-        raise HTTPException(status_code=404, detail="Group not found")
-    return serialize_doc(group)
-
-async def update_group(group_id: str, group_data: GroupCreate, request: Request):
-    current_user = await get_current_user(request)
-    if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN]:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    
-    previous = await find_group_by_id(db, group_id)
-    await update_group_by_id(db, group_id, {"name": group_data.name, "description": group_data.description})
-    group = await find_group_by_id(db, group_id)
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="update_group",
-        entity_type="group",
-        entity_id=group_id,
-        group_id=group_id,
-        details={
-            "before": {"name": previous.get("name") if previous else None, "description": previous.get("description") if previous else None},
-            "after": {"name": group.get("name") if group else None, "description": group.get("description") if group else None},
-        },
-    )
-    return serialize_doc(group)
-
-async def delete_group(group_id: str, request: Request, cascade: bool = Query(False)):
-    current_user = await get_current_user(request)
-    if current_user["role"] != UserRole.APP_ADMIN:
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    if not ObjectId.is_valid(group_id):
-        raise HTTPException(status_code=400, detail="Invalid group_id")
-
-    group = await find_group_by_id(db, group_id)
-    if not group:
-        raise HTTPException(status_code=404, detail="Group not found")
-
-    context = await build_group_delete_context(db, group_id)
-    dependency_counts = await summarize_group_dependencies(db, context)
-    dependencies = format_dependency_messages(dependency_counts)
-    if dependencies and not cascade:
-        raise HTTPException(
-            status_code=409,
-            detail=f"No se puede borrar el grupo porque tiene registros relacionados: {', '.join(dependencies)}. Usa borrado en cascada para eliminar todo."
-        )
-
-    deleted_counts = {
-        "sales": 0,
-        "commission_rules": 0,
-        "sales_objectives": 0,
-        "financial_rates": 0,
-        "vehicles": 0,
-        "users": 0,
-        "agencies": 0,
-        "brands": 0,
-        "groups": 0,
-    }
-
-    if cascade:
-        deleted_counts.update(await execute_group_cascade_delete(db, context))
-
-    deleted_counts["groups"] = await delete_group_by_id(db, group_id)
-
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="delete_group",
-        entity_type="group",
-        entity_id=group_id,
-        group_id=group_id,
-        details={
-            "cascade": cascade,
-            "deleted": deleted_counts,
-            "name": group.get("name"),
-        },
-    )
-
-    return {
-        "message": "Group deleted",
-        "cascade": cascade,
-        "deleted": deleted_counts
-    }
-
-# ============== BRANDS ROUTES ==============
-
-async def create_brand(brand_data: BrandCreate, request: Request):
-    current_user = await get_current_user(request)
-    if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN]:
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    if not ObjectId.is_valid(brand_data.group_id):
-        raise HTTPException(status_code=400, detail="Invalid group_id")
-
-    group = await find_group_by_id(db, brand_data.group_id)
-    if not group:
-        raise HTTPException(status_code=404, detail="Group not found")
-
-    if current_user["role"] == UserRole.GROUP_ADMIN:
-        user_group_id = current_user.get("group_id")
-        if not user_group_id or brand_data.group_id != user_group_id:
-            raise HTTPException(status_code=403, detail="No tienes acceso para crear marcas fuera de tu grupo")
-    
-    brand_doc = {
-        "name": brand_data.name,
-        "group_id": brand_data.group_id,
-        "logo_url": brand_data.logo_url,
-        "created_at": datetime.now(timezone.utc)
-    }
-    brand_id = await insert_brand(db, brand_doc)
-    brand_doc["id"] = brand_id
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="create_brand",
-        entity_type="brand",
-        entity_id=brand_id,
-        group_id=brand_data.group_id,
-        details={"name": brand_data.name},
-    )
-    serialized = serialize_doc(brand_doc)
-    if not serialized.get("logo_url"):
-        fallback_logo = _resolve_logo_url_for_brand(serialized.get("name", ""), request)
-        if fallback_logo:
-            serialized["logo_url"] = fallback_logo
-    return serialized
-
-async def get_brands(request: Request, group_id: Optional[str] = None):
-    current_user = await get_current_user(request)
-    query = _build_scope_query(current_user)
-    if not _scope_query_has_access(query):
-        return []
-    # brands collection stores brand identifier in _id (not brand_id field).
-    query.pop("agency_id", None)
-    if _is_brand_scoped_role(current_user.get("role")) or _is_agency_scoped_role(current_user.get("role")):
-        user_brand_id = current_user.get("brand_id")
-        if not user_brand_id or not ObjectId.is_valid(user_brand_id):
-            return []
-        query["_id"] = ObjectId(user_brand_id)
-        query.pop("brand_id", None)
-
-    _validate_scope_filters(current_user, group_id=group_id)
-    if group_id:
-        query["group_id"] = group_id
-    
-    brands = await list_brands(db, query, limit=1000)
-    output: List[Dict[str, Any]] = []
-    for brand in brands:
-        serialized = serialize_doc(brand)
-        if not serialized.get("logo_url"):
-            fallback_logo = _resolve_logo_url_for_brand(serialized.get("name", ""), request)
-            if fallback_logo:
-                serialized["logo_url"] = fallback_logo
-        output.append(serialized)
-    return output
-
-async def update_brand(brand_id: str, brand_data: BrandCreate, request: Request):
-    current_user = await get_current_user(request)
-    if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN, UserRole.BRAND_ADMIN]:
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    if not ObjectId.is_valid(brand_id):
-        raise HTTPException(status_code=400, detail="Invalid brand_id")
-    if not ObjectId.is_valid(brand_data.group_id):
-        raise HTTPException(status_code=400, detail="Invalid group_id")
-
-    brand = await find_brand_by_id(db, brand_id)
-    if not brand:
-        raise HTTPException(status_code=404, detail="Brand not found")
-
-    target_group = await find_group_by_id(db, brand_data.group_id)
-    if not target_group:
-        raise HTTPException(status_code=404, detail="Group not found")
-
-    if current_user["role"] == UserRole.GROUP_ADMIN:
-        user_group_id = current_user.get("group_id")
-        current_group_id = str(brand.get("group_id") or "")
-        if (
-            not user_group_id or
-            current_group_id != user_group_id or
-            brand_data.group_id != user_group_id
-        ):
-            raise HTTPException(status_code=403, detail="No tienes acceso para modificar esta marca")
-    
-    previous = brand
-    await update_brand_by_id(
-        db,
-        brand_id,
-        {"name": brand_data.name, "group_id": brand_data.group_id, "logo_url": brand_data.logo_url},
-    )
-    brand = await find_brand_by_id(db, brand_id)
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="update_brand",
-        entity_type="brand",
-        entity_id=brand_id,
-        group_id=brand_data.group_id,
-        details={
-            "before": {
-                "name": previous.get("name"),
-                "group_id": previous.get("group_id"),
-                "logo_url": previous.get("logo_url"),
-            },
-            "after": {
-                "name": brand.get("name") if brand else None,
-                "group_id": brand.get("group_id") if brand else None,
-                "logo_url": brand.get("logo_url") if brand else None,
-            },
-        },
-    )
-    serialized = serialize_doc(brand)
-    if not serialized.get("logo_url"):
-        fallback_logo = _resolve_logo_url_for_brand(serialized.get("name", ""), request)
-        if fallback_logo:
-            serialized["logo_url"] = fallback_logo
-    return serialized
-
-async def delete_brand(brand_id: str, request: Request, cascade: bool = Query(False)):
-    current_user = await get_current_user(request)
-    if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN]:
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    if not ObjectId.is_valid(brand_id):
-        raise HTTPException(status_code=400, detail="Invalid brand_id")
-
-    brand = await find_brand_by_id(db, brand_id)
-    if not brand:
-        raise HTTPException(status_code=404, detail="Brand not found")
-
-    if current_user["role"] == UserRole.GROUP_ADMIN:
-        user_group_id = current_user.get("group_id")
-        if not user_group_id or not _same_scope_id(brand.get("group_id"), user_group_id):
-            raise HTTPException(status_code=403, detail="No tienes acceso para borrar esta marca")
-
-    brand_group_id = str(brand.get("group_id") or "")
-    context = await build_brand_delete_context(db, brand_id)
-    dependency_counts = await summarize_brand_dependencies(db, context)
-    dependencies = format_dependency_messages(dependency_counts)
-    if dependencies and not cascade:
-        raise HTTPException(
-            status_code=409,
-            detail=f"No se puede borrar la marca porque tiene registros relacionados: {', '.join(dependencies)}. Usa borrado en cascada para eliminar todo."
-        )
-
-    deleted_counts = {
-        "sales": 0,
-        "commission_rules": 0,
-        "sales_objectives": 0,
-        "financial_rates": 0,
-        "vehicles": 0,
-        "users": 0,
-        "agencies": 0,
-        "brands": 0,
-    }
-
-    if cascade:
-        deleted_counts.update(await execute_brand_cascade_delete(db, context))
-
-    deleted_counts["brands"] = await delete_brand_by_id(db, brand_id)
-
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="delete_brand",
-        entity_type="brand",
-        entity_id=brand_id,
-        group_id=brand_group_id,
-        brand_id=brand_id,
-        details={
-            "name": brand.get("name"),
-            "cascade": cascade,
-            "deleted": deleted_counts,
-        },
-    )
-
-    return {
-        "message": "Brand deleted",
-        "cascade": cascade,
-        "deleted": deleted_counts
-    }
-
-# ============== AGENCIES ROUTES ==============
-
-async def create_agency(agency_data: AgencyCreate, request: Request):
-    current_user = await get_current_user(request)
-    if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN, UserRole.BRAND_ADMIN]:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    
-    # Get brand to link group_id
-    brand = await find_brand_by_id(db, agency_data.brand_id)
-    if not brand:
-        raise HTTPException(status_code=404, detail="Brand not found")
-
-    street = _normalize_catalog_text(agency_data.street)
-    exterior_number = _normalize_catalog_text(agency_data.exterior_number)
-    interior_number = _normalize_catalog_text(agency_data.interior_number)
-    neighborhood = _normalize_catalog_text(agency_data.neighborhood)
-    municipality = _normalize_catalog_text(agency_data.municipality)
-    state = _normalize_catalog_text(agency_data.state)
-    country = _normalize_catalog_text(agency_data.country) or "Mexico"
-
-    explicit_city = _normalize_catalog_text(agency_data.city) or municipality
-    explicit_postal_code = _normalize_catalog_text(agency_data.postal_code)
-    address = _normalize_catalog_text(agency_data.address) or _compose_structured_agency_address(
-        street=street,
-        exterior_number=exterior_number,
-        interior_number=interior_number,
-        neighborhood=neighborhood,
-        city=explicit_city,
-        state=state,
-        postal_code=explicit_postal_code,
-        country=country,
-    )
-    location = _resolve_agency_location(explicit_city, address)
-    final_city = explicit_city or location["city"]
-    final_postal_code = explicit_postal_code or location["postal_code"]
-    
-    agency_doc = {
-        "name": agency_data.name,
-        "brand_id": agency_data.brand_id,
-        "group_id": brand["group_id"],
-        "address": address,
-        "city": final_city,
-        "postal_code": final_postal_code,
-        "street": street,
-        "exterior_number": exterior_number,
-        "interior_number": interior_number,
-        "neighborhood": neighborhood,
-        "municipality": municipality,
-        "state": state,
-        "country": country,
-        "google_place_id": _normalize_catalog_text(agency_data.google_place_id),
-        "latitude": agency_data.latitude,
-        "longitude": agency_data.longitude,
-        "created_at": datetime.now(timezone.utc)
-    }
-    agency_id = await insert_agency(db, agency_doc)
-    agency_doc["id"] = agency_id
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="create_agency",
-        entity_type="agency",
-        entity_id=agency_id,
-        group_id=brand.get("group_id"),
-        brand_id=agency_data.brand_id,
-        agency_id=agency_id,
-        details={
-            "name": agency_data.name,
-            "city": final_city,
-            "state": state,
-            "postal_code": final_postal_code,
-            "address": address,
-            "google_place_id": agency_doc.get("google_place_id"),
-            "latitude": agency_doc.get("latitude"),
-            "longitude": agency_doc.get("longitude"),
-        },
-    )
-    return serialize_doc(agency_doc)
-
-async def get_agencies(request: Request, brand_id: Optional[str] = None, group_id: Optional[str] = None):
-    current_user = await get_current_user(request)
-    query = _build_scope_query(current_user)
-    if not _scope_query_has_access(query):
-        return []
-    # agencies collection stores agency identifier in _id (not agency_id field).
-    if _is_agency_scoped_role(current_user.get("role")):
-        user_agency_id = current_user.get("agency_id")
-        if not user_agency_id or not ObjectId.is_valid(user_agency_id):
-            return []
-        query["_id"] = ObjectId(user_agency_id)
-        query.pop("agency_id", None)
-
-    _validate_scope_filters(current_user, group_id=group_id, brand_id=brand_id)
-    if group_id:
-        query["group_id"] = group_id
-    if brand_id:
-        query["brand_id"] = brand_id
-    
-    agencies = await list_agencies(db, query, limit=1000)
-    
-    # Enrich with brand names
-    brand_ids = list(set(a.get("brand_id") for a in agencies if a.get("brand_id")))
-    brands = await list_brands_by_ids(db, brand_ids, limit=1000)
-    brand_map = {str(b["_id"]): b["name"] for b in brands}
-    
-    result = []
-    for a in agencies:
-        agency = serialize_doc(a)
-        city_source = a.get("city") or a.get("municipality")
-        location = _resolve_agency_location(city_source, a.get("address"))
-        agency["city"] = city_source or location["city"]
-        agency["postal_code"] = a.get("postal_code") or location["postal_code"]
-        agency["brand_name"] = brand_map.get(a.get("brand_id"), "")
-        result.append(agency)
-    
-    return result
-
-async def update_agency(agency_id: str, agency_data: AgencyCreate, request: Request):
-    current_user = await get_current_user(request)
-    if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN, UserRole.BRAND_ADMIN, UserRole.AGENCY_ADMIN]:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    
-    previous = await find_agency_by_id(db, agency_id)
-    if not previous:
-        raise HTTPException(status_code=404, detail="Agency not found")
-    _ensure_doc_scope_access(current_user, previous, detail="No tienes acceso a esta agencia")
-    if current_user["role"] == UserRole.AGENCY_ADMIN and agency_data.brand_id != previous.get("brand_id"):
-        raise HTTPException(status_code=403, detail="Agency admin cannot move agency to another brand")
-
-    street = _merge_optional_text(agency_data.street, previous.get("street"))
-    exterior_number = _merge_optional_text(agency_data.exterior_number, previous.get("exterior_number"))
-    interior_number = _merge_optional_text(agency_data.interior_number, previous.get("interior_number"))
-    neighborhood = _merge_optional_text(agency_data.neighborhood, previous.get("neighborhood"))
-    municipality = _merge_optional_text(agency_data.municipality, previous.get("municipality"))
-    state = _merge_optional_text(agency_data.state, previous.get("state"))
-    country = _merge_optional_text(agency_data.country, previous.get("country")) or "Mexico"
-
-    explicit_city = _merge_optional_text(agency_data.city, previous.get("city")) or municipality
-    explicit_postal_code = _merge_optional_text(agency_data.postal_code, previous.get("postal_code"))
-    address = _merge_optional_text(agency_data.address, previous.get("address")) or _compose_structured_agency_address(
-        street=street,
-        exterior_number=exterior_number,
-        interior_number=interior_number,
-        neighborhood=neighborhood,
-        city=explicit_city,
-        state=state,
-        postal_code=explicit_postal_code,
-        country=country,
-    )
-    location = _resolve_agency_location(explicit_city, address)
-    final_city = explicit_city or location["city"]
-    final_postal_code = explicit_postal_code or location["postal_code"]
-    latitude = _merge_optional_float(agency_data.latitude, previous.get("latitude"))
-    longitude = _merge_optional_float(agency_data.longitude, previous.get("longitude"))
-    google_place_id = _merge_optional_text(agency_data.google_place_id, previous.get("google_place_id"))
-
-    await update_agency_by_id(
-        db,
-        agency_id,
-        {
-            "name": agency_data.name,
-            "address": address,
-            "city": final_city,
-            "postal_code": final_postal_code,
-            "street": street,
-            "exterior_number": exterior_number,
-            "interior_number": interior_number,
-            "neighborhood": neighborhood,
-            "municipality": municipality,
-            "state": state,
-            "country": country,
-            "google_place_id": google_place_id,
-            "latitude": latitude,
-            "longitude": longitude,
-        },
-    )
-    agency = await find_agency_by_id(db, agency_id)
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="update_agency",
-        entity_type="agency",
-        entity_id=agency_id,
-        group_id=agency.get("group_id") if agency else previous.get("group_id") if previous else None,
-        brand_id=agency.get("brand_id") if agency else previous.get("brand_id") if previous else None,
-        agency_id=agency_id,
-        details={
-            "before": {
-                "name": previous.get("name") if previous else None,
-                "city": previous.get("city") if previous else None,
-                "postal_code": previous.get("postal_code") if previous else None,
-                "address": previous.get("address") if previous else None,
-                "state": previous.get("state") if previous else None,
-                "municipality": previous.get("municipality") if previous else None,
-                "google_place_id": previous.get("google_place_id") if previous else None,
-                "latitude": previous.get("latitude") if previous else None,
-                "longitude": previous.get("longitude") if previous else None,
-            },
-            "after": {
-                "name": agency.get("name") if agency else None,
-                "city": agency.get("city") if agency else None,
-                "postal_code": agency.get("postal_code") if agency else None,
-                "address": agency.get("address") if agency else None,
-                "state": agency.get("state") if agency else None,
-                "municipality": agency.get("municipality") if agency else None,
-                "google_place_id": agency.get("google_place_id") if agency else None,
-                "latitude": agency.get("latitude") if agency else None,
-                "longitude": agency.get("longitude") if agency else None,
-            },
-        },
-    )
-    return serialize_doc(agency)
-
 # ============== VEHICLE CATALOG ROUTES ==============
 
 _catalog_route_handlers = build_catalog_route_handlers(
@@ -1527,6 +984,68 @@ _catalog_route_handlers = build_catalog_route_handlers(
 get_catalog_makes = _catalog_route_handlers.get_catalog_makes
 get_catalog_models = _catalog_route_handlers.get_catalog_models
 get_catalog_versions = _catalog_route_handlers.get_catalog_versions
+
+# ============== ORGANIZATION ROUTE HANDLERS ==============
+
+_organization_catalog_route_handlers = build_organization_catalog_route_handlers(
+    db=db,
+    get_current_user=get_current_user,
+    app_admin_role=UserRole.APP_ADMIN,
+    app_user_role=UserRole.APP_USER,
+    group_admin_role=UserRole.GROUP_ADMIN,
+    brand_admin_role=UserRole.BRAND_ADMIN,
+    agency_admin_role=UserRole.AGENCY_ADMIN,
+    serialize_doc=serialize_doc,
+    object_id_cls=ObjectId,
+    insert_group=insert_group,
+    list_groups=list_groups,
+    find_group_by_id=find_group_by_id,
+    update_group_by_id=update_group_by_id,
+    delete_group_by_id=delete_group_by_id,
+    build_group_delete_context=build_group_delete_context,
+    summarize_group_dependencies=summarize_group_dependencies,
+    format_dependency_messages=format_dependency_messages,
+    execute_group_cascade_delete=execute_group_cascade_delete,
+    insert_brand=insert_brand,
+    list_brands=list_brands,
+    find_brand_by_id=find_brand_by_id,
+    update_brand_by_id=update_brand_by_id,
+    delete_brand_by_id=delete_brand_by_id,
+    build_brand_delete_context=build_brand_delete_context,
+    summarize_brand_dependencies=summarize_brand_dependencies,
+    execute_brand_cascade_delete=execute_brand_cascade_delete,
+    insert_agency=insert_agency,
+    list_agencies=list_agencies,
+    list_brands_by_ids=list_brands_by_ids,
+    find_agency_by_id=find_agency_by_id,
+    update_agency_by_id=update_agency_by_id,
+    build_scope_query=_build_scope_query,
+    scope_query_has_access=_scope_query_has_access,
+    validate_scope_filters=_validate_scope_filters,
+    ensure_doc_scope_access=_ensure_doc_scope_access,
+    same_scope_id=_same_scope_id,
+    is_brand_scoped_role=_is_brand_scoped_role,
+    is_agency_scoped_role=_is_agency_scoped_role,
+    resolve_logo_url_for_brand=_resolve_logo_url_for_brand,
+    normalize_catalog_text=_normalize_catalog_text,
+    resolve_agency_location=_resolve_agency_location,
+    compose_structured_agency_address=_compose_structured_agency_address,
+    merge_optional_text=_merge_optional_text,
+    merge_optional_float=_merge_optional_float,
+    log_audit_event=log_audit_event,
+)
+create_group = _organization_catalog_route_handlers.create_group
+get_groups = _organization_catalog_route_handlers.get_groups
+get_group = _organization_catalog_route_handlers.get_group
+update_group = _organization_catalog_route_handlers.update_group
+delete_group = _organization_catalog_route_handlers.delete_group
+create_brand = _organization_catalog_route_handlers.create_brand
+get_brands = _organization_catalog_route_handlers.get_brands
+update_brand = _organization_catalog_route_handlers.update_brand
+delete_brand = _organization_catalog_route_handlers.delete_brand
+create_agency = _organization_catalog_route_handlers.create_agency
+get_agencies = _organization_catalog_route_handlers.get_agencies
+update_agency = _organization_catalog_route_handlers.update_agency
 
 # ============== PRICE BULLETINS ROUTES ==============
 
@@ -1845,104 +1364,40 @@ async def _build_vehicle_aging_suggestion(
         now=datetime.now(timezone.utc),
     )
 
-# ============== IMPORT ROUTES ==============
+# ============== IMPORT ROUTE HANDLERS ==============
 
-async def import_organization(request: Request, file: UploadFile = File(...)):
-    """
-    Import organizational structure from an Excel file with optional sheets:
-    - groups:  name, description
-    - brands:  name, group_id|group_name, logo_url
-    - agencies: name, brand_id|brand_name, group_id|group_name, city, address
-    - sellers: email, name, password, agency_id|agency_name, brand_id|brand_name, group_id|group_name, role
-    """
-    current_user = await get_current_user(request)
-    if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN]:
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    content = await file.read()
-    response = await import_organization_from_excel(
-        db,
-        current_user=current_user,
-        filename=file.filename,
-        content=content,
-        resolve_agency_location=_resolve_agency_location,
-        hash_password=hash_password,
-    )
-
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="import_organization",
-        entity_type="organization_import",
-        group_id=current_user.get("group_id"),
-        details={
-            "filename": file.filename,
-            "summary": response.get("summary", {}),
-            "errors_count": len(response.get("errors", [])),
-        },
-    )
-    return response
-
-async def import_vehicles(request: Request, file: UploadFile = File(...)):
-    current_user = await get_current_user(request)
-    if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN, UserRole.BRAND_ADMIN, UserRole.AGENCY_ADMIN]:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    
-    content = await file.read()
-    response = await import_vehicles_from_file(
-        db,
-        filename=file.filename,
-        content=content,
-        allowed_model_year=get_catalog_model_year(),
-    )
-
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="import_vehicles",
-        entity_type="vehicle_import",
-        group_id=current_user.get("group_id"),
-        details={
-            "filename": file.filename,
-            "imported": response.get("imported", 0),
-            "total_rows": response.get("total_rows", 0),
-            "errors_count": len(response.get("errors", [])),
-        },
-    )
-    return response
-
-async def import_sales(request: Request, file: UploadFile = File(...)):
-    current_user = await get_current_user(request)
-    if current_user["role"] not in [UserRole.APP_ADMIN, UserRole.GROUP_ADMIN, UserRole.BRAND_ADMIN, UserRole.AGENCY_ADMIN]:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    
-    content = await file.read()
-    response = await import_sales_from_file(
-        db,
-        filename=file.filename,
-        content=content,
-        calculate_commission=calculate_commission,
-        resolve_effective_sale_pricing_for_model=_resolve_effective_sale_pricing_for_model,
-        apply_manual_sale_price_override=_apply_manual_sale_price_override,
-        extract_active_aging_incentive_plan=_extract_active_aging_incentive_plan,
-        apply_aging_plan_to_effective_pricing=_apply_aging_plan_to_effective_pricing,
-        to_non_negative_float=_to_non_negative_float,
-    )
-
-    await log_audit_event(
-        request=request,
-        current_user=current_user,
-        action="import_sales",
-        entity_type="sales_import",
-        group_id=current_user.get("group_id"),
-        details={
-            "filename": file.filename,
-            "imported": response.get("imported", 0),
-            "total_rows": response.get("total_rows", 0),
-            "errors_count": len(response.get("errors", [])),
-        },
-    )
-    return response
+_import_organization_roles = [
+    UserRole.APP_ADMIN,
+    UserRole.GROUP_ADMIN,
+]
+_import_vehicle_sales_roles = [
+    UserRole.APP_ADMIN,
+    UserRole.GROUP_ADMIN,
+    UserRole.BRAND_ADMIN,
+    UserRole.AGENCY_ADMIN,
+]
+_import_route_handlers = build_import_route_handlers(
+    db=db,
+    get_current_user=get_current_user,
+    import_organization_roles=_import_organization_roles,
+    import_vehicle_sales_roles=_import_vehicle_sales_roles,
+    import_organization_from_excel=import_organization_from_excel,
+    import_vehicles_from_file=import_vehicles_from_file,
+    import_sales_from_file=import_sales_from_file,
+    resolve_agency_location=_resolve_agency_location,
+    hash_password=hash_password,
+    get_catalog_model_year=get_catalog_model_year,
+    calculate_commission=calculate_commission,
+    resolve_effective_sale_pricing_for_model=_resolve_effective_sale_pricing_for_model,
+    apply_manual_sale_price_override=_apply_manual_sale_price_override,
+    extract_active_aging_incentive_plan=_extract_active_aging_incentive_plan,
+    apply_aging_plan_to_effective_pricing=_apply_aging_plan_to_effective_pricing,
+    to_non_negative_float=_to_non_negative_float,
+    log_audit_event=log_audit_event,
+)
+import_organization = _import_route_handlers.import_organization
+import_vehicles = _import_route_handlers.import_vehicles
+import_sales = _import_route_handlers.import_sales
 
 # ============== VEHICLES ROUTE HANDLERS ==============
 
