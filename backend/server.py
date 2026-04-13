@@ -269,6 +269,7 @@ from services.financial_cost_service import (
     calculate_vehicle_financial_cost_in_period as _calculate_vehicle_financial_cost_in_period_service,
     coerce_utc_datetime as _coerce_utc_datetime_service,
 )
+from services.vehicle_enrichment_service import enrich_vehicle as _enrich_vehicle_service
 from services.catalog_utils_service import (
     find_catalog_make as _find_catalog_make_service,
     find_catalog_model as _find_catalog_model_service,
@@ -2401,59 +2402,17 @@ async def calculate_vehicle_financial_cost(vehicle: dict) -> float:
     )
 
 async def enrich_vehicle(vehicle: dict) -> dict:
-    """Enrich vehicle with agency, brand, group info and calculations"""
-    result = serialize_doc(vehicle)
-    
-    # Get agency info
-    if vehicle.get("agency_id"):
-        agency = await db.agencies.find_one({"_id": ObjectId(vehicle["agency_id"])})
-        if agency:
-            result["agency_name"] = agency["name"]
-            result["brand_id"] = agency.get("brand_id")
-            result["group_id"] = agency.get("group_id")
-            
-            # Get brand name
-            if agency.get("brand_id"):
-                brand = await db.brands.find_one({"_id": ObjectId(agency["brand_id"])})
-                if brand:
-                    result["brand_name"] = brand["name"]
-    
-    # Calculate aging
-    entry_date = vehicle.get("entry_date")
-    if isinstance(entry_date, str):
-        entry_date = datetime.fromisoformat(entry_date.replace("Z", "+00:00"))
-    elif isinstance(entry_date, datetime) and entry_date.tzinfo is None:
-        entry_date = entry_date.replace(tzinfo=timezone.utc)
-    
-    if vehicle.get("exit_date"):
-        end_date = vehicle["exit_date"]
-        if isinstance(end_date, str):
-            end_date = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
-        elif isinstance(end_date, datetime) and end_date.tzinfo is None:
-            end_date = end_date.replace(tzinfo=timezone.utc)
-    else:
-        end_date = datetime.now(timezone.utc)
-    
-    result["aging_days"] = (end_date - entry_date).days
-    result["financial_cost"] = await calculate_vehicle_financial_cost(vehicle)
-
-    # Enrich sold vehicles with sale/commission info.
-    vehicle_id = result.get("id")
-    if vehicle_id:
-        sale_doc = await db.sales.find_one({"vehicle_id": vehicle_id}, sort=[("sale_date", -1)])
-        if sale_doc:
-            serialized_sale = serialize_doc(sale_doc)
-            result["sale_commission"] = round(float(serialized_sale.get("commission", 0) or 0), 2)
-            result["sale_price"] = round(float(serialized_sale.get("sale_price", 0) or 0), 2)
-            result["effective_revenue"] = round(_sale_effective_revenue(serialized_sale), 2)
-            result["sale_date"] = serialized_sale.get("sale_date")
-            seller_id = serialized_sale.get("seller_id")
-            if seller_id and ObjectId.is_valid(seller_id):
-                seller = await db.users.find_one({"_id": ObjectId(seller_id)})
-                if seller:
-                    result["sold_by_name"] = seller.get("name")
-    
-    return result
+    return await _enrich_vehicle_service(
+        vehicle,
+        serialize_doc=serialize_doc,
+        find_agency_by_id=lambda agency_id: db.agencies.find_one({"_id": ObjectId(agency_id)}),
+        find_brand_by_id=lambda brand_id: db.brands.find_one({"_id": ObjectId(brand_id)}),
+        calculate_vehicle_financial_cost=calculate_vehicle_financial_cost,
+        find_latest_sale_for_vehicle=lambda vehicle_id: db.sales.find_one({"vehicle_id": vehicle_id}, sort=[("sale_date", -1)]),
+        sale_effective_revenue=_sale_effective_revenue,
+        is_valid_object_id=ObjectId.is_valid,
+        find_user_by_id=lambda user_id: db.users.find_one({"_id": ObjectId(user_id)}),
+    )
 
 async def create_vehicle(vehicle_data: VehicleCreate, request: Request):
     current_user = await get_current_user(request)
