@@ -8,7 +8,6 @@ import os
 import logging
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
-from pathlib import Path
 from modules.auth_users_routes import AuthUsersRouteHandlers
 from modules.commissions_routes import CommissionsRouteHandlers
 from modules.dashboard_routes import DashboardRouteHandlers
@@ -30,8 +29,10 @@ from handlers.app_runtime_helpers import (
     run_shutdown,
     run_startup,
 )
+from handlers.app_config_helpers import build_app_config_helper_bundle
 from handlers.auth_runtime_helpers import build_auth_runtime_helper_bundle
 from handlers.catalog_handlers import build_catalog_route_handlers
+from handlers.commission_catalog_helpers import build_commission_catalog_helper_bundle
 from handlers.commissions_handlers import build_commissions_route_handlers
 from handlers.core_helpers import build_core_helper_bundle
 from handlers.dashboard_handlers import build_dashboard_route_handlers
@@ -376,28 +377,23 @@ CATALOG_DEFAULT_SOURCE_PATH = "/Users/Fernando.Molina/cortex-automotriz/strapi/d
 CATALOG_DEFAULT_MODEL_YEAR = 2026
 CORTEX_ROOT_DEFAULT_PATH = "/Users/Fernando.Molina/cortex-automotriz"
 LOGO_DIRECTORY_ENV = "STRAPI_LOGOS_DIR"
-def get_jwt_secret() -> str:
-    return os.environ.get("JWT_SECRET", "default-secret-change-me")
-
-def get_catalog_source_path() -> str:
-    return _get_catalog_source_path_service(default_source_path=CATALOG_DEFAULT_SOURCE_PATH)
-
-def get_catalog_model_year() -> int:
-    return _get_catalog_model_year_service(default_model_year=CATALOG_DEFAULT_MODEL_YEAR)
-
-def _resolve_logo_url_for_brand(brand_name: str, request: Optional[Request] = None) -> Optional[str]:
-    return _resolve_logo_url_for_brand_service(
-        brand_name,
-        request=request,
-        logo_directory_env=LOGO_DIRECTORY_ENV,
-        cortex_root_default_path=CORTEX_ROOT_DEFAULT_PATH,
-    )
-
-def _resolve_logo_directory() -> Optional[Path]:
-    return _resolve_logo_directory_service(
-        logo_directory_env=LOGO_DIRECTORY_ENV,
-        cortex_root_default_path=CORTEX_ROOT_DEFAULT_PATH,
-    )
+_app_config_helpers = build_app_config_helper_bundle(
+    env=os.environ,
+    jwt_secret_default="default-secret-change-me",
+    catalog_default_source_path=CATALOG_DEFAULT_SOURCE_PATH,
+    catalog_default_model_year=CATALOG_DEFAULT_MODEL_YEAR,
+    logo_directory_env=LOGO_DIRECTORY_ENV,
+    cortex_root_default_path=CORTEX_ROOT_DEFAULT_PATH,
+    get_catalog_source_path_service=_get_catalog_source_path_service,
+    get_catalog_model_year_service=_get_catalog_model_year_service,
+    resolve_logo_url_for_brand_service=_resolve_logo_url_for_brand_service,
+    resolve_logo_directory_service=_resolve_logo_directory_service,
+)
+get_jwt_secret = _app_config_helpers.get_jwt_secret
+get_catalog_source_path = _app_config_helpers.get_catalog_source_path
+get_catalog_model_year = _app_config_helpers.get_catalog_model_year
+_resolve_logo_url_for_brand = _app_config_helpers.resolve_logo_url_for_brand
+_resolve_logo_directory = _app_config_helpers.resolve_logo_directory
 
 # Auth runtime helpers (hashing, token generation, current user resolution)
 _auth_runtime_helper_bundle = build_auth_runtime_helper_bundle(
@@ -683,31 +679,18 @@ _sale_commission_base_price = _sale_commission_base_price_service
 _normalize_commission_matrix_volume_tiers = _normalize_commission_matrix_volume_tiers_service
 _normalize_commission_matrix_general = _normalize_commission_matrix_general_service
 
-def _normalize_commission_matrix_models(models: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
-    return _normalize_commission_matrix_models_service(
-        models,
-        default_plant_share_pct=COMMISSION_MATRIX_DEFAULT_PLANT_SHARE_PCT,
-    )
-
-def _get_catalog_models_for_brand(brand_name: Optional[str]) -> List[Dict[str, Any]]:
-    return _get_catalog_models_for_brand_service(
-        brand_name,
-        build_catalog_tree_from_source=_build_catalog_tree_from_source,
-        find_catalog_make=_find_catalog_make,
-        parse_catalog_price=_parse_catalog_price,
-    )
-
-def _build_matrix_models_response(
-    catalog_models: List[Dict[str, Any]],
-    overrides: List[Dict[str, Any]],
-    default_percentage: float,
-) -> List[Dict[str, Any]]:
-    return _build_matrix_models_response_service(
-        catalog_models=catalog_models,
-        overrides=overrides,
-        default_percentage=default_percentage,
-        default_plant_share_pct=COMMISSION_MATRIX_DEFAULT_PLANT_SHARE_PCT,
-    )
+_commission_catalog_helper_bundle = build_commission_catalog_helper_bundle(
+    default_plant_share_pct=COMMISSION_MATRIX_DEFAULT_PLANT_SHARE_PCT,
+    normalize_commission_matrix_models_service=_normalize_commission_matrix_models_service,
+    get_catalog_models_for_brand_service=_get_catalog_models_for_brand_service,
+    build_matrix_models_response_service=_build_matrix_models_response_service,
+    build_catalog_tree_from_source=_build_catalog_tree_from_source,
+    find_catalog_make=_find_catalog_make,
+    parse_catalog_price=_parse_catalog_price,
+)
+_normalize_commission_matrix_models = _commission_catalog_helper_bundle.normalize_commission_matrix_models
+_get_catalog_models_for_brand = _commission_catalog_helper_bundle.get_catalog_models_for_brand
+_build_matrix_models_response = _commission_catalog_helper_bundle.build_matrix_models_response
 
 _resolve_matrix_volume_bonus_per_unit = _resolve_matrix_volume_bonus_per_unit_service
 
