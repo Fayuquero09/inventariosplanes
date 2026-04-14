@@ -6,8 +6,6 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
 import os
 import logging
-from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any
 from handlers.auth_users_handlers import build_auth_users_route_handlers
 from handlers.app_runtime_helpers import (
     configure_cors,
@@ -22,7 +20,7 @@ from handlers.auth_runtime_helpers import build_auth_runtime_helper_bundle
 from handlers.catalog_handlers import build_catalog_route_handlers
 from handlers.catalog_runtime_helpers import build_catalog_runtime_helper_bundle
 from handlers.commission_catalog_helpers import build_commission_catalog_helper_bundle
-from handlers.commissions_handlers import build_commissions_route_handlers
+from handlers.commissions_route_wiring import build_commissions_route_handler_bundle
 from handlers.core_helpers import build_core_helper_bundle
 from handlers.dashboard_handlers import build_dashboard_route_handlers
 from handlers.financial_rates_handlers import build_financial_rates_route_handlers
@@ -42,26 +40,6 @@ from handlers.sales_objectives_handlers import build_sales_objectives_route_hand
 from handlers.vehicles_handlers import build_vehicles_route_handlers
 from schemas.api_models import (
     UserRole,
-)
-from repositories.commission_repository import (
-    delete_commission_rule_by_id as _delete_commission_rule_by_id_repo,
-    find_agency_by_id as _find_agency_by_id_commission_repo,
-    find_brand_by_id as _find_brand_by_id_commission_repo,
-    find_commission_closure_by_id as _find_commission_closure_by_id_repo,
-    find_commission_closure_by_scope as _find_commission_closure_by_scope_repo,
-    find_commission_matrix_by_agency as _find_commission_matrix_by_agency_repo,
-    find_commission_rule_by_id as _find_commission_rule_by_id_repo,
-    find_group_by_id as _find_group_by_id_commission_repo,
-    find_user_by_id as _find_user_by_id_commission_repo,
-    insert_commission_closure as _insert_commission_closure_repo,
-    insert_commission_rule as _insert_commission_rule_repo,
-    list_active_rules_by_agency,
-    list_commission_closures as _list_commission_closures_repo,
-    list_commission_rules as _list_commission_rules_repo,
-    list_sales_for_closure as _list_sales_for_closure_repo,
-    update_commission_closure_by_id as _update_commission_closure_by_id_repo,
-    update_commission_rule_by_id as _update_commission_rule_by_id_repo,
-    upsert_commission_matrix_by_agency as _upsert_commission_matrix_by_agency_repo,
 )
 from repositories.dashboard_repository import (
     count_sales as _count_sales_dashboard_repo,
@@ -128,25 +106,15 @@ from repositories.user_repository import (
     update_user_by_id,
     update_user_password_hash,
 )
-from services.commission_service import calculate_commission_from_rules as _calculate_commission_from_rules
 from services.commission_calculation_service import (
     calculate_commission as _calculate_commission_service,
 )
 from services.commission_management_service import (
-    build_commission_approval_update_fields as _build_commission_approval_update_fields_service,
-    build_commission_closure_doc as _build_commission_closure_doc_service,
-    build_commission_closure_snapshot as _build_commission_closure_snapshot_service,
-    build_commission_matrix_upsert_fields as _build_commission_matrix_upsert_fields_service,
-    build_commission_rule_doc as _build_commission_rule_doc_service,
-    build_commission_rule_update_fields as _build_commission_rule_update_fields_service,
-    build_commission_simulator_projection as _build_commission_simulator_projection_service,
     build_matrix_models_response as _build_matrix_models_response_service,
-    build_month_bounds as _build_month_bounds_service,
     get_catalog_models_for_brand as _get_catalog_models_for_brand_service,
     normalize_commission_matrix_general as _normalize_commission_matrix_general_service,
     normalize_commission_matrix_models as _normalize_commission_matrix_models_service,
     normalize_commission_matrix_volume_tiers as _normalize_commission_matrix_volume_tiers_service,
-    normalize_commission_status as _normalize_commission_status_service,
     resolve_matrix_volume_bonus_per_unit as _resolve_matrix_volume_bonus_per_unit_service,
     sale_commission_base_price as _sale_commission_base_price_service,
     sale_effective_revenue as _sale_effective_revenue_service,
@@ -268,20 +236,12 @@ from services.rbac_service import (
     ACTION_AUDIT_LOGS_READ,
     ACTION_USERS_MANAGE,
     AGENCY_SCOPED_ROLES,
-    APP_LEVEL_ROLES,
-    BRAND_SCOPED_ROLES,
     COMMISSION_APPROVER_ROLES,
     COMMISSION_MATRIX_EDITOR_ROLES,
     COMMISSION_PROPOSER_ROLES,
-    CORP_FINANCE_ROLES,
-    CORP_STRUCTURE_ROLES,
-    DEALER_GENERAL_ASSIGNABLE_ROLES,
     DEALER_GENERAL_EFFECTIVE_ROLES,
-    DEALER_LEGACY_READONLY_ROLE,
-    DEALER_SALES_ASSIGNABLE_ROLES,
     DEALER_SALES_EFFECTIVE_ROLES,
     DEALER_SELLER_ROLE,
-    DEALER_USER_MANAGER_ROLES,
     FINANCIAL_RATE_MANAGER_ROLES,
     OBJECTIVE_APPROVER_ROLES,
     OBJECTIVE_EDITOR_ROLES,
@@ -291,12 +251,7 @@ from services.rbac_service import (
     ensure_doc_scope_access as _ensure_doc_scope_access,
     get_dealer_assignable_roles as _get_dealer_assignable_roles,
     is_agency_scoped_role as _is_agency_scoped_role,
-    is_app_level_role as _is_app_level_role,
     is_brand_scoped_role as _is_brand_scoped_role,
-    is_corp_finance_role as _is_corp_finance_role,
-    is_corp_structure_role as _is_corp_structure_role,
-    is_dealer_general_effective_role as _is_dealer_general_effective_role,
-    is_dealer_sales_effective_role as _is_dealer_sales_effective_role,
     is_dealer_user_manager_role as _is_dealer_user_manager_role,
     require_action_role as _require_action_role,
     same_scope_id as _same_scope_id,
@@ -862,7 +817,7 @@ _sales_objectives_route_handlers = build_sales_objectives_route_handlers(
 
 # ============== COMMISSIONS ROUTE HANDLERS ==============
 
-_commissions_route_handlers = build_commissions_route_handlers(
+_commissions_route_handlers = build_commissions_route_handler_bundle(
     db=db,
     get_current_user=get_current_user,
     object_id_cls=ObjectId,
@@ -877,7 +832,6 @@ _commissions_route_handlers = build_commissions_route_handlers(
     get_catalog_models_for_brand=_get_catalog_models_for_brand,
     build_matrix_models_response=_build_matrix_models_response,
     to_non_negative_float=_to_non_negative_float,
-    normalize_commission_status=_normalize_commission_status_service,
     commission_matrix_editor_roles=COMMISSION_MATRIX_EDITOR_ROLES,
     commission_proposer_roles=COMMISSION_PROPOSER_ROLES,
     commission_approver_roles=COMMISSION_APPROVER_ROLES,
@@ -888,33 +842,6 @@ _commissions_route_handlers = build_commissions_route_handlers(
     dealer_general_effective_roles=DEALER_GENERAL_EFFECTIVE_ROLES,
     dealer_seller_role=DEALER_SELLER_ROLE,
     seller_role=UserRole.SELLER,
-    find_agency_by_id=_find_agency_by_id_commission_repo,
-    find_brand_by_id=_find_brand_by_id_commission_repo,
-    find_group_by_id=_find_group_by_id_commission_repo,
-    find_user_by_id=_find_user_by_id_commission_repo,
-    find_commission_matrix_by_agency=_find_commission_matrix_by_agency_repo,
-    upsert_commission_matrix_by_agency=_upsert_commission_matrix_by_agency_repo,
-    build_commission_matrix_upsert_fields=_build_commission_matrix_upsert_fields_service,
-    build_commission_rule_doc=_build_commission_rule_doc_service,
-    insert_commission_rule=_insert_commission_rule_repo,
-    list_commission_rules=_list_commission_rules_repo,
-    find_commission_rule_by_id=_find_commission_rule_by_id_repo,
-    build_commission_rule_update_fields=_build_commission_rule_update_fields_service,
-    update_commission_rule_by_id=_update_commission_rule_by_id_repo,
-    build_commission_approval_update_fields=_build_commission_approval_update_fields_service,
-    delete_commission_rule_by_id=_delete_commission_rule_by_id_repo,
-    list_active_rules_by_agency=list_active_rules_by_agency,
-    build_commission_simulator_projection=_build_commission_simulator_projection_service,
-    calculate_commission_from_rules=_calculate_commission_from_rules,
-    build_month_bounds=_build_month_bounds_service,
-    list_sales_for_closure=_list_sales_for_closure_repo,
-    build_commission_closure_snapshot=_build_commission_closure_snapshot_service,
-    find_commission_closure_by_scope=_find_commission_closure_by_scope_repo,
-    build_commission_closure_doc=_build_commission_closure_doc_service,
-    update_commission_closure_by_id=_update_commission_closure_by_id_repo,
-    find_commission_closure_by_id=_find_commission_closure_by_id_repo,
-    insert_commission_closure=_insert_commission_closure_repo,
-    list_commission_closures=_list_commission_closures_repo,
 )
 
 # ============== DASHBOARD ROUTE HANDLERS ==============
