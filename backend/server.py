@@ -1,25 +1,13 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter
 from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
 import os
 import logging
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
-from modules.auth_users_routes import AuthUsersRouteHandlers
-from modules.commissions_routes import CommissionsRouteHandlers
-from modules.dashboard_routes import DashboardRouteHandlers
-from modules.financial_rates_routes import FinancialRatesRouteHandlers
-from modules.health_routes import HealthRouteHandlers
-from modules.import_routes import ImportRouteHandlers
-from modules.inventory_routes import InventoryRouteHandlers
-from modules.organization_catalog_routes import OrganizationCatalogRouteHandlers
-from modules.price_bulletins_routes import PriceBulletinsRouteHandlers
-from modules.registry import RouteModuleHandlers, register_route_modules
-from modules.sales_routes import SalesRouteHandlers
-from modules.sales_objectives_routes import SalesObjectivesRouteHandlers
 from handlers.auth_users_handlers import build_auth_users_route_handlers
 from handlers.app_runtime_helpers import (
     configure_cors,
@@ -43,48 +31,17 @@ from handlers.inventory_runtime_helpers import build_inventory_runtime_helper_bu
 from handlers.organization_catalog_handlers import build_organization_catalog_route_handlers
 from handlers.pricing_financial_helpers import build_pricing_financial_helper_bundle
 from handlers.price_bulletins_handlers import build_price_bulletins_route_handlers
+from handlers.route_modules_builder import (
+    AppRouteHandlers,
+    RouteHandlerBundles,
+    register_all_route_modules,
+)
 from handlers.runtime_helpers import build_runtime_helper_bundle
 from handlers.sales_handlers import build_sales_route_handlers
 from handlers.sales_objectives_handlers import build_sales_objectives_route_handlers
 from handlers.vehicles_handlers import build_vehicles_route_handlers
 from schemas.api_models import (
-    AgencyCreate,
-    AgencyResponse,
-    AuditLogResponse,
-    BrandCreate,
-    BrandResponse,
-    CommissionApprovalAction,
-    CommissionClosureApprovalAction,
-    CommissionClosureCreate,
-    CommissionMatrixGeneralConfig,
-    CommissionMatrixModelConfig,
-    CommissionMatrixUpsert,
-    CommissionMatrixVolumeTierConfig,
-    CommissionRuleCreate,
-    CommissionRuleResponse,
-    CommissionSimulatorInput,
-    DashboardMonthlyCloseUpsert,
-    FinancialRateBulkApplyRequest,
-    FinancialRateCreate,
-    FinancialRateResponse,
-    GroupCreate,
-    GroupResponse,
-    PasswordResetRequest,
-    PriceBulletinBulkUpsert,
-    PriceBulletinItem,
-    SaleCreate,
-    SaleResponse,
-    SalesObjectiveApprovalAction,
-    SalesObjectiveCreate,
-    SalesObjectiveResponse,
-    UserCreate,
-    UserLogin,
-    UserResponse,
     UserRole,
-    VehicleAgingIncentiveApply,
-    VehicleCreate,
-    VehicleResponse,
-    VehicleSuggestion,
 )
 from repositories.commission_repository import (
     delete_commission_rule_by_id as _delete_commission_rule_by_id_repo,
@@ -565,17 +522,6 @@ _auth_users_route_handlers = build_auth_users_route_handlers(
     find_brand_by_id=find_brand_by_id,
     find_agency_by_id_register=find_agency_by_id,
 )
-register = _auth_users_route_handlers.register
-login = _auth_users_route_handlers.login
-logout = _auth_users_route_handlers.logout
-reset_password = _auth_users_route_handlers.reset_password
-get_me = _auth_users_route_handlers.get_me
-google_auth = _auth_users_route_handlers.google_auth
-get_users = _auth_users_route_handlers.get_users
-update_user = _auth_users_route_handlers.update_user
-delete_user = _auth_users_route_handlers.delete_user
-get_audit_logs = _auth_users_route_handlers.get_audit_logs
-get_sellers = _auth_users_route_handlers.get_sellers
 
 # ============== VEHICLE CATALOG ROUTES ==============
 
@@ -587,9 +533,6 @@ _catalog_route_handlers = build_catalog_route_handlers(
     parse_catalog_price=_parse_catalog_price,
     resolve_logo_url_for_brand=_resolve_logo_url_for_brand,
 )
-get_catalog_makes = _catalog_route_handlers.get_catalog_makes
-get_catalog_models = _catalog_route_handlers.get_catalog_models
-get_catalog_versions = _catalog_route_handlers.get_catalog_versions
 
 # ============== ORGANIZATION ROUTE HANDLERS ==============
 
@@ -640,18 +583,6 @@ _organization_catalog_route_handlers = build_organization_catalog_route_handlers
     merge_optional_float=_merge_optional_float,
     log_audit_event=log_audit_event,
 )
-create_group = _organization_catalog_route_handlers.create_group
-get_groups = _organization_catalog_route_handlers.get_groups
-get_group = _organization_catalog_route_handlers.get_group
-update_group = _organization_catalog_route_handlers.update_group
-delete_group = _organization_catalog_route_handlers.delete_group
-create_brand = _organization_catalog_route_handlers.create_brand
-get_brands = _organization_catalog_route_handlers.get_brands
-update_brand = _organization_catalog_route_handlers.update_brand
-delete_brand = _organization_catalog_route_handlers.delete_brand
-create_agency = _organization_catalog_route_handlers.create_agency
-get_agencies = _organization_catalog_route_handlers.get_agencies
-update_agency = _organization_catalog_route_handlers.update_agency
 
 # ============== FINANCIAL RATES ROUTES ==============
 
@@ -760,9 +691,6 @@ _import_route_handlers = build_import_route_handlers(
     to_non_negative_float=_to_non_negative_float,
     log_audit_event=log_audit_event,
 )
-import_organization = _import_route_handlers.import_organization
-import_vehicles = _import_route_handlers.import_vehicles
-import_sales = _import_route_handlers.import_sales
 
 # ============== VEHICLES ROUTE HANDLERS ==============
 
@@ -797,11 +725,6 @@ _vehicles_route_handlers = build_vehicles_route_handlers(
     build_vehicle_aging_suggestion=_build_vehicle_aging_suggestion,
     to_non_negative_float=_to_non_negative_float,
 )
-create_vehicle = _vehicles_route_handlers.create_vehicle
-get_vehicles = _vehicles_route_handlers.get_vehicles
-get_vehicle = _vehicles_route_handlers.get_vehicle
-apply_vehicle_aging_incentive = _vehicles_route_handlers.apply_vehicle_aging_incentive
-update_vehicle = _vehicles_route_handlers.update_vehicle
 
 # ============== FINANCIAL RATES ROUTE HANDLERS ==============
 
@@ -839,11 +762,6 @@ _financial_rates_route_handlers = build_financial_rates_route_handlers(
     update_financial_rate_by_id=_update_financial_rate_by_id_repo,
     delete_financial_rate_by_id=_delete_financial_rate_by_id_repo,
 )
-create_financial_rate = _financial_rates_route_handlers.create_financial_rate
-apply_group_default_financial_rate = _financial_rates_route_handlers.apply_group_default_financial_rate
-get_financial_rates = _financial_rates_route_handlers.get_financial_rates
-update_financial_rate = _financial_rates_route_handlers.update_financial_rate
-delete_financial_rate = _financial_rates_route_handlers.delete_financial_rate
 
 # ============== PRICE BULLETINS ROUTE HANDLERS ==============
 
@@ -872,9 +790,6 @@ _price_bulletins_route_handlers = build_price_bulletins_route_handlers(
     remove_price_bulletin=_remove_price_bulletin_service,
     object_id_cls=ObjectId,
 )
-get_price_bulletins = _price_bulletins_route_handlers.get_price_bulletins
-upsert_price_bulletins_bulk = _price_bulletins_route_handlers.upsert_price_bulletins_bulk
-delete_price_bulletin = _price_bulletins_route_handlers.delete_price_bulletin
 
 # ============== SALES ROUTE HANDLERS ==============
 
@@ -907,8 +822,6 @@ _sales_route_handlers = build_sales_route_handlers(
     validate_scope_filters=_validate_scope_filters,
     list_sales_with_enrichment=list_sales_with_enrichment,
 )
-create_sale = _sales_route_handlers.create_sale
-get_sales = _sales_route_handlers.get_sales
 
 # ============== SALES OBJECTIVES ROUTE HANDLERS ==============
 
@@ -946,11 +859,6 @@ _sales_objectives_route_handlers = build_sales_objectives_route_handlers(
     parse_catalog_price=_parse_catalog_price,
     list_price_bulletins=_list_price_bulletins_sales_objectives_repo,
 )
-create_sales_objective = _sales_objectives_route_handlers.create_sales_objective
-get_sales_objectives = _sales_objectives_route_handlers.get_sales_objectives
-get_sales_objective_suggestion = _sales_objectives_route_handlers.get_sales_objective_suggestion
-update_sales_objective = _sales_objectives_route_handlers.update_sales_objective
-approve_sales_objective = _sales_objectives_route_handlers.approve_sales_objective
 
 # ============== COMMISSIONS ROUTE HANDLERS ==============
 
@@ -1008,17 +916,6 @@ _commissions_route_handlers = build_commissions_route_handlers(
     insert_commission_closure=_insert_commission_closure_repo,
     list_commission_closures=_list_commission_closures_repo,
 )
-get_commission_matrix = _commissions_route_handlers.get_commission_matrix
-upsert_commission_matrix = _commissions_route_handlers.upsert_commission_matrix
-create_commission_rule = _commissions_route_handlers.create_commission_rule
-get_commission_rules = _commissions_route_handlers.get_commission_rules
-update_commission_rule = _commissions_route_handlers.update_commission_rule
-approve_commission_rule = _commissions_route_handlers.approve_commission_rule
-delete_commission_rule = _commissions_route_handlers.delete_commission_rule
-commission_simulator = _commissions_route_handlers.commission_simulator
-create_commission_closure = _commissions_route_handlers.create_commission_closure
-get_commission_closures = _commissions_route_handlers.get_commission_closures
-approve_commission_closure = _commissions_route_handlers.approve_commission_closure
 
 # ============== DASHBOARD ROUTE HANDLERS ==============
 
@@ -1064,13 +961,6 @@ _dashboard_route_handlers = build_dashboard_route_handlers(
     collect_vehicle_suggestions=_collect_vehicle_suggestions_service,
     build_vehicle_aging_suggestion=_build_vehicle_aging_suggestion,
 )
-get_dashboard_monthly_close = _dashboard_route_handlers["get_dashboard_monthly_close"]
-get_dashboard_monthly_close_calendar = _dashboard_route_handlers["get_dashboard_monthly_close_calendar"]
-upsert_dashboard_monthly_close = _dashboard_route_handlers["upsert_dashboard_monthly_close"]
-get_dashboard_kpis = _dashboard_route_handlers["get_dashboard_kpis"]
-get_sales_trends = _dashboard_route_handlers["get_sales_trends"]
-get_seller_performance = _dashboard_route_handlers["get_seller_performance"]
-get_vehicle_suggestions = _dashboard_route_handlers["get_vehicle_suggestions"]
 
 # ============== ROOT ROUTE ==============
 
@@ -1080,118 +970,24 @@ async def root():
 async def health():
     return {"status": "healthy"}
 
-register_route_modules(
+register_all_route_modules(
     api_router,
-    RouteModuleHandlers(
-        auth_users=AuthUsersRouteHandlers(
-            register=register,
-            login=login,
-            logout=logout,
-            reset_password=reset_password,
-            get_me=get_me,
-            google_auth=google_auth,
-            get_users=get_users,
-            update_user=update_user,
-            delete_user=delete_user,
-            get_audit_logs=get_audit_logs,
-            get_sellers=get_sellers,
-        ),
-        organization_catalog=OrganizationCatalogRouteHandlers(
-            GroupCreate=GroupCreate,
-            BrandCreate=BrandCreate,
-            AgencyCreate=AgencyCreate,
-            create_group=create_group,
-            get_groups=get_groups,
-            get_group=get_group,
-            update_group=update_group,
-            delete_group=delete_group,
-            create_brand=create_brand,
-            get_brands=get_brands,
-            update_brand=update_brand,
-            delete_brand=delete_brand,
-            create_agency=create_agency,
-            get_agencies=get_agencies,
-            update_agency=update_agency,
-            get_catalog_makes=get_catalog_makes,
-            get_catalog_models=get_catalog_models,
-            get_catalog_versions=get_catalog_versions,
-        ),
-        inventory=InventoryRouteHandlers(
-            VehicleCreate=VehicleCreate,
-            VehicleAgingIncentiveApply=VehicleAgingIncentiveApply,
-            create_vehicle=create_vehicle,
-            get_vehicles=get_vehicles,
-            get_vehicle=get_vehicle,
-            apply_vehicle_aging_incentive=apply_vehicle_aging_incentive,
-            update_vehicle=update_vehicle,
-        ),
-        health=HealthRouteHandlers(
-            root=root,
-            health=health,
-        ),
-        imports=ImportRouteHandlers(
-            import_organization=import_organization,
-            import_vehicles=import_vehicles,
-            import_sales=import_sales,
-        ),
-        sales=SalesRouteHandlers(
-            SaleCreate=SaleCreate,
-            create_sale=create_sale,
-            get_sales=get_sales,
-        ),
-        price_bulletins=PriceBulletinsRouteHandlers(
-            PriceBulletinBulkUpsert=PriceBulletinBulkUpsert,
-            get_price_bulletins=get_price_bulletins,
-            upsert_price_bulletins_bulk=upsert_price_bulletins_bulk,
-            delete_price_bulletin=delete_price_bulletin,
-        ),
-        sales_objectives=SalesObjectivesRouteHandlers(
-            SalesObjectiveCreate=SalesObjectiveCreate,
-            SalesObjectiveApprovalAction=SalesObjectiveApprovalAction,
-            create_sales_objective=create_sales_objective,
-            get_sales_objectives=get_sales_objectives,
-            get_sales_objective_suggestion=get_sales_objective_suggestion,
-            update_sales_objective=update_sales_objective,
-            approve_sales_objective=approve_sales_objective,
-        ),
-        dashboard=DashboardRouteHandlers(
-            DashboardMonthlyCloseUpsert=DashboardMonthlyCloseUpsert,
-            get_dashboard_monthly_close=get_dashboard_monthly_close,
-            get_dashboard_monthly_close_calendar=get_dashboard_monthly_close_calendar,
-            upsert_dashboard_monthly_close=upsert_dashboard_monthly_close,
-            get_dashboard_kpis=get_dashboard_kpis,
-            get_sales_trends=get_sales_trends,
-            get_seller_performance=get_seller_performance,
-            get_vehicle_suggestions=get_vehicle_suggestions,
-        ),
-        financial_rates=FinancialRatesRouteHandlers(
-            FinancialRateCreate=FinancialRateCreate,
-            FinancialRateBulkApplyRequest=FinancialRateBulkApplyRequest,
-            create_financial_rate=create_financial_rate,
-            apply_group_default_financial_rate=apply_group_default_financial_rate,
-            get_financial_rates=get_financial_rates,
-            update_financial_rate=update_financial_rate,
-            delete_financial_rate=delete_financial_rate,
-        ),
-        commissions=CommissionsRouteHandlers(
-            CommissionMatrixUpsert=CommissionMatrixUpsert,
-            CommissionRuleCreate=CommissionRuleCreate,
-            CommissionApprovalAction=CommissionApprovalAction,
-            CommissionSimulatorInput=CommissionSimulatorInput,
-            CommissionClosureCreate=CommissionClosureCreate,
-            CommissionClosureApprovalAction=CommissionClosureApprovalAction,
-            get_commission_matrix=get_commission_matrix,
-            upsert_commission_matrix=upsert_commission_matrix,
-            create_commission_rule=create_commission_rule,
-            get_commission_rules=get_commission_rules,
-            update_commission_rule=update_commission_rule,
-            approve_commission_rule=approve_commission_rule,
-            delete_commission_rule=delete_commission_rule,
-            commission_simulator=commission_simulator,
-            create_commission_closure=create_commission_closure,
-            get_commission_closures=get_commission_closures,
-            approve_commission_closure=approve_commission_closure,
-        ),
+    bundles=RouteHandlerBundles(
+        auth_users=_auth_users_route_handlers,
+        organization_catalog=_organization_catalog_route_handlers,
+        catalog=_catalog_route_handlers,
+        inventory=_vehicles_route_handlers,
+        imports=_import_route_handlers,
+        sales=_sales_route_handlers,
+        price_bulletins=_price_bulletins_route_handlers,
+        sales_objectives=_sales_objectives_route_handlers,
+        dashboard=_dashboard_route_handlers,
+        financial_rates=_financial_rates_route_handlers,
+        commissions=_commissions_route_handlers,
+    ),
+    app_handlers=AppRouteHandlers(
+        root=root,
+        health=health,
     ),
 )
 
