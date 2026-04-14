@@ -32,6 +32,7 @@ from handlers.app_runtime_helpers import (
 from handlers.app_config_helpers import build_app_config_helper_bundle
 from handlers.auth_runtime_helpers import build_auth_runtime_helper_bundle
 from handlers.catalog_handlers import build_catalog_route_handlers
+from handlers.catalog_runtime_helpers import build_catalog_runtime_helper_bundle
 from handlers.commission_catalog_helpers import build_commission_catalog_helper_bundle
 from handlers.commissions_handlers import build_commissions_route_handlers
 from handlers.core_helpers import build_core_helper_bundle
@@ -443,29 +444,35 @@ _core_helper_bundle = build_core_helper_bundle(
 serialize_doc = _core_helper_bundle.serialize_doc
 log_audit_event = _core_helper_bundle.log_audit_event
 
-_normalize_catalog_text = _normalize_catalog_text_service
-_parse_catalog_year = _parse_catalog_year_service
-_parse_catalog_price = _parse_catalog_price_service
-_resolve_agency_location = _resolve_agency_location_service
-_compose_structured_agency_address = _compose_structured_agency_address_service
-_merge_optional_text = _merge_optional_text_service
-_merge_optional_float = _merge_optional_float_service
-
-async def backfill_agency_locations() -> Dict[str, int]:
-    return await _backfill_agency_locations_service(db=db)
-
-def _build_catalog_tree_from_source(all_years: bool = False) -> Dict[str, Any]:
-    return _build_catalog_tree_from_source_service(
-        source_path=get_catalog_source_path(),
-        model_year=get_catalog_model_year(),
-        all_years=all_years,
-    )
-
-_find_catalog_make = _find_catalog_make_service
-_find_catalog_model = _find_catalog_model_service
-
-def _ensure_allowed_model_year(year: int) -> None:
-    _ensure_allowed_model_year_service(year=year, allowed_year=get_catalog_model_year())
+_catalog_runtime_helper_bundle = build_catalog_runtime_helper_bundle(
+    db=db,
+    get_catalog_source_path=get_catalog_source_path,
+    get_catalog_model_year=get_catalog_model_year,
+    normalize_catalog_text_service=_normalize_catalog_text_service,
+    parse_catalog_year_service=_parse_catalog_year_service,
+    parse_catalog_price_service=_parse_catalog_price_service,
+    resolve_agency_location_service=_resolve_agency_location_service,
+    compose_structured_agency_address_service=_compose_structured_agency_address_service,
+    merge_optional_text_service=_merge_optional_text_service,
+    merge_optional_float_service=_merge_optional_float_service,
+    backfill_agency_locations_service=_backfill_agency_locations_service,
+    build_catalog_tree_from_source_service=_build_catalog_tree_from_source_service,
+    find_catalog_make_service=_find_catalog_make_service,
+    find_catalog_model_service=_find_catalog_model_service,
+    ensure_allowed_model_year_service=_ensure_allowed_model_year_service,
+)
+_normalize_catalog_text = _catalog_runtime_helper_bundle.normalize_catalog_text
+_parse_catalog_year = _catalog_runtime_helper_bundle.parse_catalog_year
+_parse_catalog_price = _catalog_runtime_helper_bundle.parse_catalog_price
+_resolve_agency_location = _catalog_runtime_helper_bundle.resolve_agency_location
+_compose_structured_agency_address = _catalog_runtime_helper_bundle.compose_structured_agency_address
+_merge_optional_text = _catalog_runtime_helper_bundle.merge_optional_text
+_merge_optional_float = _catalog_runtime_helper_bundle.merge_optional_float
+backfill_agency_locations = _catalog_runtime_helper_bundle.backfill_agency_locations
+_build_catalog_tree_from_source = _catalog_runtime_helper_bundle.build_catalog_tree_from_source
+_find_catalog_make = _catalog_runtime_helper_bundle.find_catalog_make
+_find_catalog_model = _catalog_runtime_helper_bundle.find_catalog_model
+_ensure_allowed_model_year = _catalog_runtime_helper_bundle.ensure_allowed_model_year
 
 # ============== PRICING / FINANCIAL HELPER BUNDLE ==============
 
