@@ -37,6 +37,7 @@ from handlers.core_helpers import build_core_helper_bundle
 from handlers.dashboard_handlers import build_dashboard_route_handlers
 from handlers.financial_rates_handlers import build_financial_rates_route_handlers
 from handlers.import_handlers import build_import_route_handlers
+from handlers.inventory_runtime_helpers import build_inventory_runtime_helper_bundle
 from handlers.organization_catalog_handlers import build_organization_catalog_route_handlers
 from handlers.pricing_financial_helpers import build_pricing_financial_helper_bundle
 from handlers.price_bulletins_handlers import build_price_bulletins_route_handlers
@@ -659,40 +660,20 @@ DAYS_PER_MONTH_FOR_RATE = 30
 _coerce_utc_datetime = _coerce_utc_datetime_service
 
 
-async def calculate_vehicle_financial_cost_in_period(
-    vehicle: dict,
-    period_start: datetime,
-    period_end: datetime,
-) -> float:
-    return await _calculate_vehicle_financial_cost_in_period_service(
-        vehicle,
-        period_start,
-        period_end,
-        resolve_effective_rate_components_for_vehicle=_resolve_effective_rate_components_for_vehicle,
-        days_per_month_for_rate=DAYS_PER_MONTH_FOR_RATE,
-    )
-
-
-async def calculate_vehicle_financial_cost(vehicle: dict) -> float:
-    """Calculate financial cost using monthly rate (TIIE mensual + spread mensual)."""
-    return await _calculate_vehicle_financial_cost_service(
-        vehicle,
-        resolve_effective_rate_components_for_vehicle=_resolve_effective_rate_components_for_vehicle,
-        days_per_month_for_rate=DAYS_PER_MONTH_FOR_RATE,
-    )
-
-async def enrich_vehicle(vehicle: dict) -> dict:
-    return await _enrich_vehicle_service(
-        vehicle,
-        serialize_doc=serialize_doc,
-        find_agency_by_id=lambda agency_id: db.agencies.find_one({"_id": ObjectId(agency_id)}),
-        find_brand_by_id=lambda brand_id: db.brands.find_one({"_id": ObjectId(brand_id)}),
-        calculate_vehicle_financial_cost=calculate_vehicle_financial_cost,
-        find_latest_sale_for_vehicle=lambda vehicle_id: db.sales.find_one({"vehicle_id": vehicle_id}, sort=[("sale_date", -1)]),
-        sale_effective_revenue=_sale_effective_revenue,
-        is_valid_object_id=ObjectId.is_valid,
-        find_user_by_id=lambda user_id: db.users.find_one({"_id": ObjectId(user_id)}),
-    )
+_inventory_runtime_helper_bundle = build_inventory_runtime_helper_bundle(
+    db=db,
+    object_id_cls=ObjectId,
+    days_per_month_for_rate=DAYS_PER_MONTH_FOR_RATE,
+    resolve_effective_rate_components_for_vehicle=_resolve_effective_rate_components_for_vehicle,
+    calculate_vehicle_financial_cost_in_period_service=_calculate_vehicle_financial_cost_in_period_service,
+    calculate_vehicle_financial_cost_service=_calculate_vehicle_financial_cost_service,
+    enrich_vehicle_service=_enrich_vehicle_service,
+    serialize_doc=serialize_doc,
+    sale_effective_revenue=_sale_effective_revenue_service,
+)
+calculate_vehicle_financial_cost_in_period = _inventory_runtime_helper_bundle.calculate_vehicle_financial_cost_in_period
+calculate_vehicle_financial_cost = _inventory_runtime_helper_bundle.calculate_vehicle_financial_cost
+enrich_vehicle = _inventory_runtime_helper_bundle.enrich_vehicle
 
 # ============== COMMISSION RULES ROUTES ==============
 
