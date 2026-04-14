@@ -22,7 +22,7 @@ from handlers.catalog_runtime_helpers import build_catalog_runtime_helper_bundle
 from handlers.commission_catalog_helpers import build_commission_catalog_helper_bundle
 from handlers.commissions_route_wiring import build_commissions_route_handler_bundle
 from handlers.core_helpers import build_core_helper_bundle
-from handlers.dashboard_handlers import build_dashboard_route_handlers
+from handlers.dashboard_route_wiring import build_dashboard_route_handler_bundle
 from handlers.financial_rates_handlers import build_financial_rates_route_handlers
 from handlers.import_handlers import build_import_route_handlers
 from handlers.inventory_runtime_helpers import build_inventory_runtime_helper_bundle
@@ -42,21 +42,10 @@ from schemas.api_models import (
     UserRole,
 )
 from repositories.dashboard_repository import (
-    count_sales as _count_sales_dashboard_repo,
-    count_users as _count_users_dashboard_repo,
     find_agency_group_id,
     find_brand_group_id,
-    find_user_by_id as _find_user_by_id_dashboard_repo,
     find_monthly_close,
-    list_agencies_by_brand_id as _list_agencies_by_brand_id_dashboard_repo,
-    list_agencies_by_group_id as _list_agencies_by_group_id_dashboard_repo,
-    list_global_monthly_closes_by_year,
-    list_sales as _list_sales_dashboard_repo,
-    list_sales_objectives as _list_sales_objectives_dashboard_repo,
     list_similar_sold_vehicles as _list_similar_sold_vehicles_dashboard_repo,
-    list_vehicles as _list_vehicles_dashboard_repo,
-    list_vehicles_by_ids as _list_vehicles_by_ids_dashboard_repo,
-    upsert_global_monthly_close,
 )
 from repositories.financial_rates_repository import (
     delete_financial_rate_by_id as _delete_financial_rate_by_id_repo,
@@ -131,14 +120,7 @@ from services.financial_rates_service import (
     resolve_effective_rate_components as _resolve_effective_rate_components_service,
 )
 from services.dashboard_service import (
-    build_dashboard_monthly_close_calendar as _build_dashboard_monthly_close_calendar_service,
-    build_dashboard_monthly_close_response as _build_dashboard_monthly_close_response_service,
     build_vehicle_aging_suggestion as _build_vehicle_aging_suggestion_service,
-    collect_vehicle_suggestions as _collect_vehicle_suggestions_service,
-    compute_dashboard_kpis as _compute_dashboard_kpis_service,
-    compute_sales_trends as _compute_sales_trends_service,
-    compute_seller_performance as _compute_seller_performance_service,
-    empty_dashboard_kpis_response as _empty_dashboard_kpis_response_service,
     resolve_dashboard_scope_group_id as _resolve_dashboard_scope_group_id_service,
 )
 from services.import_service import (
@@ -156,10 +138,6 @@ from services.sales_objectives_service import (
 )
 from services.operational_calendar_service import (
     add_months_ym as _add_months_ym,
-    compute_operational_day_profile as _compute_operational_day_profile,
-    decrement_month as _decrement_month,
-    mexico_lft_holidays_by_month as _mexico_lft_holidays_by_month,
-    resolve_effective_objective_units as _resolve_effective_objective_units,
 )
 from services.organization_cleanup_service import (
     build_brand_delete_context,
@@ -846,7 +824,7 @@ _commissions_route_handlers = build_commissions_route_handler_bundle(
 
 # ============== DASHBOARD ROUTE HANDLERS ==============
 
-_dashboard_route_handlers = build_dashboard_route_handlers(
+_dashboard_route_handlers = build_dashboard_route_handler_bundle(
     db=db,
     get_current_user=get_current_user,
     validate_scope_filters=_validate_scope_filters,
@@ -854,38 +832,16 @@ _dashboard_route_handlers = build_dashboard_route_handlers(
     scope_query_has_access=_scope_query_has_access,
     resolve_dashboard_scope_group_id=_resolve_dashboard_scope_group_id,
     find_dashboard_monthly_close=_find_dashboard_monthly_close,
-    build_dashboard_monthly_close_response=_build_dashboard_monthly_close_response_service,
-    mexico_lft_holidays_by_month=_mexico_lft_holidays_by_month,
-    list_global_monthly_closes_by_year=list_global_monthly_closes_by_year,
-    build_dashboard_monthly_close_calendar=_build_dashboard_monthly_close_calendar_service,
-    upsert_global_monthly_close=upsert_global_monthly_close,
     add_months_ym=_add_months_ym,
     log_audit_event=log_audit_event,
     app_admin_role=UserRole.APP_ADMIN,
     user_role_seller=UserRole.SELLER,
-    empty_dashboard_kpis_response=_empty_dashboard_kpis_response_service,
-    compute_dashboard_kpis=_compute_dashboard_kpis_service,
-    list_vehicles=_list_vehicles_dashboard_repo,
-    list_sales=_list_sales_dashboard_repo,
-    list_vehicles_by_ids=_list_vehicles_by_ids_dashboard_repo,
-    list_agencies_by_brand_id=_list_agencies_by_brand_id_dashboard_repo,
-    list_agencies_by_group_id=_list_agencies_by_group_id_dashboard_repo,
-    count_users=_count_users_dashboard_repo,
-    count_sales=_count_sales_dashboard_repo,
     enrich_vehicle=enrich_vehicle,
     calculate_vehicle_financial_cost_in_period=calculate_vehicle_financial_cost_in_period,
     sale_effective_revenue=_sale_effective_revenue,
-    compute_sales_trends=_compute_sales_trends_service,
     objective_approved=OBJECTIVE_APPROVED,
     objective_pending=OBJECTIVE_PENDING,
-    list_sales_objectives=_list_sales_objectives_dashboard_repo,
     coerce_utc_datetime=_coerce_utc_datetime,
-    decrement_month=_decrement_month,
-    compute_operational_day_profile=_compute_operational_day_profile,
-    resolve_effective_objective_units=_resolve_effective_objective_units,
-    compute_seller_performance=_compute_seller_performance_service,
-    find_user_by_id=_find_user_by_id_dashboard_repo,
-    collect_vehicle_suggestions=_collect_vehicle_suggestions_service,
     build_vehicle_aging_suggestion=_build_vehicle_aging_suggestion,
 )
 
